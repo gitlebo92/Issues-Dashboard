@@ -30,6 +30,7 @@ net_array = []
 rd_down = []
 fisheyes = []
 missing = []
+missing_zab = []
 false_positive = []
 netsheet = resource_path("net_sheet.csv")
 mapsheet = os.path.join(BASE_DIR, "map_sheet.csv")
@@ -71,7 +72,7 @@ def main():
                     for row in reader:
                         all_battery_units_mapped.append(row)
                 continue    
-        validate_reports_zab()
+
 
         print("Command menu: ")
         print("1. Check if unit is installed in VRM")
@@ -86,9 +87,10 @@ def main():
         print("10. Search C:\\Temp directory for fisheye snapshots of a specific unit for solar panel analysis")
         print("11. Update unit battery health list")
         print("12. Screenshot fisheye on low battery units")
+        print("13. Compare Zabbix and mesh outages for unique units, then check for false positives")
     
         
-        cmd = input("Enter a number 1-12: ")
+        cmd = input("Enter a number 1-13: ")
         if cmd == "1":
             install_checker()
         elif cmd == "2":
@@ -129,6 +131,9 @@ def main():
             print('Screenshotting fisheye on low battery units and saving to C:\Temp...')
             low_battery_rd_fisheye_tool()
             low_battery_fisheye_screenshotter()
+        elif cmd == "13":
+            compare_zabbix()
+            validate_reports_zab()
 
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
@@ -209,17 +214,81 @@ def ping_scrypted(unit):
                 return result.stdout 
     
 def validate_reports_zab():
-    zabbix_array = []
-    zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
-    with open(zabbix_path, 'r', newline='') as csvfile:
-        csvreader = csv.reader(csvfile)
-        for line in csvreader:
-            zabbix_array.append(line)
-        for line in zabbix_array:
-            if line[4][-6:].lower() == "router":
-                print(line[4])
-                output = ping_router(line[4][:6])
-                print(output)
+        false_positives = []
+    # zabbix_array = []
+    # zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
+    # with open(zabbix_path, 'r', newline='') as csvfile:
+    #     csvreader = csv.reader(csvfile)
+    #     for line in csvreader:
+    #         zabbix_array.append(line)
+        for line in missing_zab:
+            print(line)
+            if line[-6:].lower() == "router":
+                host = line
+                unit = line[:6]
+                output = ping_router(unit)
+                #output = output.splitlines()
+                for line in output.splitlines():
+                    print(line)
+                #for line in output:
+                if "Average" in output:
+                    print(f'False positive unit: {host}')
+                    false_positives.append(host)
+
+            elif line[-6:].lower() == "switch":
+                host = line
+                unit = line[:6]
+                output = ping_switch(unit)
+                #output = output.splitlines()
+                for line in output.splitlines():
+                    print(line)
+                #for line in output:
+                if "Average" in output:
+                    print(f'False positive unit: {host}')
+                    false_positives.append(host)
+
+            elif line[-7:].lower() == "speaker":
+                host = line
+                unit = line[:6]
+                output = ping_speaker(unit)
+                #output = output.splitlines()
+                for line in output.splitlines():
+                    print(line)
+                #for line in output:
+                if "Average" in output:
+                    print(f'False positive unit: {host}')
+                    false_positives.append(host)       
+       
+            elif line[-3:].lower() == "pve":
+                host = line
+                unit = line[:6]
+                output = ping_pve(unit)
+                #output = output.splitlines()
+                for line in output.splitlines():
+                    print(line)
+                #for line in output:
+                if "Average" in output:
+                    print(f'False positive unit: {host}')
+                    false_positives.append(host)
+
+            elif line[-2:].lower() == "vm":
+                host = line
+                unit = line[:6]
+                output = ping_scrypted(unit)
+                #output = output.splitlines()
+                for line in output.splitlines():
+                    print(line)
+                #for line in output:
+                if "Average" in output:
+                    print(f'False positive unit: {host}')
+                    false_positives.append(host)
+
+
+
+
+        print('False positives: ')
+        for line in false_positives:
+            print(line)
 
 def validate_reports_mesh():
     counter = 0
@@ -306,7 +375,10 @@ def compare_zabbix():
                 break
         if not found:
             missing.append(zab)
-    for line in missing:
+            missing_zab.append(zab)
+    #for line in missing:
+        #print(line)
+    for line in missing_zab:
         print(line)
 
     lenmis = len(missing)
