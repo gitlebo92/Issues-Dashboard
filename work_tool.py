@@ -197,20 +197,20 @@ def ping_switch(unit):
 def ping_nuc(unit):
     for row in net_array:
         if unit.upper() == row[0].upper():
-                router = row[3]
-                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                nuc = row[3]
+                result = subprocess.run(['ping', '-n', '4', nuc], text=True, capture_output=True)
                 return result.stdout 
 def ping_pve(unit):
     for row in net_array:
         if unit.upper() == row[0].upper():
-                router = row[11]
-                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                pve = row[11]
+                result = subprocess.run(['ping', '-n', '4', pve], text=True, capture_output=True)
                 return result.stdout
 def ping_scrypted(unit):
     for row in net_array:
         if unit.upper() == row[0].upper():
-                router = row[12]
-                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                scrypted = row[12]
+                result = subprocess.run(['ping', '-n', '4', scrypted], text=True, capture_output=True)
                 return result.stdout 
     
 def validate_reports_zab():
