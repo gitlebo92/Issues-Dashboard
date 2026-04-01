@@ -70,8 +70,9 @@ def main():
                     reader = csv.DictReader(csvfile)
                     for row in reader:
                         all_battery_units_mapped.append(row)
-                continue
-                
+                continue    
+        validate_reports_zab()
+
         print("Command menu: ")
         print("1. Check if unit is installed in VRM")
         print("2. Check individual trailer battery health using its MU#")
@@ -150,7 +151,7 @@ def clear_old_reports():
     except Exception as e:
         print(f'Failed to remove: {e}')
     print('Beginning outage validation')
-    validate_reports()
+    
 
 def file_search(unit, root=r'C:\Temp'):
     results = []
@@ -166,7 +167,61 @@ def file_search(unit, root=r'C:\Temp'):
             print(f'{file}')
     return results
 
-def validate_reports():
+
+def ping_router(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                router = row[1]
+                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                return result.stdout       
+
+def ping_speaker(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                speaker = row[4]
+                result = subprocess.run(['ping', '-n', '4', speaker], text=True, capture_output=True)
+                return result.stdout 
+    
+def ping_switch(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                switch = row[2]
+                result = subprocess.run(['ping', '-n', '4', switch], text=True, capture_output=True)
+                return result.stdout 
+    
+def ping_nuc(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                router = row[3]
+                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                return result.stdout 
+def ping_pve(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                router = row[11]
+                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                return result.stdout
+def ping_scrypted(unit):
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+                router = row[12]
+                result = subprocess.run(['ping', '-n', '4', router], text=True, capture_output=True)
+                return result.stdout 
+    
+def validate_reports_zab():
+    zabbix_array = []
+    zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
+    with open(zabbix_path, 'r', newline='') as csvfile:
+        csvreader = csv.reader(csvfile)
+        for line in csvreader:
+            zabbix_array.append(line)
+        for line in zabbix_array:
+            if line[4][-6:].lower() == "router":
+                print(line[4])
+                output = ping_router(line[4][:6])
+                print(output)
+
+def validate_reports_mesh():
     counter = 0
     print('Checking connectivity on missing units...')
     with open(netsheet, "r") as csvfile:
@@ -219,6 +274,46 @@ def validate_reports():
             print(line)
         
 
+def compare_zabbix():
+    zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
+    mesh_outage = os.path.join(os.path.expanduser("~"), "Downloads", "filtered_mesh_vpn.csv")
+
+    mesh_array = []
+    zabbix_array = []
+    missing = []
+
+    with open(zabbix_path, 'r', newline='') as csvfile:
+        csvreader = csv.reader(csvfile)
+        for row in csvreader:
+            if row[4][:2].lower() == 'rd' or row[4][:2].lower() == 'mu' or row[4][:2].lower() == 'fd':
+                print(f'Appended {row[4]}')
+                zabbix_array.append(row[4])
+       
+
+    with open(mesh_outage, 'r', newline='') as csvfile:
+        csvreader = csv.reader(csvfile)
+        for row in csvreader:
+            mesh_array.append(row[0])
+        
+    zablen = len(zabbix_array)
+    meshlen = len(mesh_array)
+    print(f'Zabbix list length: {zablen} \n Mesh list length: {meshlen}')
+    for zab in zabbix_array:
+        found = False
+        for mesh in mesh_array:
+            if zab[:6] in mesh:
+                found = True
+                break
+        if not found:
+            missing.append(zab)
+    for line in missing:
+        print(line)
+
+    lenmis = len(missing)
+    print(f'{lenmis} Units discovered on zabbix that werent found on mesh')
+
+
+    
 def compare_reports():
     mesh_outage = os.path.join(os.path.expanduser("~"), "Downloads", "filtered_mesh_vpn.csv")
     erp_export = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
@@ -256,7 +351,8 @@ def compare_reports():
             print(row)
     print('Deleting old reports')
     clear_old_reports()
-    validate_reports()
+    print('reports cleared, validating new report..')
+    validate_reports_mesh()
 
 def generate_net_array():
     with open(netsheet, "r", newline='') as csvfile:
@@ -539,4 +635,5 @@ def all_battery_list():
 
 if __name__ == "__main__":
     main()
+
 
