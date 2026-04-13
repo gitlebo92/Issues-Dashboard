@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+
+
+# PyInstaller
+build/
+#dist/
+*.spec
+
+# Sensitive / generated
+.env
+map_sheet.csv
+net_sheet.csv
+
+# OS junk
+Thumbs.db
+.DS_Store
