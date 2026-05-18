@@ -591,7 +591,7 @@ def install_checker():
                         if device["name"] == "Gateway":
                             lastseen = device["lastConnection"]
                             lastseen = datetime.fromtimestamp(lastseen).strftime("%H:%M:%S on %m/%d/%Y")
-                            print(f'last seen at {lastseen}') 
+                            print(f'victron last seen at {lastseen}') 
                     break
 
             if exists == False:
