@@ -68,6 +68,7 @@ class Zabbix_Tool_Kit:
                 "output": ["eventid", "severity", "objectid"],
                 "selectRelatedObject": ["triggerid", "description"],
                 "groupids": host_dict[unit],
+                "value": 1,
                 "filter": {
                     "severity": 4,
                 }                
@@ -95,9 +96,12 @@ class Zabbix_Tool_Kit:
         return trigger_id
 
     def query_zabbix_events(self):
-        unit, host_dict = self.grab_groupid()
-        return self.grab_triggerids(unit, host_dict)            
-
+        try:
+            unit, host_dict = self.grab_groupid()
+            return self.grab_triggerids(unit, host_dict)            
+        except:
+            print("Unit not found")
+            return
 if __name__ == '__main__':
     zbx = Zabbix_Tool_Kit()
     check = zbx.query_zabbix_events()

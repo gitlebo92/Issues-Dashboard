@@ -366,10 +366,8 @@ def validate_reports_mesh():
         print(line)        
 
 def compare_zabbix():
-
     zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
     mesh_outage = os.path.join(os.path.expanduser("~"), "Downloads", "filtered_mesh_vpn.csv")
-
     mesh_array = []
     zabbix_array = []
     missing = []
@@ -380,6 +378,7 @@ def compare_zabbix():
                 if row[4][:2].lower() == 'rd' or row[4][:2].lower() == 'mu' or row[4][:2].lower() == 'fd':
                     print(f'Appended {row[4]}')
                     zabbix_array.append(row[4])
+    
     except Exception as e:
         print(f'Task failed: {e}')    
         return
@@ -568,7 +567,7 @@ def install_checker():
         "idUser": f"{idUser}",
         "X-Authorization": f"Token {api_token}"
     }
-
+    
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         while True:
@@ -581,8 +580,18 @@ def install_checker():
                 exists = False
                 if record.get("name")[-4:] == unit[-4:] or record.get("name")[-4:] == unit[-4:]:
                     print('Unit is added to VRM')
-                    print(f"Site ID for {unit} is {record.get("idSite")}")
+                    print(f"Site ID for {unit} is {record.get('idSite')}")
+                    #print(record)
+                    siteId = record.get('idSite')
                     exists = True        
+                    url2 = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/system-overview"
+                    response2 = requests.get(url2, headers=headers)
+                    data2 = response2.json()
+                    for device in data2["records"]["devices"]:
+                        if device["name"] == "Gateway":
+                            lastseen = device["lastConnection"]
+                            lastseen = datetime.fromtimestamp(lastseen).strftime("%H:%M:%S on %m/%d/%Y")
+                            print(f'last seen at {lastseen}') 
                     break
 
             if exists == False:
