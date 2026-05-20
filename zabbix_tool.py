@@ -82,7 +82,7 @@ class Zabbix_Tool_Kit:
         
         data = response_problems.get("result", [])
         #print('Response problem =', response_problems)
-        print('data =',data)
+        #print('data =',data)
         if len(data) < 1:
             print("No events found")
             return
@@ -90,7 +90,7 @@ class Zabbix_Tool_Kit:
         for event in data:
              if "relatedObject" in event:
                 trigger_id.append(event["relatedObject"]["triggerid"])
-                print(f'Added {event["relatedObject"]["triggerid"]} to trigger id array for host matching...')
+                #print(f'Added {event["relatedObject"]["triggerid"]} to trigger id array for host matching...')
                 print(f'{unit} - ' + f'{event["relatedObject"]["description"]}')
 
         return trigger_id

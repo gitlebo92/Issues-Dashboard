@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Outage Filter</title>
+</head>
+<body>
+
+    <h1>Outage Filter</h1>
+
+<form method="POST" action="/outage_filter/results" enctype="multipart/form-data">
+
+        <label>Mesh CSV:</label>
+        <input type="file" name="mesh_file" required>
+
+        <br><br>
+
+        <label>Issue CSV:</label>
+        <input type="file" name="issue_file" required>
+
+        <br><br>
+
+        <button type="submit">
+            Run Filter
+        </button>
+
+    </form>
+
+</body>
+</html>

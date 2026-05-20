@@ -128,6 +128,7 @@ def main():
                     get_rd_battery(unit)
         elif cmd == "7":
             compare_reports()
+            validate_reports_mesh()
         elif cmd == "8":
                 all_unit_battery_health()
                 with open(mapsheet, 'w', newline='') as csvfile:
@@ -324,8 +325,10 @@ def validate_reports_zab():
 def validate_reports_mesh():
     nuc_down = []
     stale_vpn = []
+    missing2 = []
 
     print('Checking connectivity on missing units...')
+    print('Current missing list:', missing)
     for unit in missing:
             for row in net_array:
                 if unit == row[0] and unit not in false_mu:
@@ -353,6 +356,7 @@ def validate_reports_mesh():
                                 stale_vpn.append(unit)                           
                             else:        
                                 print(f"NUC and router are offline. {code}")
+                                missing2.append(unit)
                                 
     print("New adjusted missing list:")
     for line in missing:
@@ -363,7 +367,8 @@ def validate_reports_mesh():
         print(line)
     print("Stale VPNs")
     for line in stale_vpn:
-        print(line)        
+        print(line)
+    return missing2, nuc_down, stale_vpn        
 
 def compare_zabbix():
     zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
@@ -410,30 +415,27 @@ def compare_zabbix():
 
     lenmis = len(missing)
     print(f'{lenmis} Units discovered on zabbix that werent found on mesh')
-
-
     
-def compare_reports():
-    mesh_outage = os.path.join(os.path.expanduser("~"), "Downloads", "filtered_mesh_vpn.csv")
-    erp_export = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
-
+def compare_reports(issue_path, mesh_path):
+    missing.clear()
     mesh_array = []
     erp_array = []
-    #missing = []
+    
     try:
-        with open(mesh_outage, 'r', newline='') as csvfile:
+        with open(mesh_path, 'r', newline='') as csvfile:
             linereader = csv.reader(csvfile)
             for line in linereader:
-                mesh_array.append(line[0])
+                if line and len(line) > 0:
+                    mesh_array.append(line[0])
     except Exception as e:
         print(f'Task failed: {e}')
         return
     try:
-        with open(erp_export, 'r', newline='') as csvfile:
+        with open(issue_path, 'r', newline='') as csvfile:
             linereader = csv.reader(csvfile)
             for line in linereader:
                 #print(line[1])
-                if line[1] != 'Subject':
+                if line and len(line) > 1 and line[1] != 'Subject':
                     erp_array.append(line[1])
     except Exception as e:
         print(f'Task failed: {e}')
@@ -456,7 +458,8 @@ def compare_reports():
     print('Deleting old reports')
     clear_old_reports()
     print('reports cleared, validating new report..')
-    validate_reports_mesh()
+    return missing
+    #validate_reports_mesh()
 
 def print_net_array():
     for row in net_array:

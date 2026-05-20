@@ -1,16 +1,73 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Victron Checker</title>
+    <meta charset="UTF-8">
+    <title>Dashboard Hub</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: 30px;
+            font-size: 28px;
+        }
+
+        .links {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        a {
+            text-decoration: none;
+            color: white;
+            background: #2563eb;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: 0.2s;
+            width: 220px;
+            margin: 0 auto;
+        }
+
+        a:hover {
+            background: #1d4ed8;
+            transform: scale(1.03);
+        }
+
+        .card {
+            background: #1e293b;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+        }
+    </style>
 </head>
 <body>
 
-    <h2>Check VRM Unit</h2>
+<div class="container">
+    <div class="card">
+        <h1>System Dashboard</h1>
 
-    <form action="/victron" method="POST">
-        <input type="text" name="unit" placeholder="MU8088" required>
-        <button type="submit">Check</button>
-    </form>
+        <div class="links">
+            <a href="/victron">Victron VRM Checker</a>
+            <a href="/zabbix">Zabbix Monitor</a>
+            <a href="/outage_filter">Outage Filter</a>
+        </div>
+    </div>
+</div>
 
 </body>
 </html>
