@@ -64,8 +64,8 @@ def install_checker():
     return "Unit not found in VRM"
 @app.route("/outage_filter/results", methods=["POST"])
 def outage_filter():
-    net_array = []
-    false_mu = []
+    #net_array = []
+    #false_mu = []
     work_tool.generate_false_mu()
     work_tool.generate_net_array()
     print("Generated")
@@ -80,8 +80,8 @@ def outage_filter():
     mesh_outage.save(mesh_path)
     issues.save(issue_path)
     work_tool.compare_reports(issue_path, mesh_path)
+    work_tool.clear_old_reports(mesh_path, issue_path)
     missing2, nuc_down, stale_vpn = work_tool.validate_reports_mesh()
-
     return jsonify({
     "message": "Filtered outage report",
     "missing": missing2,

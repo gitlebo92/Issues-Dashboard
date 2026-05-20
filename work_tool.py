@@ -169,15 +169,14 @@ def main():
             print('Invalid command. Please enter a number one through ten.')
 
 def clear_terminal():
-    os.system('cls')
+    os.sys('cls')
 
-def clear_old_reports():
-    mesh_outage = os.path.join(os.path.expanduser('~'), "Downloads", "filtered_mesh_vpn.csv")
-    issue = os.path.join(os.path.expanduser('~'), "Downloads", "Issue.csv")
-    
+def clear_old_reports(mesh_path, issue_path):
+    print('Attempting clear here~~~~~~~~~~~')
     try:
-        os.remove(mesh_outage)
-        os.remove(issue)
+        os.remove(mesh_path)
+        os.remove(issue_path)
+        print("Cleared old reports")
     except Exception as e:
         print(f'Failed to remove: {e}')
     print('Beginning outage validation')
@@ -455,9 +454,9 @@ def compare_reports(issue_path, mesh_path):
     for row in missing:
         if row != 'Agent Name':
             print(row)
-    print('Deleting old reports')
-    clear_old_reports()
-    print('reports cleared, validating new report..')
+    #print('Deleting old reports')
+    #clear_old_reports()
+    #print('reports cleared, validating new report..')
     return missing
     #validate_reports_mesh()
 
