@@ -46,6 +46,11 @@ def install_checker():
     battery_instance = None
     solar_instance = None
     voltage = None
+    amps = None
+    temp = None
+    ftemp = None
+    high_volt_alarm = None
+    low_volt_alarm = None
     for record in data.get("records", []):
         if (record.get("name") or "")[-4:] == unit[-4:]:
             print('Unit is added to VRM')
@@ -59,12 +64,7 @@ def install_checker():
                     lastseen = device.get("lastConnection")
                     if isinstance(lastseen, (int, float)):
                         lastseen = datetime.fromtimestamp(lastseen).strftime("%H:%M:%S on %m/%d/%Y") 
-                    # return render_template("result.html",
-                    # unit=unit,
-                    # siteId=siteId,
-                    # lastseen=lastseen,
-                    # voltage=voltage
-                    # )
+
                 elif "battery" in device.get("name").lower():
                     battery_instance = device.get("instance")
                     print("battery instance: " + str(battery_instance))
@@ -78,11 +78,50 @@ def install_checker():
                 print("--- BATTERY DATA (SOC, Voltage, etc.) ---")
                 print(json.dumps(battery_data, indent=2))
                 for instance in battery_data.get("records", {}).get("data", {}).values():
-                   if instance["dbusPath"] == "/Dc/0/Voltage":
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Voltage":
                         voltage = instance["valueFormattedWithUnit"]
-                        return voltage
-                    
-            else:
+                            
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Current":
+                        print('hit')
+                        amps = instance["valueFormattedWithUnit"]
+                        print(f'amps: {amps}')
+
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Temperature":
+                        print('hit')
+                        temp = float(instance["valueFormattedValueOnly"])
+                        ftemp = temp * 1.8 + 32
+                        ftemp = round(ftemp, 2)
+                        ftemp = str(ftemp) + " \u00b0F"
+                        print(f'temp: {ftemp}')
+
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Alarms/LowVoltage":
+                        print('hit')
+                        low_volt_alarm = instance["valueFormattedWithUnit"]
+                        print(f'Low voltage alarm status: {low_volt_alarm}')
+
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Alarms/HighVoltage":
+                        print('hit')
+                        high_volt_alarm = instance["valueFormattedWithUnit"]
+                        print(f'High voltage alarm status: {high_volt_alarm}')
+
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Soc":
+                        print('hit')
+                        soc = instance["valueFormattedWithUnit"]
+                        print(f'State of Charge: {soc}')
+
+
+                return render_template("result.html",
+                unit=unit,
+                siteId=siteId,
+                lastseen=lastseen,
+                soc=soc,
+                voltage=voltage,
+                amps=amps,
+                ftemp=ftemp,
+                high_volt_alarm=high_volt_alarm,
+                low_volt_alarm=low_volt_alarm
+                
+                )
                 print("No Battery instance found in system overview.")
 
             if solar_instance is not None:
