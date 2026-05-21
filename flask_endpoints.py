@@ -3,6 +3,8 @@ import os
 import requests
 import work_tool
 from datetime import datetime
+import time
+import json
 
 app = Flask(__name__)
 
@@ -41,7 +43,9 @@ def install_checker():
     if response.status_code != 200:
         return "VRM request failed" 
     data = response.json()
-        
+    battery_instance = None
+    solar_instance = None
+    voltage = None
     for record in data.get("records", []):
         if (record.get("name") or "")[-4:] == unit[-4:]:
             print('Unit is added to VRM')
@@ -55,11 +59,41 @@ def install_checker():
                     lastseen = device.get("lastConnection")
                     if isinstance(lastseen, (int, float)):
                         lastseen = datetime.fromtimestamp(lastseen).strftime("%H:%M:%S on %m/%d/%Y") 
-                    return render_template("result.html",
-                    unit=unit,
-                    siteId=siteId,
-                    lastseen=lastseen
-                    )
+                    # return render_template("result.html",
+                    # unit=unit,
+                    # siteId=siteId,
+                    # lastseen=lastseen,
+                    # voltage=voltage
+                    # )
+                elif "battery" in device.get("name").lower():
+                    battery_instance = device.get("instance")
+                    print("battery instance: " + str(battery_instance))
+                elif "solar charger" in device.get("name").lower():
+                    solar_instance = device.get("instance")
+                    print("solar instance: " + str(solar_instance))
+            if battery_instance is not None:
+                url_battery = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/BatterySummary?instance={battery_instance}"
+                battery_response = requests.get(url_battery, headers=headers)
+                battery_data = battery_response.json()
+                print("--- BATTERY DATA (SOC, Voltage, etc.) ---")
+                print(json.dumps(battery_data, indent=2))
+                for instance in battery_data.get("records", {}).get("data", {}).values():
+                   if instance["dbusPath"] == "/Dc/0/Voltage":
+                        voltage = instance["valueFormattedWithUnit"]
+                        return voltage
+                    
+            else:
+                print("No Battery instance found in system overview.")
+
+            if solar_instance is not None:
+                url_solar = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/SolarChargerSummary?instance={solar_instance}"
+                solar_response = requests.get(url_solar, headers=headers)
+                solar_data = solar_response.json()
+                #print("--- SOLAR DATA (Watts, Yield, etc.) ---")
+                #print(json.dumps(solar_data, indent=2))
+            else:
+                print("No Solar Charger instance found in system overview.")
+
             return "Gateway not found"                
     return "Unit not found in VRM"
 @app.route("/outage_filter/results", methods=["POST"])
@@ -76,12 +110,22 @@ def outage_filter():
         return "Missing Files", 400
     mesh_path = os.path.join(UPLOAD_FOLDER, mesh_outage.filename)
     issue_path = os.path.join(UPLOAD_FOLDER, issues.filename)
-
+    local_mesh = r"C:\Users\andrew.leibowitz\Downloads\filtered_mesh_vpn.csv"
+    local_issue = r"C:\Users\andrew.leibowitz\Downloads\Issue.csv"
     mesh_outage.save(mesh_path)
     issues.save(issue_path)
+    mesh_outage.close()
+    issues.close()
     work_tool.compare_reports(issue_path, mesh_path)
     work_tool.clear_old_reports(mesh_path, issue_path)
+
     missing2, nuc_down, stale_vpn = work_tool.validate_reports_mesh()
+    try:
+        os.remove(local_issue)
+        os.remove(local_mesh)
+        print("removed local files")
+    except Exception as e:
+        print(f"{e}: Failed, continuing with validation")
     return jsonify({
     "message": "Filtered outage report",
     "missing": missing2,

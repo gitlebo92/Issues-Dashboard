@@ -87,6 +87,7 @@ def main():
                     reader = csv.DictReader(csvfile)
                     for row in reader:
                         all_battery_units_mapped.append(row)
+                    reader
                 continue    
 
         
