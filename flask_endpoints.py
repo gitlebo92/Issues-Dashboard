@@ -46,11 +46,16 @@ def install_checker():
     battery_instance = None
     solar_instance = None
     voltage = None
+    current = None
     amps = None
     temp = None
     ftemp = None
     high_volt_alarm = None
     low_volt_alarm = None
+    today_yield = None
+    yesterday_yield = None
+    soc=None
+
     for record in data.get("records", []):
         if (record.get("name") or "")[-4:] == unit[-4:]:
             print('Unit is added to VRM')
@@ -71,20 +76,21 @@ def install_checker():
                 elif "solar charger" in device.get("name").lower():
                     solar_instance = device.get("instance")
                     print("solar instance: " + str(solar_instance))
+
             if battery_instance is not None:
                 url_battery = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/BatterySummary?instance={battery_instance}"
                 battery_response = requests.get(url_battery, headers=headers)
                 battery_data = battery_response.json()
                 print("--- BATTERY DATA (SOC, Voltage, etc.) ---")
-                print(json.dumps(battery_data, indent=2))
+                # print(json.dumps(battery_data, indent=2))
                 for instance in battery_data.get("records", {}).get("data", {}).values():
                     if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Voltage":
                         voltage = instance["valueFormattedWithUnit"]
                             
                     if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Current":
                         print('hit')
-                        amps = instance["valueFormattedWithUnit"]
-                        print(f'amps: {amps}')
+                        current = instance["valueFormattedWithUnit"]
+                        print(f'amps: {current}')
 
                     if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Temperature":
                         print('hit')
@@ -109,27 +115,41 @@ def install_checker():
                         soc = instance["valueFormattedWithUnit"]
                         print(f'State of Charge: {soc}')
 
+            if solar_instance is not None:
+                url_solar = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/SolarChargerSummary?instance={solar_instance}"
+                solar_response = requests.get(url_solar, headers=headers)
+                solar_data = solar_response.json()
+                #print(json.dumps(solar_data, indent=2))
+                for instance in solar_data.get("records", {}).get("data", {}).values():
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/History/Daily/0/Yield":
+                        today_yield = instance.get("valueFormattedWithUnit")
+                        print(today_yield)
+
+                    if isinstance(instance, dict) and instance.get("dbusPath") == "/History/Daily/1/Yield":
+                        yesterday_yield = instance.get("valueFormattedWithUnit")
+                        print('hit yesterday')
+                        print(yesterday_yield)
+
+                    if isinstance(instance, dict) and instance.get("dataAttributeName") == "Battery watts":
+                        print('hit watts')
+                        watts = instance.get("valueFormattedWithUnit")
+                        print(watts)
 
                 return render_template("result.html",
                 unit=unit,
                 siteId=siteId,
                 lastseen=lastseen,
                 soc=soc,
+                watts=watts,
                 voltage=voltage,
-                amps=amps,
+                current=current,
                 ftemp=ftemp,
                 high_volt_alarm=high_volt_alarm,
-                low_volt_alarm=low_volt_alarm
-                
+                low_volt_alarm=low_volt_alarm,
+                today_yield=today_yield,
+                yesterday_yield=yesterday_yield
                 )
-                print("No Battery instance found in system overview.")
 
-            if solar_instance is not None:
-                url_solar = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/SolarChargerSummary?instance={solar_instance}"
-                solar_response = requests.get(url_solar, headers=headers)
-                solar_data = solar_response.json()
-                #print("--- SOLAR DATA (Watts, Yield, etc.) ---")
-                #print(json.dumps(solar_data, indent=2))
             else:
                 print("No Solar Charger instance found in system overview.")
 
@@ -137,8 +157,6 @@ def install_checker():
     return "Unit not found in VRM"
 @app.route("/outage_filter/results", methods=["POST"])
 def outage_filter():
-    #net_array = []
-    #false_mu = []
     work_tool.generate_false_mu()
     work_tool.generate_net_array()
     print("Generated")
