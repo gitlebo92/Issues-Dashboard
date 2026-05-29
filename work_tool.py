@@ -222,7 +222,20 @@ def ping_nuc(unit):
         if unit.upper() == row[0].upper():
                 nuc = row[3]
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  nuc], text=True, capture_output=True)
-                return result.returncode, result.stdout 
+                return result.returncode, result.stdout
+
+def uses_pve(unit):
+    try:
+        return int(unit[-4:]) >= 3300
+    except ValueError:
+        return False
+
+def ping_compute(unit):
+    return ping_pve(unit) if uses_pve(unit) else ping_nuc(unit)
+
+def compute_host_label(unit):
+    return "PVE" if uses_pve(unit) else "NUC"
+
 def ping_pve(unit):
     for row in net_array:
         if unit.upper() == row[0].upper():
@@ -332,30 +345,31 @@ def validate_reports_mesh():
     for unit in missing:
             for row in net_array:
                 if unit == row[0] and unit not in false_mu:
+                    host = compute_host_label(unit)
                     print('matched' + unit)
                     code, output = ping_router(unit)
                     print(output)
                     if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                            print(f"Router is up, {code}: {unit} checking nuc..")
-                            code, output = ping_nuc(unit)
+                            print(f"Router is up, {code}: {unit} checking {host.lower()}..")
+                            code, output = ping_compute(unit)
                             print(output)
                             if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                                    print(f"Both NUC and Router are online {code}, removing {unit} from missing array")
+                                    print(f"Both {host} and Router are online {code}, removing {unit} from missing array")
                                     false_positive.append(unit)
                             else:
-                                    print("NUC is down, router is up. Bounce NUC.")
+                                    print(f"{host} is down, router is up. Bounce {host}.")
                                     nuc_down.append(unit)
                                     break
 
                     if "Reply from" not in output and "TTL=" not in output or "expired" in output:
-                            print(f'Router is down {code}, checking NUC')
-                            code, output = ping_nuc(unit)
+                            print(f'Router is down {code}, checking {host}')
+                            code, output = ping_compute(unit)
                             print(output)
                             if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                                print(f"NUC is up {code}, router is down, reset VPN connection on {unit}")
+                                print(f"{host} is up {code}, router is down, reset VPN connection on {unit}")
                                 stale_vpn.append(unit)                           
                             else:        
-                                print(f"NUC and router are offline. {code}")
+                                print(f"{host} and router are offline. {code}")
                                 missing2.append(unit)
                                 
     print("New adjusted missing list:")
