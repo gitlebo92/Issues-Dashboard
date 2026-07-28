@@ -5,6 +5,7 @@ import sys
 import subprocess
 import zabbix_tool
 import multiprocessing
+import paramiko
 from requests.auth import HTTPDigestAuth
 from datetime import datetime
 from dotenv import load_dotenv
@@ -106,8 +107,8 @@ def main():
         print("12. Screenshot fisheye on low battery units")
         print("13. Compare Zabbix and mesh outages for unique units, then check for false positives")
         print("14. Query Zabbix for outage events for a specific unit")
-    
-        
+        print("15. Check patch version for a specific unit")
+        print("16. Check patch version for all units")
         cmd = input("Enter a number 1-14: ")
         if cmd == "1":
             install_checker()
@@ -160,14 +161,16 @@ def main():
                 print('No zabbix events found')
         elif cmd == "15":
             all_unit_battery_health()
-
+        elif cmd == "16":
+            unit = input('Enter unit to check patch version: ')
+            check_patch_version(unit)
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
             sys.exit()
 
         else:
-            print('Invalid command. Please enter a number one through ten.')
+            print('Invalid command. Please enter a number one through fourteen.')
 
 def clear_terminal():
     os.sys('cls')
@@ -248,7 +251,30 @@ def ping_scrypted(unit):
                 scrypted = row[12]
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  scrypted], text=True, capture_output=True)
                 return result.returncode, result.stdout 
-    
+def check_patch_version(unit):
+    command = (
+    "sudo -S sed -nE 's/.*Version:[[:space:]]*(sentracam-watch-[0-9]{8}-[0-9]{6}\\.tar\\.gz).*/\\1/p' "
+    "$(ls -t /var/log/sentracam/install-*.log | head -1) | head -1")
+    scryptpass = os.getenv('scryptpass')
+    for row in net_array:
+        if unit.upper()[-4:] == row[0].upper()[-4:]:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                print(f'Checking patch version for {unit}')
+                client.connect(hostname=row[12], port=22, username=os.getenv("scryptuser"), password=os.getenv("scryptpass"))
+                stdin, stdout, stderr = client.exec_command(command)
+                stdin.write(f"{scryptpass}\n")
+                stdin.flush()
+                result = stdout.read().decode('utf-8')
+                if result[16:24] != "20260715":
+                    print(f'Patch version is not 20260715, it is {result[16:24]}')
+                else:
+                    print(f'Patch version is 20260715, up to date')
+            except Exception as e:
+                print(f'Error checking patch version for {unit}: {e}')
+
+
 def validate_reports_zab():
         false_positives = []
     # zabbix_array = []
@@ -727,15 +753,11 @@ def rd_battery_map():
         data = response.json()
         for doc in data.get("data", []):
             rd_unit = doc["name"]
-            #print(rd_unit)
             full_unit = {
                 "name": rd_unit,
                 "trailer": row["name"]
             }
-            #print(f'Mapped {full_unit}')
             all_battery_units_mapped.append(full_unit)
-    
-    
     return
 
 def low_battery_rd_fisheye_tool():

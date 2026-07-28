@@ -5,6 +5,10 @@ import work_tool
 from datetime import datetime
 import time
 import json
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 app = Flask(__name__)
 
@@ -28,8 +32,13 @@ def zabbix_form():
     return render_template("zabbix.html")
 @app.route("/victron/results", methods=["POST"])
 def install_checker():
-    idUser = os.getenv("idUser")
-    api_token = os.getenv("victron_token")
+    idUser = (os.getenv("idUser") or "").strip()
+    api_token = (os.getenv("victron_token") or "").strip()
+    if not idUser or not api_token:
+        return (
+            "VRM credentials missing: set idUser and victron_token in work_tool/.env",
+            500,
+        )
     url = f"https://vrmapi.victronenergy.com/v2/users/{idUser}/installations"
     headers = {
         "idUser": f"{idUser}",
@@ -41,7 +50,7 @@ def install_checker():
     response = requests.get(url, headers=headers)
 
     if response.status_code != 200:
-        return "VRM request failed" 
+        return f"VRM request failed: {response.status_code}" 
     data = response.json()
     battery_instance = None
     solar_instance = None
