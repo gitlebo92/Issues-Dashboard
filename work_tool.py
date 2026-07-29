@@ -252,25 +252,40 @@ def ping_scrypted(unit):
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  scrypted], text=True, capture_output=True)
                 return result.returncode, result.stdout 
 def check_patch_version(unit):
+    username = os.getenv("scryptuser")
+    password = os.getenv("scryptpass")
+    command3env = os.getenv("install")
     command = (
     "sudo -S sed -nE 's/.*Version:[[:space:]]*(sentracam-watch-[0-9]{8}-[0-9]{6}\\.tar\\.gz).*/\\1/p' "
     "$(ls -t /var/log/sentracam/install-*.log | head -1) | head -1")
-    scryptpass = os.getenv('scryptpass')
+    command2 = (
+        f"sudo -S bash -c '{command3env}' "
+    )
     for row in net_array:
         if unit.upper()[-4:] == row[0].upper()[-4:]:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
                 print(f'Checking patch version for {unit}')
-                client.connect(hostname=row[12], port=22, username=os.getenv("scryptuser"), password=os.getenv("scryptpass"))
+                client.connect(hostname=row[12], port=22, username=username, password=password)
                 stdin, stdout, stderr = client.exec_command(command)
-                stdin.write(f"{scryptpass}\n")
+                stdin.write(f"{password}\n")
                 stdin.flush()
                 result = stdout.read().decode('utf-8')
-                if result[16:24] != "20260715":
-                    print(f'Patch version is not 20260715, it is {result[16:24]}')
+                if result[16:24] != "20260728":
+                    print(f'Patch version is not 20260728, it is {result[16:24]}')
+                    run_update = input(f'Run update? (Y/N)')
+                    if run_update.lower()[:1] == "y":
+                        print("Updating...")
+                        stdin, stdout, stderr = client.exec_command(command2)
+                        stdin.write(f"{password}\n")
+                        stdin.flush()
+                        result2 = stdout.read().decode('utf-8')
+                        print(f'Update result: {result2}')
+                    else:
+                        print("Skipping update")
                 else:
-                    print(f'Patch version is 20260715, up to date')
+                    print(f'Patch version is 20260728, up to date')
             except Exception as e:
                 print(f'Error checking patch version for {unit}: {e}')
 
