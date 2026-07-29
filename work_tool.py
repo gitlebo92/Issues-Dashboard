@@ -107,8 +107,9 @@ def main():
         print("12. Screenshot fisheye on low battery units")
         print("13. Compare Zabbix and mesh outages for unique units, then check for false positives")
         print("14. Query Zabbix for outage events for a specific unit")
-        print("15. Check patch version for a specific unit")
-        print("16. Check patch version for all units")
+        print("15. Check battery health for all units")
+        print("16. Check patch version for specific unit")
+        print("17. Check patch version for all units")
         cmd = input("Enter a number 1-14: ")
         if cmd == "1":
             install_checker()
@@ -164,6 +165,8 @@ def main():
         elif cmd == "16":
             unit = input('Enter unit to check patch version: ')
             check_patch_version(unit)
+        elif cmd == "17":
+            check_all_patches()
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -289,6 +292,35 @@ def check_patch_version(unit):
             except Exception as e:
                 print(f'Error checking patch version for {unit}: {e}')
 
+def check_all_patches():
+    patch_array = []
+    username = os.getenv("scryptuser")
+    password = os.getenv("scryptpass")
+    command = (
+    "sudo -S sed -nE 's/.*Version:[[:space:]]*(sentracam-watch-[0-9]{8}-[0-9]{6}\\.tar\\.gz).*/\\1/p' "
+    "$(ls -t /var/log/sentracam/install-*.log | head -1) | head -1")
+    for row in net_array:
+        rdnum = int(row[0].strip()[-4:])
+        if rdnum >= 3300:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                print(f'Checking patch version for {row[0]}')
+                client.connect(hostname=row[12], port=22, username=username, password=password)
+                stdin, stdout, stderr = client.exec_command(command)
+                stdin.write(f"{password}\n")
+                stdin.flush()
+                result = stdout.read().decode('utf-8')
+                if result[16:24] != "20260728":
+                    print(f'Patch version is not 20260728, it is {result[16:24]}. Appended to array')
+                    patch_array.append(row[0])
+                else:
+                    print(f'Patch version is 20260728, up to date')
+            except Exception as e:
+                print(f'Error checking patch version for {row[0]}: {e}')
+    for line in patch_array:
+        print(f'{line} is not up to date')
+    return patch_array
 
 def validate_reports_zab():
         false_positives = []
