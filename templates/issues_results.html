@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Issues Validation Results</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #0f172a;
+            color: #e2e8f0;
+        }
+        h1, h2 { margin-bottom: 8px; }
+        .status { color: #94a3b8; margin-bottom: 12px; }
+        .layout {
+            display: grid;
+            grid-template-columns: 1.4fr 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: 1fr; }
+        }
+        .console {
+            background: #020617;
+            color: #86efac;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px;
+            height: 60vh;
+            overflow-y: auto;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .panel {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .panel ul { margin-top: 4px; }
+        .panel h2 { font-size: 16px; margin-top: 16px; }
+        .panel h2:first-child { margin-top: 0; }
+        a { color: #93c5fd; }
+        .empty { color: #94a3b8; }
+    </style>
+</head>
+<body>
+
+    <h1>Issues Validation Report</h1>
+    <p class="status" id="status">Running validation... live stdout below.</p>
+
+    <div class="layout">
+        <div>
+            <h2>Stdout</h2>
+            <div class="console" id="console"></div>
+        </div>
+
+        <div class="panel">
+            <h2>False positives (router and compute online)</h2>
+            <ul id="false_positives"><li class="empty">Waiting...</li></ul>
+
+            <h2>Offline compute (router up)</h2>
+            <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
+
+            <h2>Stale VPNs</h2>
+            <ul id="stale_vpn"><li class="empty">Waiting...</li></ul>
+
+            <h2>Truly down (router and compute offline)</h2>
+            <ul id="truly_down"><li class="empty">Waiting...</li></ul>
+        </div>
+    </div>
+
+    <br>
+    <a href="/issues">Run again</a> |
+    <a href="/">Home</a>
+
+    <script>
+        const jobId = {{ job_id|tojson }};
+        const consoleEl = document.getElementById("console");
+        const statusEl = document.getElementById("status");
+        const source = new EventSource("/issues/stream/" + jobId);
+
+        function fillList(id, items) {
+            const el = document.getElementById(id);
+            el.innerHTML = "";
+            if (!items || items.length === 0) {
+                const li = document.createElement("li");
+                li.className = "empty";
+                li.textContent = "None";
+                el.appendChild(li);
+                return;
+            }
+            items.forEach(function (unit) {
+                const li = document.createElement("li");
+                li.textContent = unit;
+                el.appendChild(li);
+            });
+        }
+
+        source.onmessage = function (event) {
+            const data = JSON.parse(event.data);
+            if (data.type === "log") {
+                consoleEl.textContent += data.line + "\n";
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            } else if (data.type === "done") {
+                const r = data.results || {};
+                fillList("false_positives", r.false_positives);
+                fillList("nuc_down", r.nuc_down);
+                fillList("stale_vpn", r.stale_vpn);
+                fillList("truly_down", r.truly_down);
+                statusEl.textContent = "Validation complete.";
+                source.close();
+            }
+        };
+
+        source.onerror = function () {
+            statusEl.textContent = "Stream disconnected.";
+            source.close();
+        };
+    </script>
+
+</body>
+</html>

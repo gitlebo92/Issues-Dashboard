@@ -1,10 +1,13 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response, redirect, url_for
 import os
 import requests
 import work_tool
 from datetime import datetime
 import time
 import json
+import uuid
+import threading
+import queue
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +18,64 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+issue_jobs = {}
+
 def dedupe(lst):
     return list(dict.fromkeys(lst))
+
+class JobStdout:
+    """Tee stdout into a per-job queue so the browser can stream it."""
+    def __init__(self, job_id, original):
+        self.job_id = job_id
+        self.original = original
+        self._buf = ""
+
+    def write(self, text):
+        if self.original:
+            self.original.write(text)
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            job = issue_jobs.get(self.job_id)
+            if job is not None:
+                job["queue"].put({"type": "log", "line": line})
+        return len(text)
+
+    def flush(self):
+        if self.original:
+            self.original.flush()
+
+def _run_issues_validation(job_id, issue_path):
+    import sys
+    job = issue_jobs[job_id]
+    original_stdout = sys.stdout
+    sys.stdout = JobStdout(job_id, original_stdout)
+    try:
+        work_tool.generate_false_mu()
+        work_tool.generate_net_array()
+        false_positives, nuc_down, stale_vpn, truly_down = work_tool.validate_issues_report(issue_path)
+        job["results"] = {
+            "false_positives": false_positives,
+            "nuc_down": nuc_down,
+            "stale_vpn": stale_vpn,
+            "truly_down": truly_down,
+        }
+        job["queue"].put({"type": "done", "results": job["results"]})
+    except Exception as e:
+        job["queue"].put({"type": "log", "line": f"ERROR: {e}"})
+        job["queue"].put({"type": "done", "results": {
+            "false_positives": [],
+            "nuc_down": [],
+            "stale_vpn": [],
+            "truly_down": [],
+        }})
+    finally:
+        sys.stdout = original_stdout
+        try:
+            os.remove(issue_path)
+        except Exception as e:
+            print(f"Failed to remove upload: {e}")
+        job["done"] = True
 
 @app.route("/", methods=["GET"])
 def home():
@@ -27,6 +86,60 @@ def victron_form():
 @app.route("/outage_filter", methods=["GET"])
 def outage_form():
     return render_template("outage.html")
+@app.route("/issues", methods=["GET"])
+def issues_form():
+    return render_template("issues.html")
+@app.route("/issues/results", methods=["POST"])
+def issues_results():
+    issues = request.files.get("issue_file")
+    if not issues:
+        return "Missing Issue CSV", 400
+    job_id = uuid.uuid4().hex
+    issue_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{issues.filename}")
+    issues.save(issue_path)
+    issues.close()
+    issue_jobs[job_id] = {
+        "queue": queue.Queue(),
+        "done": False,
+        "results": None,
+    }
+    thread = threading.Thread(target=_run_issues_validation, args=(job_id, issue_path), daemon=True)
+    thread.start()
+    return redirect(url_for("issues_watch", job_id=job_id))
+
+@app.route("/issues/watch/<job_id>", methods=["GET"])
+def issues_watch(job_id):
+    if job_id not in issue_jobs:
+        return "Unknown job", 404
+    return render_template("issues_results.html", job_id=job_id)
+
+@app.route("/issues/stream/<job_id>", methods=["GET"])
+def issues_stream(job_id):
+    job = issue_jobs.get(job_id)
+    if job is None:
+        return "Unknown job", 404
+
+    def event_stream():
+        while True:
+            try:
+                event = job["queue"].get(timeout=1)
+            except queue.Empty:
+                if job["done"]:
+                    break
+                yield ": keepalive\n\n"
+                continue
+            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("type") == "done":
+                break
+
+    return Response(
+        event_stream(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 @app.route("/zabbix", methods=["GET"])
 def zabbix_form():
     return render_template("zabbix.html")
@@ -52,7 +165,7 @@ def linux_results():
         print(result)
     except Exception as e:
         print(f'Failed to connect to {hostname}: {e}'   )
-        
+
     return render_template("linux_results.html", result=result)
 @app.route("/victron/results", methods=["POST"])
 def install_checker():

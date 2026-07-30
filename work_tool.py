@@ -110,6 +110,7 @@ def main():
         print("15. Check battery health for all units")
         print("16. Check patch version for specific unit")
         print("17. Check patch version for all units")
+        print("18. Validate issues report for false positives")
         cmd = input("Enter a number 1-14: ")
         if cmd == "1":
             install_checker()
@@ -167,6 +168,8 @@ def main():
             check_patch_version(unit)
         elif cmd == "17":
             check_all_patches()
+        elif cmd == "18":
+            validate_issues_report()
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -408,6 +411,74 @@ def validate_reports_zab():
             for line in false_positives:
                 print(line)
 
+def _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, truly_down):
+    host = compute_host_label(unit)
+    print(f'Checking {unit}...')
+    code, output = ping_router(unit)
+    print(output)
+    if "Reply from" in output and "TTL=" in output and "expired" not in output:
+        print(f"Router is up, {code}: {unit} checking {host.lower()}..")
+        code, output = ping_compute(unit)
+        print(output)
+        if "Reply from" in output and "TTL=" in output and "expired" not in output:
+            print(f"Both {host} and Router are online {code}, false positive: {unit}")
+            false_positives.append(unit)
+        else:
+            print(f"{host} is down, router is up. Bounce {host}.")
+            nuc_down.append(unit)
+    elif "Reply from" not in output and "TTL=" not in output or "expired" in output:
+        print(f'Router is down {code}, checking {host}')
+        code, output = ping_compute(unit)
+        print(output)
+        if "Reply from" in output and "TTL=" in output and "expired" not in output:
+            print(f"{host} is up {code}, router is down, reset VPN connection on {unit}")
+            stale_vpn.append(unit)
+        else:
+            print(f"{host} and router are offline. {code}")
+            truly_down.append(unit)
+
+def validate_issues_report(issue_path=None):
+    if issue_path is None:
+        issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
+    issue_units = []
+    false_positives = []
+    nuc_down = []
+    stale_vpn = []
+    truly_down = []
+
+    try:
+        with open(issue_path, 'r', newline='') as csvfile:
+            linereader = csv.reader(csvfile)
+            for line in linereader:
+                if not line or len(line) < 2 or line[1] == 'Subject':
+                    continue
+                for net_row in net_array:
+                    unit = net_row[0]
+                    if unit in line[1] and unit not in issue_units and unit not in false_mu_array:
+                        issue_units.append(unit)
+                        print(f'Matched {unit} in {line[1]}')
+    except Exception as e:
+        print(f'Task failed: {e}')
+        return
+
+    print(f'Validating {len(issue_units)} units from issues report...')
+    for unit in issue_units:
+        _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, truly_down)
+
+    print("False positives (router and compute online):")
+    for line in false_positives:
+        print(line)
+    print("Offline compute (router up):")
+    for line in nuc_down:
+        print(line)
+    print("Stale VPNs:")
+    for line in stale_vpn:
+        print(line)
+    print("Truly down (router and compute offline):")
+    for line in truly_down:
+        print(line)
+    return false_positives, nuc_down, stale_vpn, truly_down
+
 def validate_reports_mesh():
     nuc_down = []
     stale_vpn = []
@@ -418,32 +489,8 @@ def validate_reports_mesh():
     for unit in missing:
             for row in net_array:
                 if unit == row[0] and unit not in false_mu:
-                    host = compute_host_label(unit)
-                    print('matched' + unit)
-                    code, output = ping_router(unit)
-                    print(output)
-                    if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                            print(f"Router is up, {code}: {unit} checking {host.lower()}..")
-                            code, output = ping_compute(unit)
-                            print(output)
-                            if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                                    print(f"Both {host} and Router are online {code}, removing {unit} from missing array")
-                                    false_positive.append(unit)
-                            else:
-                                    print(f"{host} is down, router is up. Bounce {host}.")
-                                    nuc_down.append(unit)
-                                    break
-
-                    if "Reply from" not in output and "TTL=" not in output or "expired" in output:
-                            print(f'Router is down {code}, checking {host}')
-                            code, output = ping_compute(unit)
-                            print(output)
-                            if "Reply from" in output and "TTL=" in output and "expired" not in output:
-                                print(f"{host} is up {code}, router is down, reset VPN connection on {unit}")
-                                stale_vpn.append(unit)                           
-                            else:        
-                                print(f"{host} and router are offline. {code}")
-                                missing2.append(unit)
+                    _validate_unit_connectivity(unit, false_positive, nuc_down, stale_vpn, missing2)
+                    break
                                 
     print("New adjusted missing list:")
     for line in missing:
