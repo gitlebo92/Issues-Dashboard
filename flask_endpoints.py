@@ -30,6 +30,30 @@ def outage_form():
 @app.route("/zabbix", methods=["GET"])
 def zabbix_form():
     return render_template("zabbix.html")
+@app.route("/linux", methods=["GET"])
+def linux_form():
+    return render_template("linux.html")
+@app.route("/linux/results", methods=["POST"])
+def linux_results():
+    username = os.getenv("scryptuser")
+    password = os.getenv("scryptpass")
+    unit = request.form.get("unit")
+    for row in net_array:
+        if unit.upper()[-4:] == row[0].upper()[-4:]:
+            hostname = row[12]
+            break
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=hostname, port=22, username=username, password=password)
+        stdin, stdout, stderr = client.exec_command()
+        stdin.flush()
+        result = stdout.read().decode('utf-8')
+        print(result)
+    except Exception as e:
+        print(f'Failed to connect to {hostname}: {e}'   )
+        
+    return render_template("linux_results.html", result=result)
 @app.route("/victron/results", methods=["POST"])
 def install_checker():
     idUser = (os.getenv("idUser") or "").strip()
