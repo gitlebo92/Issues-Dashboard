@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Recovery Email Check</title>
+</head>
+<body>
+
+    <h1>Outage / Recovery Email Check</h1>
+    <h2>Upload the Shield NOC outage spreadsheet (.xlsx or .csv).</h2>
+    <ul>
+        <li>row[5] and row[6] empty + fully down → needs initial outage email</li>
+        <li>row[5] filled, row[6] empty + back up → needs recovery email</li>
+        <li>row[5] and row[6] empty + back up → potential false positive</li>
+        <li>everything else checked → pending recovery</li>
+    </ul>
+
+    <form method="POST" action="/recovery_email/results" enctype="multipart/form-data">
+        <label>Outage report:</label>
+        <input type="file" name="report_file" accept=".xlsx,.csv" required>
+
+        <br><br>
+
+        <button type="submit">
+            Check Recovery Emails
+        </button>
+    </form>
+
+    <br>
+    <a href="/">Back</a>
+
+</body>
+</html>

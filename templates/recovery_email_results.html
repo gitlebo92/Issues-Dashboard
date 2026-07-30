@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Issues Validation Results</title>
+    <title>Recovery Email Results</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -41,13 +41,17 @@
         .panel ul { margin-top: 4px; }
         .panel h2 { font-size: 16px; margin-top: 16px; }
         .panel h2:first-child { margin-top: 0; }
+        .highlight-recovery h2 { color: #fbbf24; }
+        .highlight-initial h2 { color: #f87171; }
+        .highlight-false h2 { color: #a78bfa; }
+        .highlight-pending h2 { color: #38bdf8; }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
     </style>
 </head>
 <body>
 
-    <h1>Issues Validation Report</h1>
+    <h1>Outage / Recovery Email Check</h1>
     <p class="status" id="status">Running validation... live stdout below.</p>
 
     <div class="layout">
@@ -57,29 +61,41 @@
         </div>
 
         <div class="panel">
-            <h2>False positives (router and compute online)</h2>
-            <ul id="false_positives"><li class="empty">Waiting...</li></ul>
+            <div class="highlight-recovery">
+                <h2>Needs recovery email</h2>
+                <p class="empty">Outage email sent, recovery empty, unit back up</p>
+                <ul id="needs_recovery_email"><li class="empty">Waiting...</li></ul>
+            </div>
 
-            <h2>Offline compute (router up)</h2>
-            <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
+            <div class="highlight-initial">
+                <h2>Needs initial outage email</h2>
+                <p class="empty">No outage/recovery email, unit fully down</p>
+                <ul id="needs_initial_email"><li class="empty">Waiting...</li></ul>
+            </div>
 
-            <h2>Stale VPNs</h2>
-            <ul id="stale_vpn"><li class="empty">Waiting...</li></ul>
+            <div class="highlight-false">
+                <h2>Potential false positive</h2>
+                <p class="empty">No outage/recovery email, unit back up</p>
+                <ul id="potential_false_positive"><li class="empty">Waiting...</li></ul>
+            </div>
 
-            <h2>Truly down (router and compute offline)</h2>
-            <ul id="truly_down"><li class="empty">Waiting...</li></ul>
+            <div class="highlight-pending">
+                <h2>Pending recovery</h2>
+                <p class="empty">Checked units not in the lists above</p>
+                <ul id="pending_recovery"><li class="empty">Waiting...</li></ul>
+            </div>
         </div>
     </div>
 
     <br>
-    <a href="/issues">Run again</a> |
+    <a href="/recovery_email">Run again</a> |
     <a href="/">Home</a>
 
     <script>
         const jobId = {{ job_id|tojson }};
         const consoleEl = document.getElementById("console");
         const statusEl = document.getElementById("status");
-        const source = new EventSource("/issues/stream/" + jobId);
+        const source = new EventSource("/recovery_email/stream/" + jobId);
 
         function fillList(id, items) {
             const el = document.getElementById(id);
@@ -117,10 +133,10 @@
                 consoleEl.scrollTop = consoleEl.scrollHeight;
             } else if (data.type === "done") {
                 const r = data.results || {};
-                fillList("false_positives", r.false_positives);
-                fillList("nuc_down", r.nuc_down);
-                fillList("stale_vpn", r.stale_vpn);
-                fillList("truly_down", r.truly_down);
+                fillList("needs_recovery_email", r.needs_recovery_email);
+                fillList("needs_initial_email", r.needs_initial_email);
+                fillList("potential_false_positive", r.potential_false_positive);
+                fillList("pending_recovery", r.pending_recovery);
                 statusEl.textContent = "Validation complete.";
                 source.close();
             }

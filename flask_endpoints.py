@@ -19,12 +19,13 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 issue_jobs = {}
+stream_jobs = issue_jobs  # shared job store for streamed validations
 
 def dedupe(lst):
     return list(dict.fromkeys(lst))
 
 class JobStdout:
-    """Tee stdout into a per-job queue so the browser can stream it."""
+    """Tee stdout into a per-job queue so the browser can stream it. This endpoint was created by Cursor reusing code I wrote from work tool"""
     def __init__(self, job_id, original):
         self.job_id = job_id
         self.original = original
@@ -36,7 +37,7 @@ class JobStdout:
         self._buf += text
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
-            job = issue_jobs.get(self.job_id)
+            job = stream_jobs.get(self.job_id)
             if job is not None:
                 job["queue"].put({"type": "log", "line": line})
         return len(text)
@@ -47,7 +48,7 @@ class JobStdout:
 
 def _run_issues_validation(job_id, issue_path):
     import sys
-    job = issue_jobs[job_id]
+    job = stream_jobs[job_id]
     original_stdout = sys.stdout
     sys.stdout = JobStdout(job_id, original_stdout)
     try:
@@ -77,45 +78,40 @@ def _run_issues_validation(job_id, issue_path):
             print(f"Failed to remove upload: {e}")
         job["done"] = True
 
-@app.route("/", methods=["GET"])
-def home():
-    return render_template("index.html")
-@app.route("/victron", methods=["GET"])
-def victron_form():
-    return render_template("vrm.html")
-@app.route("/outage_filter", methods=["GET"])
-def outage_form():
-    return render_template("outage.html")
-@app.route("/issues", methods=["GET"])
-def issues_form():
-    return render_template("issues.html")
-@app.route("/issues/results", methods=["POST"])
-def issues_results():
-    issues = request.files.get("issue_file")
-    if not issues:
-        return "Missing Issue CSV", 400
-    job_id = uuid.uuid4().hex
-    issue_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{issues.filename}")
-    issues.save(issue_path)
-    issues.close()
-    issue_jobs[job_id] = {
-        "queue": queue.Queue(),
-        "done": False,
-        "results": None,
-    }
-    thread = threading.Thread(target=_run_issues_validation, args=(job_id, issue_path), daemon=True)
-    thread.start()
-    return redirect(url_for("issues_watch", job_id=job_id))
+def _run_recovery_email_check(job_id, report_path):
+    import sys
+    job = stream_jobs[job_id]
+    original_stdout = sys.stdout
+    sys.stdout = JobStdout(job_id, original_stdout)
+    try:
+        work_tool.generate_false_mu()
+        work_tool.generate_net_array()
+        needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery = work_tool.check_missing_recovery_emails(report_path)
+        job["results"] = {
+            "needs_recovery_email": needs_recovery_email,
+            "needs_initial_email": needs_initial_email,
+            "potential_false_positive": potential_false_positive,
+            "pending_recovery": pending_recovery,
+        }
+        job["queue"].put({"type": "done", "results": job["results"]})
+    except Exception as e:
+        job["queue"].put({"type": "log", "line": f"ERROR: {e}"})
+        job["queue"].put({"type": "done", "results": {
+            "needs_recovery_email": [],
+            "needs_initial_email": [],
+            "potential_false_positive": [],
+            "pending_recovery": [],
+        }})
+    finally:
+        sys.stdout = original_stdout
+        try:
+            os.remove(report_path)
+        except Exception as e:
+            print(f"Failed to remove upload: {e}")
+        job["done"] = True
 
-@app.route("/issues/watch/<job_id>", methods=["GET"])
-def issues_watch(job_id):
-    if job_id not in issue_jobs:
-        return "Unknown job", 404
-    return render_template("issues_results.html", job_id=job_id)
-
-@app.route("/issues/stream/<job_id>", methods=["GET"])
-def issues_stream(job_id):
-    job = issue_jobs.get(job_id)
+def _sse_stream(job_id):
+    job = stream_jobs.get(job_id)
     if job is None:
         return "Unknown job", 404
 
@@ -140,6 +136,79 @@ def issues_stream(job_id):
             "X-Accel-Buffering": "no",
         },
     )
+
+@app.route("/", methods=["GET"])
+def home():
+    return render_template("index.html")
+@app.route("/victron", methods=["GET"])
+def victron_form():
+    return render_template("vrm.html")
+@app.route("/outage_filter", methods=["GET"])
+def outage_form():
+    return render_template("outage.html")
+@app.route("/issues", methods=["GET"])
+def issues_form():
+    return render_template("issues.html")
+@app.route("/issues/results", methods=["POST"])
+def issues_results():
+    issues = request.files.get("issue_file")
+    if not issues:
+        return "Missing Issue CSV", 400
+    job_id = uuid.uuid4().hex
+    issue_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{issues.filename}")
+    issues.save(issue_path)
+    issues.close()
+    stream_jobs[job_id] = {
+        "queue": queue.Queue(),
+        "done": False,
+        "results": None,
+    }
+    thread = threading.Thread(target=_run_issues_validation, args=(job_id, issue_path), daemon=True)
+    thread.start()
+    return redirect(url_for("issues_watch", job_id=job_id))
+
+@app.route("/issues/watch/<job_id>", methods=["GET"])
+def issues_watch(job_id):
+    if job_id not in stream_jobs:
+        return "Unknown job", 404
+    return render_template("issues_results.html", job_id=job_id)
+
+@app.route("/issues/stream/<job_id>", methods=["GET"])
+def issues_stream(job_id):
+    return _sse_stream(job_id)
+
+@app.route("/recovery_email", methods=["GET"])
+def recovery_email_form():
+    return render_template("recovery_email.html")
+
+@app.route("/recovery_email/results", methods=["POST"])
+def recovery_email_results():
+    report = request.files.get("report_file")
+    if not report:
+        return "Missing report file", 400
+    job_id = uuid.uuid4().hex
+    report_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{report.filename}")
+    report.save(report_path)
+    report.close()
+    stream_jobs[job_id] = {
+        "queue": queue.Queue(),
+        "done": False,
+        "results": None,
+    }
+    thread = threading.Thread(target=_run_recovery_email_check, args=(job_id, report_path), daemon=True)
+    thread.start()
+    return redirect(url_for("recovery_email_watch", job_id=job_id))
+
+@app.route("/recovery_email/watch/<job_id>", methods=["GET"])
+def recovery_email_watch(job_id):
+    if job_id not in stream_jobs:
+        return "Unknown job", 404
+    return render_template("recovery_email_results.html", job_id=job_id)
+
+@app.route("/recovery_email/stream/<job_id>", methods=["GET"])
+def recovery_email_stream(job_id):
+    return _sse_stream(job_id)
+
 @app.route("/zabbix", methods=["GET"])
 def zabbix_form():
     return render_template("zabbix.html")

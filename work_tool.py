@@ -111,6 +111,7 @@ def main():
         print("16. Check patch version for specific unit")
         print("17. Check patch version for all units")
         print("18. Validate issues report for false positives")
+        print("19. Check outages for missing initial/recovery emails")
         cmd = input("Enter a number 1-14: ")
         if cmd == "1":
             install_checker()
@@ -170,6 +171,8 @@ def main():
             check_all_patches()
         elif cmd == "18":
             validate_issues_report()
+        elif cmd == "19":
+            check_missing_recovery_emails()
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -437,10 +440,35 @@ def _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, trul
             print(f"{host} and router are offline. {code}")
             truly_down.append(unit)
 
+def _issue_ticket_url(issue_id):
+    if not issue_id:
+        return ""
+    return f"https://erp.sentracam.com/app/issue/{issue_id}"
+
+def _with_ticket_links(units, unit_issue_map):
+    linked = []
+    for unit in units:
+        issue_id = unit_issue_map.get(unit, "")
+        linked.append({
+            "unit": unit,
+            "issue_id": issue_id,
+            "url": _issue_ticket_url(issue_id),
+        })
+    return linked
+
+def _print_linked_units(label, linked_units):
+    print(label)
+    for item in linked_units:
+        if item.get("issue_id"):
+            print(f'{item["unit"]} - {item["issue_id"]} - {item["url"]}')
+        else:
+            print(item["unit"])
+
 def validate_issues_report(issue_path=None):
     if issue_path is None:
         issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
     issue_units = []
+    unit_issue_map = {}
     false_positives = []
     nuc_down = []
     stale_vpn = []
@@ -452,32 +480,166 @@ def validate_issues_report(issue_path=None):
             for line in linereader:
                 if not line or len(line) < 2 or line[1] == 'Subject':
                     continue
+                issue_id = (line[0] or "").strip()
                 for net_row in net_array:
                     unit = net_row[0]
                     if unit in line[1] and unit not in issue_units and unit not in false_mu_array:
                         issue_units.append(unit)
-                        print(f'Matched {unit} in {line[1]}')
+                        unit_issue_map[unit] = issue_id
+                        print(f'Matched {unit} ({issue_id}) in {line[1]}')
     except Exception as e:
         print(f'Task failed: {e}')
-        return
+        return [], [], [], []
 
     print(f'Validating {len(issue_units)} units from issues report...')
     for unit in issue_units:
         _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, truly_down)
 
-    print("False positives (router and compute online):")
-    for line in false_positives:
-        print(line)
-    print("Offline compute (router up):")
-    for line in nuc_down:
-        print(line)
-    print("Stale VPNs:")
-    for line in stale_vpn:
-        print(line)
-    print("Truly down (router and compute offline):")
-    for line in truly_down:
-        print(line)
+    false_positives = _with_ticket_links(false_positives, unit_issue_map)
+    nuc_down = _with_ticket_links(nuc_down, unit_issue_map)
+    stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map)
+    truly_down = _with_ticket_links(truly_down, unit_issue_map)
+
+    _print_linked_units("False positives (router and compute online):", false_positives)
+    _print_linked_units("Offline compute (router up):", nuc_down)
+    _print_linked_units("Stale VPNs:", stale_vpn)
+    _print_linked_units("Truly down (router and compute offline):", truly_down)
     return false_positives, nuc_down, stale_vpn, truly_down
+
+def _read_spreadsheet_rows(report_path):
+    rows = []
+    if report_path.lower().endswith(".xlsx"):
+        try:
+            import openpyxl
+        except ImportError:
+            print("openpyxl is required to read .xlsx files. Install with: pip install openpyxl")
+            raise
+        wb = openpyxl.load_workbook(report_path, read_only=True, data_only=True)
+        ws = wb.active
+        for row in ws.iter_rows(values_only=True):
+            rows.append(["" if cell is None else str(cell) for cell in row])
+        wb.close()
+    else:
+        with open(report_path, "r", newline="", encoding="utf-8-sig") as csvfile:
+            for line in csv.reader(csvfile):
+                rows.append(line)
+    return rows
+
+def check_missing_recovery_emails(report_path=None):
+    if report_path is None:
+        report_path = os.path.join(
+            os.path.expanduser("~"),
+            "Downloads",
+            "Shield NOC Outage Issues with no initial email - ART.xlsx",
+        )
+    units_to_check = []
+    unit_issue_map = {}
+    unit_email_state = {}
+    back_up = []
+    nuc_down = []
+    stale_vpn = []
+    truly_down = []
+    needs_recovery_email = []
+    needs_initial_email = []
+    potential_false_positive = []
+    pending_recovery = []
+
+    try:
+        rows = _read_spreadsheet_rows(report_path)
+    except Exception as e:
+        print(f'Task failed: {e}')
+        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
+
+    header_idx = None
+    for i, row in enumerate(rows):
+        if any(str(cell).strip().lower() == "recovery email" for cell in row):
+            header_idx = i
+            break
+    if header_idx is None:
+        print("Could not find 'Recovery Email' column header in report")
+        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
+
+    for row in rows[header_idx + 1:]:
+        if len(row) < 7:
+            continue
+        issue_id = (row[1] or "").strip()
+        subject = (row[3] or "").strip()
+        outage_email = (row[5] or "").strip()
+        recovery_email = (row[6] or "").strip()
+        if not subject or not issue_id:
+            continue
+        # Skip if recovery email already sent
+        if recovery_email:
+            continue
+        matched = []
+        for net_row in net_array:
+            unit = net_row[0]
+            if unit in subject and unit not in false_mu_array:
+                matched.append(unit)
+        has_rd = any(unit.upper().startswith("RD") for unit in matched)
+        for unit in matched:
+            # Skip trailer MU when an RD head unit is already in the subject (e.g. RD3556(MU2001))
+            if unit.upper().startswith("MU") and has_rd:
+                continue
+            if unit not in units_to_check:
+                units_to_check.append(unit)
+                unit_issue_map[unit] = issue_id
+                unit_email_state[unit] = {
+                    "has_outage_email": bool(outage_email),
+                    "has_recovery_email": bool(recovery_email),
+                }
+                if not outage_email and not recovery_email:
+                    print(f'No initial or recovery email for {unit} ({issue_id}): {subject}')
+                else:
+                    print(f'Outage email sent, no recovery email for {unit} ({issue_id}): {subject}')
+
+    print(f'Checking {len(units_to_check)} units for missing email actions...')
+    for unit in units_to_check:
+        _validate_unit_connectivity(unit, back_up, nuc_down, stale_vpn, truly_down)
+
+    categorized = set()
+
+    for unit in back_up:
+        state = unit_email_state.get(unit, {})
+        if state.get("has_outage_email") and not state.get("has_recovery_email"):
+            needs_recovery_email.append(unit)
+            categorized.add(unit)
+        elif not state.get("has_outage_email") and not state.get("has_recovery_email"):
+            potential_false_positive.append(unit)
+            categorized.add(unit)
+
+    for unit in truly_down:
+        state = unit_email_state.get(unit, {})
+        if not state.get("has_outage_email") and not state.get("has_recovery_email"):
+            needs_initial_email.append(unit)
+            categorized.add(unit)
+
+    for unit in units_to_check:
+        if unit not in categorized:
+            pending_recovery.append(unit)
+
+    needs_recovery_email = _with_ticket_links(needs_recovery_email, unit_issue_map)
+    needs_initial_email = _with_ticket_links(needs_initial_email, unit_issue_map)
+    potential_false_positive = _with_ticket_links(potential_false_positive, unit_issue_map)
+    pending_recovery = _with_ticket_links(pending_recovery, unit_issue_map)
+
+    _print_linked_units(
+        "Needs recovery email (outage email sent, unit back up):",
+        needs_recovery_email,
+    )
+    _print_linked_units(
+        "Needs initial outage email (no emails sent, unit fully down):",
+        needs_initial_email,
+    )
+    _print_linked_units(
+        "Potential false positive (no emails sent, unit back up):",
+        potential_false_positive,
+    )
+    _print_linked_units(
+        "Pending recovery (remainder):",
+        pending_recovery,
+    )
+    return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
 
 def validate_reports_mesh():
     nuc_down = []
