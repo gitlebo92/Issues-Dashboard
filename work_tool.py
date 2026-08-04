@@ -110,7 +110,7 @@ def main():
         print("15. Check battery health for all units")
         print("16. Check patch version for specific unit")
         print("17. Check patch version for all units")
-        print("18. Validate issues report for false positives")
+        print("18. Unit Outage Verification Tool")
         print("19. Check outages for missing initial/recovery emails")
         cmd = input("Enter a number 1-14: ")
         if cmd == "1":
@@ -242,6 +242,20 @@ def uses_pve(unit):
     except ValueError:
         return False
 
+def unit_number(unit):
+    try:
+        return int(str(unit).strip()[-4:])
+    except (TypeError, ValueError):
+        return None
+
+def in_potential_stale_vpn_range(unit):
+    """Units 3000-3199 inclusive may be potentially stale VPN when both router and NUC are down."""
+    n = unit_number(unit)
+    return n is not None and 3000 <= n <= 3199
+
+def _ping_reachable(output):
+    return bool(output) and "Reply from" in output and "TTL=" in output and "expired" not in output
+
 def ping_compute(unit):
     return ping_pve(unit) if uses_pve(unit) else ping_nuc(unit)
 
@@ -260,6 +274,71 @@ def ping_scrypted(unit):
                 scrypted = row[12]
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  scrypted], text=True, capture_output=True)
                 return result.returncode, result.stdout 
+def run_linux_diagnostic(unit):
+    """SSH diagnostic scaffold for a unit. Prints progress to stdout for Flask streaming."""
+    username = os.getenv("scryptuser")
+    password = os.getenv("scryptpass")
+    result = {
+        "unit": unit,
+        "hostname": "",
+        "connected": False,
+        "output": "",
+        "error": "",
+    }
+    if not unit:
+        result["error"] = "No unit provided"
+        print(result["error"])
+        return result
+
+    hostname = None
+    matched_unit = None
+    for row in net_array:
+        if unit.upper()[-4:] == row[0].upper()[-4:]:
+            matched_unit = row[0]
+            hostname = row[12]
+            break
+
+    if not hostname:
+        result["error"] = f"Unit {unit} not found in net sheet"
+        print(result["error"])
+        return result
+
+    result["unit"] = matched_unit
+    result["hostname"] = hostname
+    print(f"Starting Linux diagnostic for {matched_unit} ({hostname})")
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        print(f"Connecting to {hostname}:22 as {username}...")
+        client.connect(hostname=hostname, port=22, username=username, password=password, timeout=20)
+        result["connected"] = True
+        print("Connected.")
+
+        # Scaffold command — replace/extend with real diagnostic checks
+        command = "hostname; echo '---'; uptime; echo '---'; uname -a"
+        print(f"Running: {command}")
+        stdin, stdout, stderr = client.exec_command(command, timeout=60)
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        result["output"] = out.strip()
+        if err.strip():
+            result["error"] = err.strip()
+            print(err.strip())
+        if out:
+            for line in out.splitlines():
+                print(line)
+        print("Linux diagnostic complete.")
+    except Exception as e:
+        result["error"] = str(e)
+        print(f"Failed to connect/run diagnostic on {hostname}: {e}")
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return result
+
 def check_patch_version(unit):
     username = os.getenv("scryptuser")
     password = os.getenv("scryptpass")
@@ -414,30 +493,98 @@ def validate_reports_zab():
             for line in false_positives:
                 print(line)
 
-def _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, truly_down):
-    host = compute_host_label(unit)
+def _safe_ping_result(result):
+    if result is None:
+        return None, ""
+    return result
+
+def _validate_unit_connectivity(
+    unit,
+    false_positives,
+    nuc_down,
+    stale_vpn,
+    truly_down,
+    scrypted_outage=None,
+    proxmox_outage=None,
+):
+    if scrypted_outage is None:
+        scrypted_outage = []
+    if proxmox_outage is None:
+        proxmox_outage = []
+
     print(f'Checking {unit}...')
-    code, output = ping_router(unit)
+    code, output = _safe_ping_result(ping_router(unit))
     print(output)
-    if "Reply from" in output and "TTL=" in output and "expired" not in output:
+
+    if _ping_reachable(output):
+        # For 3300+ units: router up -> NUC -> Scrypted -> (if needed) PVE
+        if uses_pve(unit):
+            print(f"Router is up, {code}: {unit} checking NUC..")
+            code, output = _safe_ping_result(ping_nuc(unit))
+            print(output)
+            if not _ping_reachable(output):
+                print(f"NUC is down, router is up. Bounce NUC.")
+                nuc_down.append(unit)
+                return
+
+            print(f"NUC is up, checking Scrypted..")
+            code, output = _safe_ping_result(ping_scrypted(unit))
+            print(output)
+            if _ping_reachable(output):
+                print(f"Router, NUC, and Scrypted are online — unit fully up: {unit}")
+                false_positives.append(unit)
+                return
+
+            print(f"Scrypted is down, checking PVE..")
+            code, output = _safe_ping_result(ping_pve(unit))
+            print(output)
+            if _ping_reachable(output):
+                print(f"Router and NUC up, Scrypted down, PVE up — Scrypted outage: {unit}")
+                scrypted_outage.append(unit)
+            else:
+                print(f"Router and NUC up, PVE down — Proxmox outage: {unit}")
+                proxmox_outage.append(unit)
+            return
+
+        # Pre-3300: router up -> NUC/compute
+        host = compute_host_label(unit)
         print(f"Router is up, {code}: {unit} checking {host.lower()}..")
-        code, output = ping_compute(unit)
+        code, output = _safe_ping_result(ping_compute(unit))
         print(output)
-        if "Reply from" in output and "TTL=" in output and "expired" not in output:
+        if _ping_reachable(output):
             print(f"Both {host} and Router are online {code}, false positive: {unit}")
             false_positives.append(unit)
         else:
             print(f"{host} is down, router is up. Bounce {host}.")
             nuc_down.append(unit)
-    elif "Reply from" not in output and "TTL=" not in output or "expired" in output:
-        print(f'Router is down {code}, checking {host}')
-        code, output = ping_compute(unit)
-        print(output)
-        if "Reply from" in output and "TTL=" in output and "expired" not in output:
-            print(f"{host} is up {code}, router is down, reset VPN connection on {unit}")
+        return
+
+    # Router down
+    host = compute_host_label(unit)
+    print(f'Router is down {code}, checking {host}')
+    if in_potential_stale_vpn_range(unit):
+        compute_result = ping_nuc(unit)
+        host_checked = "NUC"
+    else:
+        compute_result = ping_compute(unit)
+        host_checked = host
+    code, output = _safe_ping_result(compute_result)
+    print(output)
+    if _ping_reachable(output):
+        # Classic stale VPN (router down, compute up) — only for the 3000-3199 band
+        if in_potential_stale_vpn_range(unit):
+            print(f"{host_checked} is up {code}, router is down, potentially stale VPN on {unit}")
             stale_vpn.append(unit)
         else:
-            print(f"{host} and router are offline. {code}")
+            print(f"{host_checked} is up {code}, router is down on {unit} (outside potential-stale range)")
+            truly_down.append(unit)
+    else:
+        # Both unreachable: band 3000-3199 => potentially stale VPN; else truly down
+        if in_potential_stale_vpn_range(unit):
+            print(f"Router and NUC unreachable on {unit} (3000-3199) — potentially stale VPN")
+            stale_vpn.append(unit)
+        else:
+            print(f"{host_checked} and router are offline. {code}")
             truly_down.append(unit)
 
 def _issue_ticket_url(issue_id):
@@ -473,6 +620,8 @@ def validate_issues_report(issue_path=None):
     nuc_down = []
     stale_vpn = []
     truly_down = []
+    scrypted_outage = []
+    proxmox_outage = []
 
     try:
         with open(issue_path, 'r', newline='') as csvfile:
@@ -489,22 +638,34 @@ def validate_issues_report(issue_path=None):
                         print(f'Matched {unit} ({issue_id}) in {line[1]}')
     except Exception as e:
         print(f'Task failed: {e}')
-        return [], [], [], []
+        return [], [], [], [], [], []
 
     print(f'Validating {len(issue_units)} units from issues report...')
     for unit in issue_units:
-        _validate_unit_connectivity(unit, false_positives, nuc_down, stale_vpn, truly_down)
+        _validate_unit_connectivity(
+            unit,
+            false_positives,
+            nuc_down,
+            stale_vpn,
+            truly_down,
+            scrypted_outage,
+            proxmox_outage,
+        )
 
     false_positives = _with_ticket_links(false_positives, unit_issue_map)
     nuc_down = _with_ticket_links(nuc_down, unit_issue_map)
     stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map)
     truly_down = _with_ticket_links(truly_down, unit_issue_map)
+    scrypted_outage = _with_ticket_links(scrypted_outage, unit_issue_map)
+    proxmox_outage = _with_ticket_links(proxmox_outage, unit_issue_map)
 
     _print_linked_units("False positives (router and compute online):", false_positives)
     _print_linked_units("Offline compute (router up):", nuc_down)
-    _print_linked_units("Stale VPNs:", stale_vpn)
+    _print_linked_units("Potentially stale VPN (3000-3199 only):", stale_vpn)
     _print_linked_units("Truly down (router and compute offline):", truly_down)
-    return false_positives, nuc_down, stale_vpn, truly_down
+    _print_linked_units("Scrypted outage (router+NUC up, Scrypted down, PVE up):", scrypted_outage)
+    _print_linked_units("Proxmox outage (router+NUC up, PVE down):", proxmox_outage)
+    return false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage, proxmox_outage
 
 def _read_spreadsheet_rows(report_path):
     rows = []
@@ -543,12 +704,13 @@ def check_missing_recovery_emails(report_path=None):
     needs_initial_email = []
     potential_false_positive = []
     pending_recovery = []
+    email_status_up_to_date = []
 
     try:
         rows = _read_spreadsheet_rows(report_path)
     except Exception as e:
         print(f'Task failed: {e}')
-        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
+        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
 
     header_idx = None
     for i, row in enumerate(rows):
@@ -557,7 +719,22 @@ def check_missing_recovery_emails(report_path=None):
             break
     if header_idx is None:
         print("Could not find 'Recovery Email' column header in report")
-        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
+        return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
+
+    def _match_units_from_subject(subject):
+        matched = []
+        for net_row in net_array:
+            unit = net_row[0]
+            if unit in subject and unit not in false_mu_array:
+                matched.append(unit)
+        has_rd = any(unit.upper().startswith("RD") for unit in matched)
+        units = []
+        for unit in matched:
+            # Skip trailer MU when an RD head unit is already in the subject (e.g. RD3556(MU2001))
+            if unit.upper().startswith("MU") and has_rd:
+                continue
+            units.append(unit)
+        return units
 
     for row in rows[header_idx + 1:]:
         if len(row) < 7:
@@ -568,19 +745,21 @@ def check_missing_recovery_emails(report_path=None):
         recovery_email = (row[6] or "").strip()
         if not subject or not issue_id:
             continue
-        # Skip if recovery email already sent
+
+        matched_units = _match_units_from_subject(subject)
+        if outage_email and recovery_email:
+            for unit in matched_units:
+                if unit not in email_status_up_to_date:
+                    email_status_up_to_date.append(unit)
+                    unit_issue_map[unit] = issue_id
+                    print(f'Email status up to date for {unit} ({issue_id}): {subject}')
+            continue
+
+        # Skip if recovery email already sent without also having outage email handled above
         if recovery_email:
             continue
-        matched = []
-        for net_row in net_array:
-            unit = net_row[0]
-            if unit in subject and unit not in false_mu_array:
-                matched.append(unit)
-        has_rd = any(unit.upper().startswith("RD") for unit in matched)
-        for unit in matched:
-            # Skip trailer MU when an RD head unit is already in the subject (e.g. RD3556(MU2001))
-            if unit.upper().startswith("MU") and has_rd:
-                continue
+
+        for unit in matched_units:
             if unit not in units_to_check:
                 units_to_check.append(unit)
                 unit_issue_map[unit] = issue_id
@@ -622,6 +801,7 @@ def check_missing_recovery_emails(report_path=None):
     needs_initial_email = _with_ticket_links(needs_initial_email, unit_issue_map)
     potential_false_positive = _with_ticket_links(potential_false_positive, unit_issue_map)
     pending_recovery = _with_ticket_links(pending_recovery, unit_issue_map)
+    email_status_up_to_date = _with_ticket_links(email_status_up_to_date, unit_issue_map)
 
     _print_linked_units(
         "Needs recovery email (outage email sent, unit back up):",
@@ -639,32 +819,59 @@ def check_missing_recovery_emails(report_path=None):
         "Pending recovery (remainder):",
         pending_recovery,
     )
-    return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery
+    _print_linked_units(
+        "Email status up to date (outage and recovery emails sent):",
+        email_status_up_to_date,
+    )
+    return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
 
 def validate_reports_mesh():
     nuc_down = []
     stale_vpn = []
     missing2 = []
+    scrypted_outage = []
+    proxmox_outage = []
 
     print('Checking connectivity on missing units...')
     print('Current missing list:', missing)
     for unit in missing:
             for row in net_array:
                 if unit == row[0] and unit not in false_mu:
-                    _validate_unit_connectivity(unit, false_positive, nuc_down, stale_vpn, missing2)
+                    _validate_unit_connectivity(
+                        unit,
+                        false_positive,
+                        nuc_down,
+                        stale_vpn,
+                        missing2,
+                        scrypted_outage,
+                        proxmox_outage,
+                    )
                     break
                                 
     print("New adjusted missing list:")
     for line in missing:
-        if line not in false_positive and line != "Agent Name" and line not in nuc_down and line not in stale_vpn:
+        if (
+            line not in false_positive
+            and line != "Agent Name"
+            and line not in nuc_down
+            and line not in stale_vpn
+            and line not in scrypted_outage
+            and line not in proxmox_outage
+        ):
             print(line)
     print("Offline NUCs")
     for line in nuc_down:
         print(line)
-    print("Stale VPNs")
+    print("Potentially stale VPNs (3000-3199)")
     for line in stale_vpn:
         print(line)
-    return missing2, nuc_down, stale_vpn        
+    print("Scrypted outages")
+    for line in scrypted_outage:
+        print(line)
+    print("Proxmox outages")
+    for line in proxmox_outage:
+        print(line)
+    return missing2, nuc_down, stale_vpn, scrypted_outage, proxmox_outage
 
 def compare_zabbix():
     zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")

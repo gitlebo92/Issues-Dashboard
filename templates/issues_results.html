@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Issues Validation Results</title>
+    <title>Unit Outage Verification Results</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -38,16 +38,40 @@
             border-radius: 8px;
             padding: 16px;
         }
-        .panel ul { margin-top: 4px; }
+        .panel ul {
+            margin-top: 4px;
+            padding-left: 0;
+            list-style: none;
+        }
         .panel h2 { font-size: 16px; margin-top: 16px; }
         .panel h2:first-child { margin-top: 0; }
+        .panel li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 0;
+        }
+        .panel li input[type="checkbox"] {
+            cursor: pointer;
+            accent-color: #2563eb;
+        }
+        .count { color: #94a3b8; font-size: 13px; font-weight: normal; }
+        .restore {
+            background: none;
+            border: none;
+            color: #93c5fd;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 0;
+            text-decoration: underline;
+        }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
     </style>
 </head>
 <body>
 
-    <h1>Issues Validation Report</h1>
+    <h1>Unit Outage Verification Report</h1>
     <p class="status" id="status">Running validation... live stdout below.</p>
 
     <div class="layout">
@@ -57,16 +81,46 @@
         </div>
 
         <div class="panel">
-            <h2>False positives (router and compute online)</h2>
+            <h2>
+                False positives (router and compute online)
+                <span class="count" id="false_positives_count"></span>
+                <button type="button" class="restore" id="false_positives_restore" hidden>restore</button>
+            </h2>
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
 
-            <h2>Offline compute (router up)</h2>
+            <h2>
+                Offline compute (router up)
+                <span class="count" id="nuc_down_count"></span>
+                <button type="button" class="restore" id="nuc_down_restore" hidden>restore</button>
+            </h2>
             <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
 
-            <h2>Stale VPNs</h2>
+            <h2>
+                Scrypted outage
+                <span class="count" id="scrypted_outage_count"></span>
+                <button type="button" class="restore" id="scrypted_outage_restore" hidden>restore</button>
+            </h2>
+            <ul id="scrypted_outage"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Proxmox outage
+                <span class="count" id="proxmox_outage_count"></span>
+                <button type="button" class="restore" id="proxmox_outage_restore" hidden>restore</button>
+            </h2>
+            <ul id="proxmox_outage"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Potentially stale VPN (3000-3199)
+                <span class="count" id="stale_vpn_count"></span>
+                <button type="button" class="restore" id="stale_vpn_restore" hidden>restore</button>
+            </h2>
             <ul id="stale_vpn"><li class="empty">Waiting...</li></ul>
 
-            <h2>Truly down (router and compute offline)</h2>
+            <h2>
+                Truly down (router and compute offline)
+                <span class="count" id="truly_down_count"></span>
+                <button type="button" class="restore" id="truly_down_restore" hidden>restore</button>
+            </h2>
             <ul id="truly_down"><li class="empty">Waiting...</li></ul>
         </div>
     </div>
@@ -81,31 +135,86 @@
         const statusEl = document.getElementById("status");
         const source = new EventSource("/issues/stream/" + jobId);
 
+        const listIds = [
+            "false_positives",
+            "nuc_down",
+            "stale_vpn",
+            "truly_down",
+            "scrypted_outage",
+            "proxmox_outage",
+        ];
+        const listState = {};
+
+        listIds.forEach(function (id) {
+            listState[id] = [];
+            document.getElementById(id + "_restore").addEventListener("click", function () {
+                listState[id].forEach(function (entry) {
+                    entry.removed = false;
+                });
+                renderList(id);
+            });
+        });
+
         function fillList(id, items) {
+            listState[id] = (items || []).map(function (item) {
+                const isObject = typeof item === "object" && item !== null;
+                return {
+                    unit: isObject ? (item.unit || "") : item,
+                    issueId: isObject ? (item.issue_id || "") : "",
+                    url: isObject ? (item.url || "") : "",
+                    removed: false,
+                };
+            });
+            renderList(id);
+        }
+
+        function renderList(id) {
             const el = document.getElementById(id);
+            const countEl = document.getElementById(id + "_count");
+            const restoreEl = document.getElementById(id + "_restore");
+            const entries = listState[id];
+            const visible = entries.filter(function (entry) { return !entry.removed; });
+            const removedCount = entries.length - visible.length;
+
+            countEl.textContent = entries.length
+                ? "(" + visible.length + " of " + entries.length + ")"
+                : "";
+            restoreEl.hidden = removedCount === 0;
+
             el.innerHTML = "";
-            if (!items || items.length === 0) {
+            if (visible.length === 0) {
                 const li = document.createElement("li");
                 li.className = "empty";
-                li.textContent = "None";
+                li.textContent = entries.length === 0 ? "None" : "All cleared";
                 el.appendChild(li);
                 return;
             }
-            items.forEach(function (item) {
+
+            visible.forEach(function (entry) {
                 const li = document.createElement("li");
-                const unit = typeof item === "string" ? item : (item.unit || "");
-                const issueId = typeof item === "object" ? (item.issue_id || "") : "";
-                const url = typeof item === "object" ? (item.url || "") : "";
-                li.appendChild(document.createTextNode(unit));
-                if (issueId && url) {
-                    li.appendChild(document.createTextNode(" — "));
+
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.title = "Remove from list";
+                checkbox.addEventListener("change", function () {
+                    entry.removed = true;
+                    renderList(id);
+                });
+                li.appendChild(checkbox);
+
+                const label = document.createElement("span");
+                label.appendChild(document.createTextNode(entry.unit));
+                if (entry.issueId && entry.url) {
+                    label.appendChild(document.createTextNode(" — "));
                     const link = document.createElement("a");
-                    link.href = url;
+                    link.href = entry.url;
                     link.target = "_blank";
                     link.rel = "noopener noreferrer";
-                    link.textContent = issueId;
-                    li.appendChild(link);
+                    link.textContent = entry.issueId;
+                    label.appendChild(link);
                 }
+                li.appendChild(label);
+
                 el.appendChild(li);
             });
         }
@@ -121,6 +230,8 @@
                 fillList("nuc_down", r.nuc_down);
                 fillList("stale_vpn", r.stale_vpn);
                 fillList("truly_down", r.truly_down);
+                fillList("scrypted_outage", r.scrypted_outage);
+                fillList("proxmox_outage", r.proxmox_outage);
                 statusEl.textContent = "Validation complete.";
                 source.close();
             }

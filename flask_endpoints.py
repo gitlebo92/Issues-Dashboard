@@ -54,12 +54,14 @@ def _run_issues_validation(job_id, issue_path):
     try:
         work_tool.generate_false_mu()
         work_tool.generate_net_array()
-        false_positives, nuc_down, stale_vpn, truly_down = work_tool.validate_issues_report(issue_path)
+        false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage, proxmox_outage = work_tool.validate_issues_report(issue_path)
         job["results"] = {
             "false_positives": false_positives,
             "nuc_down": nuc_down,
             "stale_vpn": stale_vpn,
             "truly_down": truly_down,
+            "scrypted_outage": scrypted_outage,
+            "proxmox_outage": proxmox_outage,
         }
         job["queue"].put({"type": "done", "results": job["results"]})
     except Exception as e:
@@ -69,6 +71,8 @@ def _run_issues_validation(job_id, issue_path):
             "nuc_down": [],
             "stale_vpn": [],
             "truly_down": [],
+            "scrypted_outage": [],
+            "proxmox_outage": [],
         }})
     finally:
         sys.stdout = original_stdout
@@ -86,12 +90,13 @@ def _run_recovery_email_check(job_id, report_path):
     try:
         work_tool.generate_false_mu()
         work_tool.generate_net_array()
-        needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery = work_tool.check_missing_recovery_emails(report_path)
+        needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date = work_tool.check_missing_recovery_emails(report_path)
         job["results"] = {
             "needs_recovery_email": needs_recovery_email,
             "needs_initial_email": needs_initial_email,
             "potential_false_positive": potential_false_positive,
             "pending_recovery": pending_recovery,
+            "email_status_up_to_date": email_status_up_to_date,
         }
         job["queue"].put({"type": "done", "results": job["results"]})
     except Exception as e:
@@ -101,6 +106,7 @@ def _run_recovery_email_check(job_id, report_path):
             "needs_initial_email": [],
             "potential_false_positive": [],
             "pending_recovery": [],
+            "email_status_up_to_date": [],
         }})
     finally:
         sys.stdout = original_stdout
@@ -209,6 +215,30 @@ def recovery_email_watch(job_id):
 def recovery_email_stream(job_id):
     return _sse_stream(job_id)
 
+def _run_linux_diagnostic(job_id, unit):
+    import sys
+    job = stream_jobs[job_id]
+    original_stdout = sys.stdout
+    sys.stdout = JobStdout(job_id, original_stdout)
+    try:
+        work_tool.generate_false_mu()
+        work_tool.generate_net_array()
+        result = work_tool.run_linux_diagnostic(unit)
+        job["results"] = result
+        job["queue"].put({"type": "done", "results": result})
+    except Exception as e:
+        job["queue"].put({"type": "log", "line": f"ERROR: {e}"})
+        job["queue"].put({"type": "done", "results": {
+            "unit": unit or "",
+            "hostname": "",
+            "connected": False,
+            "output": "",
+            "error": str(e),
+        }})
+    finally:
+        sys.stdout = original_stdout
+        job["done"] = True
+
 @app.route("/zabbix", methods=["GET"])
 def zabbix_form():
     return render_template("zabbix.html")
@@ -217,25 +247,28 @@ def linux_form():
     return render_template("linux.html")
 @app.route("/linux/results", methods=["POST"])
 def linux_results():
-    username = os.getenv("scryptuser")
-    password = os.getenv("scryptpass")
-    unit = request.form.get("unit")
-    for row in net_array:
-        if unit.upper()[-4:] == row[0].upper()[-4:]:
-            hostname = row[12]
-            break
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(hostname=hostname, port=22, username=username, password=password)
-        stdin, stdout, stderr = client.exec_command()
-        stdin.flush()
-        result = stdout.read().decode('utf-8')
-        print(result)
-    except Exception as e:
-        print(f'Failed to connect to {hostname}: {e}'   )
+    unit = (request.form.get("unit") or "").strip()
+    if not unit:
+        return "No unit provided", 400
+    job_id = uuid.uuid4().hex
+    stream_jobs[job_id] = {
+        "queue": queue.Queue(),
+        "done": False,
+        "results": None,
+    }
+    thread = threading.Thread(target=_run_linux_diagnostic, args=(job_id, unit), daemon=True)
+    thread.start()
+    return redirect(url_for("linux_watch", job_id=job_id))
 
-    return render_template("linux_results.html", result=result)
+@app.route("/linux/watch/<job_id>", methods=["GET"])
+def linux_watch(job_id):
+    if job_id not in stream_jobs:
+        return "Unknown job", 404
+    return render_template("linux_results.html", job_id=job_id)
+
+@app.route("/linux/stream/<job_id>", methods=["GET"])
+def linux_stream(job_id):
+    return _sse_stream(job_id)
 @app.route("/victron/results", methods=["POST"])
 def install_checker():
     idUser = (os.getenv("idUser") or "").strip()
@@ -391,7 +424,7 @@ def outage_filter():
     work_tool.compare_reports(issue_path, mesh_path)
     work_tool.clear_old_reports(mesh_path, issue_path)
 
-    missing2, nuc_down, stale_vpn = work_tool.validate_reports_mesh()
+    missing2, nuc_down, stale_vpn, scrypted_outage, proxmox_outage = work_tool.validate_reports_mesh()
     try:
         os.remove(local_issue)
         os.remove(local_mesh)
@@ -402,7 +435,9 @@ def outage_filter():
     "message": "Filtered outage report",
     "missing": missing2,
     "nuc_down": nuc_down,
-    "stale_vpn": stale_vpn
+    "stale_vpn": stale_vpn,
+    "scrypted_outage": scrypted_outage,
+    "proxmox_outage": proxmox_outage,
 }), 200
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

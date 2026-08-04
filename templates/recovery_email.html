@@ -12,6 +12,7 @@
         <li>row[5] filled, row[6] empty + back up → needs recovery email</li>
         <li>row[5] and row[6] empty + back up → potential false positive</li>
         <li>everything else checked → pending recovery</li>
+        <li>row[5] and row[6] both filled → email status up to date</li>
     </ul>
 
     <form method="POST" action="/recovery_email/results" enctype="multipart/form-data">

@@ -45,6 +45,7 @@
         .highlight-initial h2 { color: #f87171; }
         .highlight-false h2 { color: #a78bfa; }
         .highlight-pending h2 { color: #38bdf8; }
+        .highlight-uptodate h2 { color: #4ade80; }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
     </style>
@@ -83,6 +84,12 @@
                 <h2>Pending recovery</h2>
                 <p class="empty">Checked units not in the lists above</p>
                 <ul id="pending_recovery"><li class="empty">Waiting...</li></ul>
+            </div>
+
+            <div class="highlight-uptodate">
+                <h2>Email status up to date</h2>
+                <p class="empty">Outage and recovery emails both sent</p>
+                <ul id="email_status_up_to_date"><li class="empty">Waiting...</li></ul>
             </div>
         </div>
     </div>
@@ -137,6 +144,7 @@
                 fillList("needs_initial_email", r.needs_initial_email);
                 fillList("potential_false_positive", r.potential_false_positive);
                 fillList("pending_recovery", r.pending_recovery);
+                fillList("email_status_up_to_date", r.email_status_up_to_date);
                 statusEl.textContent = "Validation complete.";
                 source.close();
             }
