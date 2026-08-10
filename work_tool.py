@@ -274,70 +274,6 @@ def ping_scrypted(unit):
                 scrypted = row[12]
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  scrypted], text=True, capture_output=True)
                 return result.returncode, result.stdout 
-def run_linux_diagnostic(unit):
-    """SSH diagnostic scaffold for a unit. Prints progress to stdout for Flask streaming."""
-    username = os.getenv("scryptuser")
-    password = os.getenv("scryptpass")
-    result = {
-        "unit": unit,
-        "hostname": "",
-        "connected": False,
-        "output": "",
-        "error": "",
-    }
-    if not unit:
-        result["error"] = "No unit provided"
-        print(result["error"])
-        return result
-
-    hostname = None
-    matched_unit = None
-    for row in net_array:
-        if unit.upper()[-4:] == row[0].upper()[-4:]:
-            matched_unit = row[0]
-            hostname = row[12]
-            break
-
-    if not hostname:
-        result["error"] = f"Unit {unit} not found in net sheet"
-        print(result["error"])
-        return result
-
-    result["unit"] = matched_unit
-    result["hostname"] = hostname
-    print(f"Starting Linux diagnostic for {matched_unit} ({hostname})")
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        print(f"Connecting to {hostname}:22 as {username}...")
-        client.connect(hostname=hostname, port=22, username=username, password=password, timeout=20)
-        result["connected"] = True
-        print("Connected.")
-
-        # Scaffold command — replace/extend with real diagnostic checks
-        command = "hostname; echo '---'; uptime; echo '---'; uname -a"
-        print(f"Running: {command}")
-        stdin, stdout, stderr = client.exec_command(command, timeout=60)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        result["output"] = out.strip()
-        if err.strip():
-            result["error"] = err.strip()
-            print(err.strip())
-        if out:
-            for line in out.splitlines():
-                print(line)
-        print("Linux diagnostic complete.")
-    except Exception as e:
-        result["error"] = str(e)
-        print(f"Failed to connect/run diagnostic on {hostname}: {e}")
-    finally:
-        try:
-            client.close()
-        except Exception:
-            pass
-    return result
 
 def check_patch_version(unit):
     username = os.getenv("scryptuser")
@@ -515,38 +451,44 @@ def _validate_unit_connectivity(
     print(f'Checking {unit}...')
     code, output = _safe_ping_result(ping_router(unit))
     print(output)
+    router_up = _ping_reachable(output)
 
-    if _ping_reachable(output):
-        # For 3300+ units: router up -> NUC -> Scrypted -> (if needed) PVE
-        if uses_pve(unit):
-            print(f"Router is up, {code}: {unit} checking NUC..")
-            code, output = _safe_ping_result(ping_nuc(unit))
-            print(output)
-            if not _ping_reachable(output):
-                print(f"NUC is down, router is up. Bounce NUC.")
-                nuc_down.append(unit)
-                return
+    # Units >= 3300: router -> PVE only (never NUC). Scrypted only if both are up.
+    if uses_pve(unit):
+        print(f"3300+ unit — checking PVE (skipping NUC)..")
+        code, pve_output = _safe_ping_result(ping_pve(unit))
+        print(pve_output)
+        pve_up = _ping_reachable(pve_output)
 
-            print(f"NUC is up, checking Scrypted..")
-            code, output = _safe_ping_result(ping_scrypted(unit))
-            print(output)
-            if _ping_reachable(output):
-                print(f"Router, NUC, and Scrypted are online — unit fully up: {unit}")
-                false_positives.append(unit)
-                return
-
-            print(f"Scrypted is down, checking PVE..")
-            code, output = _safe_ping_result(ping_pve(unit))
-            print(output)
-            if _ping_reachable(output):
-                print(f"Router and NUC up, Scrypted down, PVE up — Scrypted outage: {unit}")
-                scrypted_outage.append(unit)
-            else:
-                print(f"Router and NUC up, PVE down — Proxmox outage: {unit}")
-                proxmox_outage.append(unit)
+        if router_up and not pve_up:
+            print(f"Router up, PVE down — offline compute: {unit}")
+            nuc_down.append(unit)
             return
 
-        # Pre-3300: router up -> NUC/compute
+        if router_up and pve_up:
+            print(f"Router and PVE up, checking Scrypted..")
+            code, scrypt_output = _safe_ping_result(ping_scrypted(unit))
+            print(scrypt_output)
+            if _ping_reachable(scrypt_output):
+                print(f"Router, PVE, and Scrypted are online — unit fully up: {unit}")
+                false_positives.append(unit)
+            else:
+                print(f"Router and PVE up, Scrypted down — Scrypted outage: {unit}")
+                scrypted_outage.append(unit)
+            return
+
+        if not router_up and not pve_up:
+            print(f"Router and PVE down — unit fully down (skipping Scrypted): {unit}")
+            truly_down.append(unit)
+            return
+
+        # Router down, PVE up
+        print(f"Router down, PVE up on {unit}")
+        truly_down.append(unit)
+        return
+
+    # Pre-3300 units
+    if router_up:
         host = compute_host_label(unit)
         print(f"Router is up, {code}: {unit} checking {host.lower()}..")
         code, output = _safe_ping_result(ping_compute(unit))
@@ -559,7 +501,7 @@ def _validate_unit_connectivity(
             nuc_down.append(unit)
         return
 
-    # Router down
+    # Router down (pre-3300)
     host = compute_host_label(unit)
     print(f'Router is down {code}, checking {host}')
     if in_potential_stale_vpn_range(unit):
@@ -663,8 +605,8 @@ def validate_issues_report(issue_path=None):
     _print_linked_units("Offline compute (router up):", nuc_down)
     _print_linked_units("Potentially stale VPN (3000-3199 only):", stale_vpn)
     _print_linked_units("Truly down (router and compute offline):", truly_down)
-    _print_linked_units("Scrypted outage (router+NUC up, Scrypted down, PVE up):", scrypted_outage)
-    _print_linked_units("Proxmox outage (router+NUC up, PVE down):", proxmox_outage)
+    _print_linked_units("Scrypted outage (router+PVE up, Scrypted down):", scrypted_outage)
+    _print_linked_units("Proxmox outage:", proxmox_outage)
     return false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage, proxmox_outage
 
 def _read_spreadsheet_rows(report_path):

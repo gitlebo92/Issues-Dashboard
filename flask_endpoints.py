@@ -8,6 +8,7 @@ import json
 import uuid
 import threading
 import queue
+import paramiko
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -250,15 +251,16 @@ def linux_results():
     unit = (request.form.get("unit") or "").strip()
     if not unit:
         return "No unit provided", 400
-    job_id = uuid.uuid4().hex
-    stream_jobs[job_id] = {
-        "queue": queue.Queue(),
-        "done": False,
-        "results": None,
-    }
-    thread = threading.Thread(target=_run_linux_diagnostic, args=(job_id, unit), daemon=True)
-    thread.start()
-    return redirect(url_for("linux_watch", job_id=job_id))
+    for row in work_tool.net_array:
+        if row[0] == unit:
+            hostname = row[12]
+            port = 22
+            user = os.getenv("scryptuser")
+            password = os.getenv("scryptpass")
+            sshclient = paramiko.SSHClient
+            sshclient.set_missing_host_key_policy(paramiko.AutoAddPolicy)
+            sshclient.connect(hostname, port, user, password)
+            stdin, stdout, stderr = sshclient.exec_command("")
 
 @app.route("/linux/watch/<job_id>", methods=["GET"])
 def linux_watch(job_id):

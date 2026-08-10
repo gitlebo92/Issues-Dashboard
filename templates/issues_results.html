@@ -20,6 +20,30 @@
         @media (max-width: 900px) {
             .layout { grid-template-columns: 1fr; }
         }
+        .console-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .console-toolbar input[type="search"] {
+            flex: 1;
+            background: #020617;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+        .console-toolbar input[type="search"]:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+        .console-match-count {
+            color: #94a3b8;
+            font-size: 13px;
+            white-space: nowrap;
+        }
         .console {
             background: #020617;
             color: #86efac;
@@ -32,6 +56,12 @@
             font-size: 13px;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .console mark {
+            background: #ca8a04;
+            color: #020617;
+            border-radius: 2px;
+            padding: 0 1px;
         }
         .panel {
             background: #1e293b;
@@ -77,6 +107,10 @@
     <div class="layout">
         <div>
             <h2>Stdout</h2>
+            <div class="console-toolbar">
+                <input type="search" id="console_search" placeholder="Search units / stdout..." autocomplete="off">
+                <span class="console-match-count" id="console_match_count"></span>
+            </div>
             <div class="console" id="console"></div>
         </div>
 
@@ -89,14 +123,14 @@
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
 
             <h2>
-                Offline compute (router up)
+                Offline compute (router up, PVE/NUC down)
                 <span class="count" id="nuc_down_count"></span>
                 <button type="button" class="restore" id="nuc_down_restore" hidden>restore</button>
             </h2>
             <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
 
             <h2>
-                Scrypted outage
+                Scrypted outage (router+PVE up, Scrypted down)
                 <span class="count" id="scrypted_outage_count"></span>
                 <button type="button" class="restore" id="scrypted_outage_restore" hidden>restore</button>
             </h2>
@@ -132,8 +166,71 @@
     <script>
         const jobId = {{ job_id|tojson }};
         const consoleEl = document.getElementById("console");
+        const consoleSearchEl = document.getElementById("console_search");
+        const consoleMatchCountEl = document.getElementById("console_match_count");
         const statusEl = document.getElementById("status");
         const source = new EventSource("/issues/stream/" + jobId);
+        const consoleLines = [];
+        let consoleFollow = true;
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        function highlightMatch(text, query) {
+            if (!query) {
+                return escapeHtml(text);
+            }
+            const lower = text.toLowerCase();
+            const q = query.toLowerCase();
+            let result = "";
+            let cursor = 0;
+            let idx = lower.indexOf(q);
+            while (idx !== -1) {
+                result += escapeHtml(text.slice(cursor, idx));
+                result += "<mark>" + escapeHtml(text.slice(idx, idx + q.length)) + "</mark>";
+                cursor = idx + q.length;
+                idx = lower.indexOf(q, cursor);
+            }
+            result += escapeHtml(text.slice(cursor));
+            return result;
+        }
+
+        function renderConsole(scrollToBottom) {
+            const query = (consoleSearchEl.value || "").trim();
+            if (!query) {
+                consoleEl.textContent = consoleLines.join("\n") + (consoleLines.length ? "\n" : "");
+                consoleMatchCountEl.textContent = "";
+            } else {
+                const matches = consoleLines.filter(function (line) {
+                    return line.toLowerCase().indexOf(query.toLowerCase()) !== -1;
+                });
+                consoleEl.innerHTML = matches.length
+                    ? matches.map(function (line) {
+                        return highlightMatch(line, query);
+                    }).join("\n") + "\n"
+                    : "";
+                consoleMatchCountEl.textContent = matches.length
+                    ? matches.length + " matching line" + (matches.length === 1 ? "" : "s")
+                    : "No matches";
+            }
+            if (scrollToBottom && consoleFollow) {
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            }
+        }
+
+        consoleEl.addEventListener("scroll", function () {
+            const nearBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 40;
+            consoleFollow = nearBottom;
+        });
+
+        consoleSearchEl.addEventListener("input", function () {
+            renderConsole(false);
+        });
 
         const listIds = [
             "false_positives",
@@ -222,8 +319,8 @@
         source.onmessage = function (event) {
             const data = JSON.parse(event.data);
             if (data.type === "log") {
-                consoleEl.textContent += data.line + "\n";
-                consoleEl.scrollTop = consoleEl.scrollHeight;
+                consoleLines.push(data.line);
+                renderConsole(true);
             } else if (data.type === "done") {
                 const r = data.results || {};
                 fillList("false_positives", r.false_positives);
