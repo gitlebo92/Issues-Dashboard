@@ -441,12 +441,9 @@ def _validate_unit_connectivity(
     stale_vpn,
     truly_down,
     scrypted_outage=None,
-    proxmox_outage=None,
 ):
     if scrypted_outage is None:
         scrypted_outage = []
-    if proxmox_outage is None:
-        proxmox_outage = []
 
     print(f'Checking {unit}...')
     code, output = _safe_ping_result(ping_router(unit))
@@ -534,53 +531,124 @@ def _issue_ticket_url(issue_id):
         return ""
     return f"https://erp.sentracam.com/app/issue/{issue_id}"
 
-def _with_ticket_links(units, unit_issue_map):
+def _parse_outage_kind(issue_type):
+    text = (issue_type or "").strip()
+    lower = text.lower()
+    if "partial" in lower:
+        return "Partial"
+    if "full" in lower:
+        return "Full"
+    return text
+
+def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
+    if unit_meta_map is None:
+        unit_meta_map = {}
     linked = []
     for unit in units:
         issue_id = unit_issue_map.get(unit, "")
+        meta = unit_meta_map.get(unit, {})
         linked.append({
             "unit": unit,
             "issue_id": issue_id,
             "url": _issue_ticket_url(issue_id),
+            "outage_type": meta.get("outage_type", ""),
+            "issue_subtype": meta.get("issue_subtype", ""),
+            "undiagnosed": bool(meta.get("undiagnosed")),
         })
+    linked.sort(key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or ""))
     return linked
 
 def _print_linked_units(label, linked_units):
     print(label)
     for item in linked_units:
+        parts = [item["unit"]]
         if item.get("issue_id"):
-            print(f'{item["unit"]} - {item["issue_id"]} - {item["url"]}')
-        else:
-            print(item["unit"])
+            parts.append(item["issue_id"])
+            parts.append(item.get("url") or "")
+        if item.get("outage_type"):
+            parts.append(item["outage_type"])
+        if item.get("undiagnosed"):
+            parts.append("UNDIAGNOSED (priority)")
+        elif item.get("issue_subtype"):
+            parts.append(item["issue_subtype"])
+        print(" - ".join(p for p in parts if p))
 
 def validate_issues_report(issue_path=None):
     if issue_path is None:
         issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
     issue_units = []
     unit_issue_map = {}
+    unit_meta_map = {}
     false_positives = []
     nuc_down = []
     stale_vpn = []
     truly_down = []
     scrypted_outage = []
-    proxmox_outage = []
+    has_type_subtype = False
+    id_col = 0
+    subject_col = 1
+    type_col = None
+    subtype_col = None
 
     try:
-        with open(issue_path, 'r', newline='') as csvfile:
+        with open(issue_path, 'r', newline='', encoding='utf-8-sig') as csvfile:
             linereader = csv.reader(csvfile)
             for line in linereader:
-                if not line or len(line) < 2 or line[1] == 'Subject':
+                if not line or len(line) < 2:
                     continue
-                issue_id = (line[0] or "").strip()
+                header_cells = [(c or "").strip() for c in line]
+                header_lower = [c.lower() for c in header_cells]
+                if "subject" in header_lower:
+                    subject_col = header_lower.index("subject")
+                    if "id" in header_lower:
+                        id_col = header_lower.index("id")
+                    if "issue type" in header_lower and "issue subtype" in header_lower:
+                        type_col = header_lower.index("issue type")
+                        subtype_col = header_lower.index("issue subtype")
+                        has_type_subtype = True
+                        print(
+                            f"Detected Issue Type (col {type_col}) and "
+                            f"Issue Subtype (col {subtype_col}) headers"
+                        )
+                    else:
+                        print("Issue Type / Issue Subtype headers not found — skipping subtype annotations")
+                    continue
+
+                subject_cell = (line[subject_col] if len(line) > subject_col else "") or ""
+                subject_cell = subject_cell.strip()
+                if not subject_cell:
+                    continue
+                issue_id = ((line[id_col] if len(line) > id_col else "") or "").strip()
+                issue_type = ""
+                issue_subtype = ""
+                outage_type = ""
+                undiagnosed = False
+                if has_type_subtype:
+                    issue_type = ((line[type_col] if len(line) > type_col else "") or "").strip()
+                    issue_subtype = ((line[subtype_col] if len(line) > subtype_col else "") or "").strip()
+                    outage_type = _parse_outage_kind(issue_type)
+                    undiagnosed = not issue_subtype
                 for net_row in net_array:
                     unit = net_row[0]
-                    if unit in line[1] and unit not in issue_units and unit not in false_mu_array:
+                    if unit in subject_cell and unit not in issue_units and unit not in false_mu_array:
                         issue_units.append(unit)
                         unit_issue_map[unit] = issue_id
-                        print(f'Matched {unit} ({issue_id}) in {line[1]}')
+                        unit_meta_map[unit] = {
+                            "issue_type": issue_type,
+                            "outage_type": outage_type,
+                            "issue_subtype": issue_subtype,
+                            "undiagnosed": undiagnosed,
+                        }
+                        extra = ""
+                        if has_type_subtype:
+                            if undiagnosed:
+                                extra = f" [{outage_type or 'Unknown'} | UNDIAGNOSED — priority]"
+                            else:
+                                extra = f" [{outage_type or 'Unknown'} | {issue_subtype}]"
+                        print(f'Matched {unit} ({issue_id}) in {subject_cell}{extra}')
     except Exception as e:
         print(f'Task failed: {e}')
-        return [], [], [], [], [], []
+        return [], [], [], [], []
 
     print(f'Validating {len(issue_units)} units from issues report...')
     for unit in issue_units:
@@ -591,23 +659,20 @@ def validate_issues_report(issue_path=None):
             stale_vpn,
             truly_down,
             scrypted_outage,
-            proxmox_outage,
         )
 
-    false_positives = _with_ticket_links(false_positives, unit_issue_map)
-    nuc_down = _with_ticket_links(nuc_down, unit_issue_map)
-    stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map)
-    truly_down = _with_ticket_links(truly_down, unit_issue_map)
-    scrypted_outage = _with_ticket_links(scrypted_outage, unit_issue_map)
-    proxmox_outage = _with_ticket_links(proxmox_outage, unit_issue_map)
+    false_positives = _with_ticket_links(false_positives, unit_issue_map, unit_meta_map)
+    nuc_down = _with_ticket_links(nuc_down, unit_issue_map, unit_meta_map)
+    stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map, unit_meta_map)
+    truly_down = _with_ticket_links(truly_down, unit_issue_map, unit_meta_map)
+    scrypted_outage = _with_ticket_links(scrypted_outage, unit_issue_map, unit_meta_map)
 
     _print_linked_units("False positives (router and compute online):", false_positives)
     _print_linked_units("Offline compute (router up):", nuc_down)
     _print_linked_units("Potentially stale VPN (3000-3199 only):", stale_vpn)
     _print_linked_units("Truly down (router and compute offline):", truly_down)
     _print_linked_units("Scrypted outage (router+PVE up, Scrypted down):", scrypted_outage)
-    _print_linked_units("Proxmox outage:", proxmox_outage)
-    return false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage, proxmox_outage
+    return false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage
 
 def _read_spreadsheet_rows(report_path):
     rows = []
@@ -772,7 +837,6 @@ def validate_reports_mesh():
     stale_vpn = []
     missing2 = []
     scrypted_outage = []
-    proxmox_outage = []
 
     print('Checking connectivity on missing units...')
     print('Current missing list:', missing)
@@ -786,7 +850,6 @@ def validate_reports_mesh():
                         stale_vpn,
                         missing2,
                         scrypted_outage,
-                        proxmox_outage,
                     )
                     break
                                 
@@ -798,7 +861,6 @@ def validate_reports_mesh():
             and line not in nuc_down
             and line not in stale_vpn
             and line not in scrypted_outage
-            and line not in proxmox_outage
         ):
             print(line)
     print("Offline NUCs")
@@ -810,10 +872,7 @@ def validate_reports_mesh():
     print("Scrypted outages")
     for line in scrypted_outage:
         print(line)
-    print("Proxmox outages")
-    for line in proxmox_outage:
-        print(line)
-    return missing2, nuc_down, stale_vpn, scrypted_outage, proxmox_outage
+    return missing2, nuc_down, stale_vpn, scrypted_outage
 
 def compare_zabbix():
     zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")

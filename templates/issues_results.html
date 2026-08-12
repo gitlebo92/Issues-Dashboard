@@ -97,6 +97,18 @@
         }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
+        .meta {
+            color: #94a3b8;
+            font-size: 12px;
+        }
+        .undiagnosed-row {
+            color: #fecaca;
+        }
+        .undiagnosed-badge {
+            color: #fecaca;
+            font-weight: bold;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -135,13 +147,6 @@
                 <button type="button" class="restore" id="scrypted_outage_restore" hidden>restore</button>
             </h2>
             <ul id="scrypted_outage"><li class="empty">Waiting...</li></ul>
-
-            <h2>
-                Proxmox outage
-                <span class="count" id="proxmox_outage_count"></span>
-                <button type="button" class="restore" id="proxmox_outage_restore" hidden>restore</button>
-            </h2>
-            <ul id="proxmox_outage"><li class="empty">Waiting...</li></ul>
 
             <h2>
                 Potentially stale VPN (3000-3199)
@@ -200,15 +205,48 @@
             return result;
         }
 
+        function collectSearchMatches(lines, query) {
+            const q = query.toLowerCase();
+            const include = new Array(lines.length).fill(false);
+            const checkingRe = /^Checking\s+/i;
+            const sectionEndRe = /^(Validating\s|False positives|Offline compute|Potentially stale|Truly down|Scrypted outage)/i;
+
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].toLowerCase().indexOf(q) !== -1) {
+                    include[i] = true;
+                }
+            }
+
+            // For unit searches: keep the full check block after "Checking UNIT..."
+            // so ping status lines (which omit the unit name) stay visible.
+            for (let i = 0; i < lines.length; i++) {
+                if (!checkingRe.test(lines[i]) || lines[i].toLowerCase().indexOf(q) === -1) {
+                    continue;
+                }
+                for (let j = i + 1; j < lines.length; j++) {
+                    if (checkingRe.test(lines[j]) || sectionEndRe.test(lines[j])) {
+                        break;
+                    }
+                    include[j] = true;
+                }
+            }
+
+            const matches = [];
+            for (let i = 0; i < lines.length; i++) {
+                if (include[i]) {
+                    matches.push(lines[i]);
+                }
+            }
+            return matches;
+        }
+
         function renderConsole(scrollToBottom) {
             const query = (consoleSearchEl.value || "").trim();
             if (!query) {
                 consoleEl.textContent = consoleLines.join("\n") + (consoleLines.length ? "\n" : "");
                 consoleMatchCountEl.textContent = "";
             } else {
-                const matches = consoleLines.filter(function (line) {
-                    return line.toLowerCase().indexOf(query.toLowerCase()) !== -1;
-                });
+                const matches = collectSearchMatches(consoleLines, query);
                 consoleEl.innerHTML = matches.length
                     ? matches.map(function (line) {
                         return highlightMatch(line, query);
@@ -238,7 +276,6 @@
             "stale_vpn",
             "truly_down",
             "scrypted_outage",
-            "proxmox_outage",
         ];
         const listState = {};
 
@@ -259,8 +296,17 @@
                     unit: isObject ? (item.unit || "") : item,
                     issueId: isObject ? (item.issue_id || "") : "",
                     url: isObject ? (item.url || "") : "",
+                    outageType: isObject ? (item.outage_type || "") : "",
+                    issueSubtype: isObject ? (item.issue_subtype || "") : "",
+                    undiagnosed: isObject ? !!item.undiagnosed : false,
                     removed: false,
                 };
+            });
+            listState[id].sort(function (a, b) {
+                if (a.undiagnosed !== b.undiagnosed) {
+                    return a.undiagnosed ? -1 : 1;
+                }
+                return (a.unit || "").localeCompare(b.unit || "");
             });
             renderList(id);
         }
@@ -289,6 +335,9 @@
 
             visible.forEach(function (entry) {
                 const li = document.createElement("li");
+                if (entry.undiagnosed) {
+                    li.className = "undiagnosed-row";
+                }
 
                 const checkbox = document.createElement("input");
                 checkbox.type = "checkbox";
@@ -310,8 +359,25 @@
                     link.textContent = entry.issueId;
                     label.appendChild(link);
                 }
-                li.appendChild(label);
 
+                const metaBits = [];
+                if (entry.outageType) {
+                    metaBits.push(entry.outageType);
+                }
+                if (entry.undiagnosed) {
+                    metaBits.push("UNDIAGNOSED");
+                } else if (entry.issueSubtype) {
+                    metaBits.push(entry.issueSubtype);
+                }
+                if (metaBits.length) {
+                    label.appendChild(document.createTextNode(" "));
+                    const meta = document.createElement("span");
+                    meta.className = entry.undiagnosed ? "undiagnosed-badge" : "meta";
+                    meta.textContent = "(" + metaBits.join(" · ") + ")";
+                    label.appendChild(meta);
+                }
+
+                li.appendChild(label);
                 el.appendChild(li);
             });
         }
@@ -328,7 +394,6 @@
                 fillList("stale_vpn", r.stale_vpn);
                 fillList("truly_down", r.truly_down);
                 fillList("scrypted_outage", r.scrypted_outage);
-                fillList("proxmox_outage", r.proxmox_outage);
                 statusEl.textContent = "Validation complete.";
                 source.close();
             }

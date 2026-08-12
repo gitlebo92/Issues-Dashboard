@@ -55,14 +55,13 @@ def _run_issues_validation(job_id, issue_path):
     try:
         work_tool.generate_false_mu()
         work_tool.generate_net_array()
-        false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage, proxmox_outage = work_tool.validate_issues_report(issue_path)
+        false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage = work_tool.validate_issues_report(issue_path)
         job["results"] = {
             "false_positives": false_positives,
             "nuc_down": nuc_down,
             "stale_vpn": stale_vpn,
             "truly_down": truly_down,
             "scrypted_outage": scrypted_outage,
-            "proxmox_outage": proxmox_outage,
         }
         job["queue"].put({"type": "done", "results": job["results"]})
     except Exception as e:
@@ -73,7 +72,6 @@ def _run_issues_validation(job_id, issue_path):
             "stale_vpn": [],
             "truly_down": [],
             "scrypted_outage": [],
-            "proxmox_outage": [],
         }})
     finally:
         sys.stdout = original_stdout
@@ -426,7 +424,7 @@ def outage_filter():
     work_tool.compare_reports(issue_path, mesh_path)
     work_tool.clear_old_reports(mesh_path, issue_path)
 
-    missing2, nuc_down, stale_vpn, scrypted_outage, proxmox_outage = work_tool.validate_reports_mesh()
+    missing2, nuc_down, stale_vpn, scrypted_outage = work_tool.validate_reports_mesh()
     try:
         os.remove(local_issue)
         os.remove(local_mesh)
@@ -439,7 +437,6 @@ def outage_filter():
     "nuc_down": nuc_down,
     "stale_vpn": stale_vpn,
     "scrypted_outage": scrypted_outage,
-    "proxmox_outage": proxmox_outage,
 }), 200
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
