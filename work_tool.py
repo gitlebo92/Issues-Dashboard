@@ -2,13 +2,20 @@ import requests
 import csv
 import os
 import sys
+import re
 import subprocess
 import zabbix_tool
 import multiprocessing
 import paramiko
-from requests.auth import HTTPDigestAuth
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 from datetime import datetime
 from dotenv import load_dotenv
+from urllib.parse import quote
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 multiprocessing.freeze_support()
 def resource_path(relative_path):
@@ -221,6 +228,32 @@ def ping_speaker(unit):
                 speaker = row[4]
                 result = subprocess.run(['ping', '-n', '4', '-w', '1000',  speaker], text=True, capture_output=True)
                 return result.returncode, result.stdout 
+
+CAMERA_ENDPOINTS = {
+    "fisheye": (5, "Fisheye"),
+    "camera1": (6, "Camera 1"),
+    "camera2": (7, "Camera 2"),
+    "camera3": (8, "Camera 3"),
+    "camera4": (9, "Camera 4"),
+}
+
+def ping_camera(unit, target):
+    endpoint = CAMERA_ENDPOINTS.get(target)
+    if not endpoint:
+        return None
+    column, _ = endpoint
+    row = _net_row_for_unit(unit)
+    if not row or len(row) <= column or not str(row[column]).strip():
+        return None
+    host = str(row[column]).strip()
+    if target == "fisheye":
+        host = _host_only(host)
+    result = subprocess.run(
+        ['ping', '-n', '4', '-w', '1000', host],
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode, result.stdout
     
 def ping_switch(unit):
     for row in net_array:
@@ -441,95 +474,437 @@ def _validate_unit_connectivity(
     stale_vpn,
     truly_down,
     scrypted_outage=None,
+    result_value=None,
 ):
     if scrypted_outage is None:
         scrypted_outage = []
+    if result_value is None:
+        result_value = unit
 
-    print(f'Checking {unit}...')
+    print(f"Checking {unit}'s router...")
     code, output = _safe_ping_result(ping_router(unit))
     print(output)
     router_up = _ping_reachable(output)
 
     # Units >= 3300: router -> PVE only (never NUC). Scrypted only if both are up.
     if uses_pve(unit):
-        print(f"3300+ unit — checking PVE (skipping NUC)..")
+        print(f"Checking {unit}'s PVE...")
         code, pve_output = _safe_ping_result(ping_pve(unit))
         print(pve_output)
         pve_up = _ping_reachable(pve_output)
 
         if router_up and not pve_up:
             print(f"Router up, PVE down — offline compute: {unit}")
-            nuc_down.append(unit)
+            nuc_down.append(result_value)
             return
 
         if router_up and pve_up:
-            print(f"Router and PVE up, checking Scrypted..")
+            print(f"Checking {unit}'s Scrypted...")
             code, scrypt_output = _safe_ping_result(ping_scrypted(unit))
             print(scrypt_output)
             if _ping_reachable(scrypt_output):
                 print(f"Router, PVE, and Scrypted are online — unit fully up: {unit}")
-                false_positives.append(unit)
+                false_positives.append(result_value)
             else:
                 print(f"Router and PVE up, Scrypted down — Scrypted outage: {unit}")
-                scrypted_outage.append(unit)
+                scrypted_outage.append(result_value)
             return
 
         if not router_up and not pve_up:
             print(f"Router and PVE down — unit fully down (skipping Scrypted): {unit}")
-            truly_down.append(unit)
+            truly_down.append(result_value)
             return
 
         # Router down, PVE up
         print(f"Router down, PVE up on {unit}")
-        truly_down.append(unit)
+        truly_down.append(result_value)
         return
 
     # Pre-3300 units
+    host = compute_host_label(unit)
     if router_up:
-        host = compute_host_label(unit)
-        print(f"Router is up, {code}: {unit} checking {host.lower()}..")
+        print(f"Checking {unit}'s {host}...")
         code, output = _safe_ping_result(ping_compute(unit))
         print(output)
         if _ping_reachable(output):
             print(f"Both {host} and Router are online {code}, false positive: {unit}")
-            false_positives.append(unit)
+            false_positives.append(result_value)
         else:
             print(f"{host} is down, router is up. Bounce {host}.")
-            nuc_down.append(unit)
+            nuc_down.append(result_value)
         return
 
     # Router down (pre-3300)
-    host = compute_host_label(unit)
-    print(f'Router is down {code}, checking {host}')
     if in_potential_stale_vpn_range(unit):
-        compute_result = ping_nuc(unit)
+        compute_result = ping_nuc
         host_checked = "NUC"
     else:
-        compute_result = ping_compute(unit)
+        compute_result = ping_compute
         host_checked = host
-    code, output = _safe_ping_result(compute_result)
+    print(f"Checking {unit}'s {host_checked}...")
+    code, output = _safe_ping_result(compute_result(unit))
     print(output)
     if _ping_reachable(output):
         # Classic stale VPN (router down, compute up) — only for the 3000-3199 band
         if in_potential_stale_vpn_range(unit):
             print(f"{host_checked} is up {code}, router is down, potentially stale VPN on {unit}")
-            stale_vpn.append(unit)
+            stale_vpn.append(result_value)
         else:
             print(f"{host_checked} is up {code}, router is down on {unit} (outside potential-stale range)")
-            truly_down.append(unit)
+            truly_down.append(result_value)
     else:
         # Both unreachable: band 3000-3199 => potentially stale VPN; else truly down
         if in_potential_stale_vpn_range(unit):
             print(f"Router and NUC unreachable on {unit} (3000-3199) — potentially stale VPN")
-            stale_vpn.append(unit)
+            stale_vpn.append(result_value)
         else:
             print(f"{host_checked} and router are offline. {code}")
-            truly_down.append(unit)
+            truly_down.append(result_value)
 
 def _issue_ticket_url(issue_id):
     if not issue_id:
         return ""
     return f"https://erp.sentracam.com/app/issue/{issue_id}"
+
+def _net_row_for_unit(unit):
+    if not unit:
+        return None
+    unit_up = str(unit).strip().upper()
+    for row in net_array:
+        if row and str(row[0]).strip().upper() == unit_up:
+            return row
+    return None
+
+def _host_only(value):
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("http://", "").replace("https://", "").split("/")[0]
+    if ":" in text:
+        return text.rsplit(":", 1)[0]
+    return text
+
+def _unit_device_info(unit):
+    row = _net_row_for_unit(unit)
+    switch_url = ""
+    fisheye_ip = ""
+    pve_ip = ""
+    if row:
+        if len(row) > 2:
+            switch_ip = _host_only(row[2])
+            if switch_ip:
+                switch_url = f"http://{switch_ip}/"
+        if len(row) > 5:
+            fisheye_ip = _host_only(row[5])
+        if len(row) > 11:
+            pve_ip = _host_only(row[11])
+    n = unit_number(unit)
+    has_pve = n is not None and n > 3300 and bool(pve_ip)
+    return switch_url, fisheye_ip, pve_ip, has_pve
+
+def authenticated_switch_url(unit):
+    info, error = switch_login_info(unit)
+    if error:
+        return None, error
+    return info["url"], None
+
+def switch_login_info(unit):
+    """Return switch login details. Units above 3080 use /dologin.asp."""
+    load_dotenv(env_path)
+    if not net_array:
+        generate_net_array()
+    row = _net_row_for_unit(unit)
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[2] if len(row) > 2 else "")
+    if not ip:
+        return None, f"No switch IP for {unit}"
+    switchuser = os.getenv("switchuser")
+    switchpass = os.getenv("switchpass")
+    if not switchuser or not switchpass:
+        return None, "switchuser/switchpass not set in .env"
+    n = unit_number(unit)
+    use_dologin = n is not None and n > 3080
+    user = quote(str(switchuser), safe="")
+    password = quote(str(switchpass), safe="")
+    if use_dologin:
+        url = f"http://{ip}/dologin.asp"
+    else:
+        url = f"http://{user}:{password}@{ip}/"
+    return {
+        "unit": unit,
+        "ip": ip,
+        "username": switchuser,
+        "password": switchpass,
+        "use_dologin": use_dologin,
+        "url": url,
+    }, None
+
+def pve_login_info(unit):
+    """Open PVE on port 8006 with pveuser/pvepass. Units above 3300 only."""
+    load_dotenv(env_path)
+    if not net_array:
+        generate_net_array()
+    n = unit_number(unit)
+    if n is None or n <= 3300:
+        return None, f"{unit} is not above 3300"
+    row = _net_row_for_unit(unit)
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[11] if len(row) > 11 else "")
+    if not ip:
+        return None, f"No PVE IP for {unit}"
+    pveuser = (os.getenv("pveuser") or "").strip().strip('"').strip("'")
+    pvepass = (os.getenv("pvepass") or "").strip().strip('"').strip("'")
+    if not pveuser or not pvepass:
+        return None, "pveuser/pvepass not set in .env"
+    user = quote(str(pveuser), safe="")
+    password = quote(str(pvepass), safe="")
+    return {
+        "unit": unit,
+        "ip": ip,
+        "username": pveuser,
+        "password": pvepass,
+        "url": f"https://{ip}:8006/",
+        "auth_url": f"https://{user}:{password}@{ip}:8006/",
+    }, None
+
+_pve_proxy_lock = threading.Lock()
+_pve_proxies = {}
+_PVE_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "cookie",
+}
+_PVE_SKIP_RESP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "content-encoding",
+    "content-length",
+    "set-cookie",
+}
+
+def fetch_pve_ticket(ip, username, password):
+    username = (username or "").strip()
+    password = password or ""
+    candidates = []
+    if username:
+        candidates.append(username)
+        if "@" not in username:
+            candidates.append(f"{username}@pam")
+            candidates.append(f"{username}@pve")
+    endpoints = (
+        f"https://{ip}:8006/api2/json/access/ticket",
+        f"https://{ip}:8006/api2/extjs/access/ticket",
+    )
+    last_error = "PVE login failed"
+    for user in candidates:
+        payloads = [{"username": user, "password": password}]
+        if "@" in user:
+            name, realm = user.rsplit("@", 1)
+            payloads.append({"username": name, "password": password, "realm": realm})
+        for url in endpoints:
+            for payload in payloads:
+                try:
+                    response = requests.post(url, data=payload, verify=False, timeout=15)
+                    if response.status_code == 401:
+                        last_error = (
+                            f"PVE login failed: 401 authentication failure for {user}. "
+                            "Set pveuser in .env as user@pam or user@pve (example: root@pam)."
+                        )
+                        continue
+                    response.raise_for_status()
+                    body = response.json() or {}
+                    data = body.get("data") or body
+                    ticket = data.get("ticket")
+                    csrf = data.get("CSRFPreventionToken")
+                    if not ticket:
+                        last_error = "PVE login returned no ticket"
+                        continue
+                    return ticket, csrf, None
+                except requests.RequestException as e:
+                    last_error = f"PVE login failed: {e}"
+                    continue
+    return None, None, last_error
+
+class _PVEProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        return
+
+    def do_GET(self):
+        self._proxy()
+
+    def do_POST(self):
+        self._proxy()
+
+    def do_PUT(self):
+        self._proxy()
+
+    def do_DELETE(self):
+        self._proxy()
+
+    def do_PATCH(self):
+        self._proxy()
+
+    def do_OPTIONS(self):
+        self._proxy()
+
+    def do_HEAD(self):
+        self._proxy(include_body=False)
+
+    def _refresh_ticket(self):
+        state = self.server.pve_state
+        ticket, csrf, error = fetch_pve_ticket(state["ip"], state["username"], state["password"])
+        if error:
+            return error
+        state["ticket"] = ticket
+        state["csrf"] = csrf
+        return None
+
+    def _proxy(self, include_body=True):
+        state = self.server.pve_state
+        target = f"https://{state['ip']}:8006{self.path}"
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in _PVE_HOP_HEADERS
+        }
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        if self.command in ("POST", "PUT", "DELETE", "PATCH") and state.get("csrf"):
+            headers["CSRFPreventionToken"] = state["csrf"]
+
+        def send_upstream():
+            return requests.request(
+                self.command,
+                target,
+                headers=headers,
+                data=body,
+                cookies={"PVEAuthCookie": state["ticket"]},
+                verify=False,
+                allow_redirects=False,
+                timeout=45,
+            )
+
+        try:
+            resp = send_upstream()
+            if resp.status_code == 401:
+                refresh_error = self._refresh_ticket()
+                if not refresh_error:
+                    resp = send_upstream()
+        except requests.RequestException as e:
+            self.send_error(502, f"PVE proxy error: {e}")
+            return
+
+        self.send_response(resp.status_code)
+        local_origin = f"http://127.0.0.1:{state['port']}"
+        remote_origin = f"https://{state['ip']}:8006"
+        for key, value in resp.headers.items():
+            if key.lower() in _PVE_SKIP_RESP_HEADERS:
+                continue
+            if key.lower() == "location":
+                value = value.replace(remote_origin, local_origin)
+            self.send_header(key, value)
+        content = resp.content or b""
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "html" in ctype or "javascript" in ctype:
+            content = content.replace(remote_origin.encode("utf-8"), local_origin.encode("utf-8"))
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header(
+            "Set-Cookie",
+            f"PVEAuthCookie={quote(state['ticket'], safe='')}; Path=/",
+        )
+        self.end_headers()
+        if include_body and self.command != "HEAD":
+            self.wfile.write(content)
+
+def start_pve_local_proxy(unit):
+    """Log into PVE and expose it on localhost HTTP so the cert warning is avoided."""
+    info, error = pve_login_info(unit)
+    if error:
+        return None, error
+    ticket, csrf, error = fetch_pve_ticket(info["ip"], info["username"], info["password"])
+    if error:
+        return None, error
+
+    with _pve_proxy_lock:
+        existing = _pve_proxies.get(unit)
+        if existing and existing.get("port"):
+            existing["ticket"] = ticket
+            existing["csrf"] = csrf
+            existing["ip"] = info["ip"]
+            existing["username"] = info["username"]
+            existing["password"] = info["password"]
+            return f"http://127.0.0.1:{existing['port']}/", None
+
+        state = {
+            "ip": info["ip"],
+            "username": info["username"],
+            "password": info["password"],
+            "ticket": ticket,
+            "csrf": csrf,
+            "port": 0,
+        }
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _PVEProxyHandler)
+        server.pve_state = state
+        state["port"] = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        state["server"] = server
+        _pve_proxies[unit] = state
+        return f"http://127.0.0.1:{state['port']}/", None
+
+def fetch_fisheye_snapshot(unit):
+    """Return (image_bytes, error). Tries Dahua snapshot CGI on ports 10080 then 80."""
+    load_dotenv(env_path)
+    fishuser = os.getenv("fishuser")
+    fishpass = os.getenv("fishpass")
+    if not fishuser or not fishpass:
+        return None, "fishuser/fishpass not set in .env"
+
+    if not net_array:
+        generate_net_array()
+    row = _net_row_for_unit(unit)
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[5] if len(row) > 5 else "")
+    if not ip:
+        return None, f"No fisheye IP for {unit}"
+
+    last_error = "Snapshot failed"
+    auths = (
+        HTTPDigestAuth(f"{fishuser}", f"{fishpass}"),
+        HTTPBasicAuth(f"{fishuser}", f"{fishpass}"),
+    )
+    for port in (10080, 80):
+        url = f"http://{ip}:{port}/cgi-bin/snapshot.cgi?channel=1"
+        for auth in auths:
+            try:
+                response = requests.get(url, auth=auth, timeout=15)
+                response.raise_for_status()
+                content_type = (response.headers.get("Content-Type") or "").lower()
+                if not response.content:
+                    last_error = f"Empty response from {ip}:{port}"
+                    continue
+                if "html" in content_type or response.content[:15].lstrip().lower().startswith(b"<"):
+                    last_error = f"Non-image response from {ip}:{port}"
+                    continue
+                return response.content, None
+            except requests.exceptions.RequestException as e:
+                last_error = f"{ip}:{port} {e}"
+                continue
+    return None, last_error
 
 def _parse_outage_kind(issue_type):
     text = (issue_type or "").strip()
@@ -540,13 +915,42 @@ def _parse_outage_kind(issue_type):
         return "Full"
     return text
 
+def _camera_targets_from_subject(subject):
+    """Return camera endpoint keys explicitly referenced in a ticket subject."""
+    targets = []
+    checks = (
+        ("fisheye", r"\bfisheye\s+(?:not|down)\b"),
+        ("camera1", r"(?:\bc1\b|\bcamera\s*1\b)"),
+        ("camera2", r"(?:\bc2\b|\bcamera\s*2\b)"),
+        ("camera3", r"(?:\bc3\b|\bcamera\s*3\b)"),
+        ("camera4", r"(?:\bc4\b|\bcamera\s*4\b)"),
+    )
+    for target, pattern in checks:
+        if re.search(pattern, subject or "", re.IGNORECASE):
+            targets.append(target)
+    return targets
+
+def _is_camera_view_subject(subject):
+    """Identify camera view/position work that must not run outage validation."""
+    text = subject or ""
+    patterns = (
+        r"\bcamera\s+view\b",
+        r"\bcamera\s+shifted\b",
+        r"\bcamera\s+adjustment\b",
+        r"\bc[1-4]\b[^\r\n]*(?:shifted|adjustment)\b",
+        r"\bcamera\s*[1-4]\b[^\r\n]*(?:shifted|adjustment)\b",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
 def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
     if unit_meta_map is None:
         unit_meta_map = {}
     linked = []
-    for unit in units:
-        issue_id = unit_issue_map.get(unit, "")
-        meta = unit_meta_map.get(unit, {})
+    for result_key in units:
+        issue_id = unit_issue_map.get(result_key, "")
+        meta = unit_meta_map.get(result_key, {})
+        unit = meta.get("unit") or result_key
+        switch_url, fisheye_ip, pve_ip, has_pve = _unit_device_info(unit)
         linked.append({
             "unit": unit,
             "issue_id": issue_id,
@@ -554,6 +958,28 @@ def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
             "outage_type": meta.get("outage_type", ""),
             "issue_subtype": meta.get("issue_subtype", ""),
             "undiagnosed": bool(meta.get("undiagnosed")),
+            "switch_url": switch_url,
+            "fisheye_ip": fisheye_ip,
+            "pve_ip": pve_ip,
+            "has_pve": has_pve,
+            "compute_label": compute_host_label(unit),
+            "is_speaker": bool(meta.get("is_speaker")),
+            "speaker_up": meta.get("speaker_up"),
+            "is_camera": bool(meta.get("is_camera")),
+            "camera_target": meta.get("camera_target", ""),
+            "camera_label": meta.get("camera_label", ""),
+            "camera_up": meta.get("camera_up"),
+            "is_panel_issue": bool(meta.get("is_panel_issue")),
+            "panel_fisheye_up": meta.get("panel_fisheye_up"),
+            "is_camera_view": bool(meta.get("is_camera_view")),
+            "camera_view_status": meta.get("camera_view_status"),
+            "vrm_mu": meta.get("vrm_mu", ""),
+            "vrm_url": (
+                f"https://vrm.victronenergy.com/installation-overview"
+                f"?search={meta.get('vrm_mu')}"
+                if meta.get("vrm_mu")
+                else ""
+            ),
         })
     linked.sort(key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or ""))
     return linked
@@ -576,7 +1002,7 @@ def _print_linked_units(label, linked_units):
 def validate_issues_report(issue_path=None):
     if issue_path is None:
         issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
-    issue_units = []
+    issue_items = []
     unit_issue_map = {}
     unit_meta_map = {}
     false_positives = []
@@ -584,6 +1010,11 @@ def validate_issues_report(issue_path=None):
     stale_vpn = []
     truly_down = []
     scrypted_outage = []
+    speaker_outage = []
+    camera_outage = []
+    panel_issues = []
+    camera_view = []
+    discarded_tickets = []
     has_type_subtype = False
     id_col = 0
     subject_col = 1
@@ -593,7 +1024,7 @@ def validate_issues_report(issue_path=None):
     try:
         with open(issue_path, 'r', newline='', encoding='utf-8-sig') as csvfile:
             linereader = csv.reader(csvfile)
-            for line in linereader:
+            for row_number, line in enumerate(linereader, 1):
                 if not line or len(line) < 2:
                     continue
                 header_cells = [(c or "").strip() for c in line]
@@ -619,6 +1050,7 @@ def validate_issues_report(issue_path=None):
                 if not subject_cell:
                     continue
                 issue_id = ((line[id_col] if len(line) > id_col else "") or "").strip()
+                subject_lower = subject_cell.lower()
                 issue_type = ""
                 issue_subtype = ""
                 outage_type = ""
@@ -628,16 +1060,225 @@ def validate_issues_report(issue_path=None):
                     issue_subtype = ((line[subtype_col] if len(line) > subtype_col else "") or "").strip()
                     outage_type = _parse_outage_kind(issue_type)
                     undiagnosed = not issue_subtype
-                for net_row in net_array:
+                if "suspend" in subject_lower or "suspend" in issue_subtype.lower():
+                    print(f"Discarding Suspend ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Suspend ticket",
+                    })
+                    continue
+                if issue_type.lower() == "unit relocation" or "relocation" in subject_lower:
+                    print(f"Discarding Unit Relocation ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Unit Relocation",
+                    })
+                    continue
+                if "footage" in subject_lower or issue_type.lower() == "footage request":
+                    print(f"Discarding Footage Request ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Footage Request",
+                    })
+                    continue
+                if "unit swap" in issue_subtype.lower():
+                    print(f"Discarding Unit Swap ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Unit Swap subtype",
+                    })
+                    continue
+                if "head swap" in subject_lower or "trailer swap" in subject_lower:
+                    reason = "Head Swap ticket" if "head swap" in subject_lower else "Trailer Swap ticket"
+                    print(f"Discarding {reason}: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": reason,
+                    })
+                    continue
+                if "missing" in subject_lower and issue_type.lower() == "maintenance":
+                    print(f"Discarding Missing hardware ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Missing hardware",
+                    })
+                    continue
+                if "site note" in subject_lower:
+                    print(f"Discarding Site Note ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Site Note ticket",
+                    })
+                    continue
+                if "top talker" in subject_lower:
+                    print(f"Discarding Top Talker ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Top Talker ticket",
+                    })
+                    continue
+                if "statement of services" in subject_lower:
+                    print(f"Discarding Statement of Services ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Statement of Services ticket",
+                    })
+                    continue
+                if "additional features" in issue_subtype.lower():
+                    print(f"Discarding Additional Features ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Additional Features subtype",
+                    })
+                    continue
+                if "deployment" in issue_type.lower():
+                    print(f"Discarding Deployment ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Deployment issue type",
+                    })
+                    continue
+                if "time lapse" in subject_lower:
+                    print(f"Discarding Time Lapse ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Time Lapse ticket",
+                    })
+                    continue
+                if "thermal plates" in subject_lower:
+                    print(f"Discarding Thermal plates ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Thermal plates ticket",
+                    })
+                    continue
+                if "termination" in subject_lower:
+                    print(f"Discarding Termination ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Termination ticket",
+                    })
+                    continue
+                if re.search(r"\brd(?:\s+head)?\s+loose\b", subject_cell, re.IGNORECASE):
+                    print(f"Discarding RD/RD head loose ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "RD or RD head loose ticket",
+                    })
+                    continue
+                if "add thermal bracket" in subject_lower:
+                    print(f"Discarding Add Thermal Bracket ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Add Thermal Bracket ticket",
+                    })
+                    continue
+                if issue_subtype.lower() == "maintenance" and "panel" not in subject_lower:
+                    print(f"Discarding non-panel Maintenance ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Maintenance subtype without Panel in subject",
+                    })
+                    continue
+                if not re.search(r"\b(?:RD|FD|MU)\s*\d+", subject_cell, re.IGNORECASE):
+                    print(f"Discarding ticket without RD, FD, or MU in subject: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "No RD, FD, or MU unit in subject",
+                    })
+                    continue
+                is_speaker = "speaker" in subject_lower
+                is_panel_issue = "panel" in subject_lower
+                is_camera_view = (
+                    _is_camera_view_subject(subject_cell)
+                    or issue_subtype.lower() == "dark views"
+                )
+                camera_targets = _camera_targets_from_subject(subject_cell)
+                vrm_mu = ""
+                for mu_match in re.finditer(r"\bMU\s*(\d{4})\b", subject_cell, re.IGNORECASE):
+                    mu_number = int(mu_match.group(1))
+                    if 7000 <= mu_number <= 9999:
+                        vrm_mu = mu_match.group(1)
+                        break
+                subject_upper = subject_cell.upper()
+                has_head_unit = bool(
+                    re.search(r"\b(?:RD|FD)\s*\d+", subject_cell, re.IGNORECASE)
+                )
+                speaker_assume_down = bool(
+                    is_speaker
+                    and re.search(r"\bFD\s*\d+", subject_cell, re.IGNORECASE)
+                )
+                candidate_rows = sorted(
+                    net_array,
+                    key=lambda row: (
+                        0
+                        if has_head_unit
+                        and row
+                        and str(row[0]).upper().startswith(("RD", "FD"))
+                        else 1
+                    ),
+                )
+                for net_row in candidate_rows:
                     unit = net_row[0]
-                    if unit in subject_cell and unit not in issue_units and unit not in false_mu_array:
-                        issue_units.append(unit)
-                        unit_issue_map[unit] = issue_id
-                        unit_meta_map[unit] = {
+                    result_key = f"{issue_id or row_number}::{unit}"
+                    if (
+                        unit.upper() in subject_upper
+                        and result_key not in unit_meta_map
+                        and (unit not in false_mu_array or not has_head_unit)
+                    ):
+                        issue_items.append((result_key, unit))
+                        unit_issue_map[result_key] = issue_id
+                        unit_meta_map[result_key] = {
+                            "unit": unit,
                             "issue_type": issue_type,
                             "outage_type": outage_type,
                             "issue_subtype": issue_subtype,
                             "undiagnosed": undiagnosed,
+                            "is_speaker": is_speaker,
+                            "speaker_up": None,
+                            "speaker_assume_down": speaker_assume_down,
+                            "camera_targets": camera_targets,
+                            "is_panel_issue": is_panel_issue,
+                            "panel_fisheye_up": None,
+                            "is_camera_view": is_camera_view,
+                            "camera_view_status": None,
+                            "vrm_mu": vrm_mu,
                         }
                         extra = ""
                         if has_type_subtype:
@@ -646,12 +1287,87 @@ def validate_issues_report(issue_path=None):
                             else:
                                 extra = f" [{outage_type or 'Unknown'} | {issue_subtype}]"
                         print(f'Matched {unit} ({issue_id}) in {subject_cell}{extra}')
+                        # One ticket represents one unit. Stop after the first valid
+                        # net-sheet match so RD/MU references do not inflate progress.
+                        break
     except Exception as e:
         print(f'Task failed: {e}')
-        return [], [], [], [], []
+        return [], [], [], [], [], [], [], [], [], []
 
-    print(f'Validating {len(issue_units)} units from issues report...')
-    for unit in issue_units:
+    print(
+        f"Discarded {len(discarded_tickets)} tickets without a unit; "
+        f"validating {len(issue_items)} units..."
+    )
+    total_units = len(issue_items)
+    print(f"__PROGRESS__ 0 {total_units} starting")
+    for index, (result_key, unit) in enumerate(issue_items, 1):
+        print(f"__PROGRESS__ {index} {total_units} {unit}")
+        if unit_meta_map.get(result_key, {}).get("is_camera_view"):
+            print(f"Validating Camera View unit: {unit}")
+            camera_view_result, camera_view_error = validate_camera_view_status(unit)
+            if camera_view_error:
+                print(camera_view_error)
+                unit_meta_map[result_key]["camera_view_status"] = "red"
+            else:
+                print(camera_view_result["router_output"])
+                print(camera_view_result["compute_output"])
+                unit_meta_map[result_key]["camera_view_status"] = camera_view_result["status"]
+                print(
+                    f"Camera View validation: {unit} — "
+                    f"{camera_view_result['status']}"
+                )
+            camera_view.append(result_key)
+            continue
+        if unit_meta_map.get(result_key, {}).get("is_panel_issue"):
+            print(f"Checking {unit}'s Fisheye for Panel issues ticket...")
+            code, panel_output = _safe_ping_result(ping_camera(unit, "fisheye"))
+            print(panel_output)
+            panel_fisheye_up = _ping_reachable(panel_output)
+            unit_meta_map[result_key]["panel_fisheye_up"] = panel_fisheye_up
+            state = "up" if panel_fisheye_up else "down"
+            print(f"Fisheye is {state} for Panel issues ticket: {unit}")
+            panel_issues.append(result_key)
+            continue
+        if unit_meta_map.get(result_key, {}).get("is_speaker"):
+            if unit_meta_map[result_key].get("speaker_assume_down"):
+                print(
+                    f"Skipping speaker validation for FD ticket; "
+                    f"marking speaker down: {unit}"
+                )
+                unit_meta_map[result_key]["speaker_up"] = False
+                speaker_outage.append(result_key)
+                continue
+            print(f"Checking {unit}'s speaker...")
+            code, speaker_output = _safe_ping_result(ping_speaker(unit))
+            print(speaker_output)
+            speaker_up = _ping_reachable(speaker_output)
+            unit_meta_map[result_key]["speaker_up"] = speaker_up
+            state = "up" if speaker_up else "down"
+            print(f"Speaker is {state}: {unit}")
+            speaker_outage.append(result_key)
+            continue
+        camera_targets = unit_meta_map.get(result_key, {}).get("camera_targets") or []
+        if camera_targets:
+            for target in camera_targets:
+                camera_key = f"{result_key}::{target}"
+                camera_meta = dict(unit_meta_map[result_key])
+                camera_meta.update({
+                    "is_camera": True,
+                    "camera_target": target,
+                    "camera_label": CAMERA_ENDPOINTS[target][1],
+                    "camera_up": None,
+                })
+                unit_meta_map[camera_key] = camera_meta
+                unit_issue_map[camera_key] = unit_issue_map.get(result_key, "")
+                print(f"Checking {unit}'s {camera_meta['camera_label']}...")
+                code, camera_output = _safe_ping_result(ping_camera(unit, target))
+                print(camera_output)
+                camera_up = _ping_reachable(camera_output)
+                unit_meta_map[camera_key]["camera_up"] = camera_up
+                state = "up" if camera_up else "down"
+                print(f"{camera_meta['camera_label']} is {state}: {unit}")
+                camera_outage.append(camera_key)
+            continue
         _validate_unit_connectivity(
             unit,
             false_positives,
@@ -659,20 +1375,194 @@ def validate_issues_report(issue_path=None):
             stale_vpn,
             truly_down,
             scrypted_outage,
+            result_value=result_key,
         )
+    print(f"__PROGRESS__ {total_units} {total_units} complete")
 
     false_positives = _with_ticket_links(false_positives, unit_issue_map, unit_meta_map)
     nuc_down = _with_ticket_links(nuc_down, unit_issue_map, unit_meta_map)
     stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map, unit_meta_map)
     truly_down = _with_ticket_links(truly_down, unit_issue_map, unit_meta_map)
     scrypted_outage = _with_ticket_links(scrypted_outage, unit_issue_map, unit_meta_map)
+    speaker_outage = _with_ticket_links(speaker_outage, unit_issue_map, unit_meta_map)
+    camera_outage = _with_ticket_links(camera_outage, unit_issue_map, unit_meta_map)
+    panel_issues = _with_ticket_links(panel_issues, unit_issue_map, unit_meta_map)
+    camera_view = _with_ticket_links(camera_view, unit_issue_map, unit_meta_map)
 
-    _print_linked_units("False positives (router and compute online):", false_positives)
+    _print_linked_units("Up Steady:", false_positives)
     _print_linked_units("Offline compute (router up):", nuc_down)
     _print_linked_units("Potentially stale VPN (3000-3199 only):", stale_vpn)
-    _print_linked_units("Truly down (router and compute offline):", truly_down)
+    _print_linked_units("Down Full:", truly_down)
     _print_linked_units("Scrypted outage (router+PVE up, Scrypted down):", scrypted_outage)
-    return false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage
+    _print_linked_units("Speaker outage:", speaker_outage)
+    _print_linked_units("Camera outage:", camera_outage)
+    _print_linked_units("Panel issues:", panel_issues)
+    _print_linked_units("Camera View:", camera_view)
+    print(f"Miscellaneous tickets: {len(discarded_tickets)}")
+    for item in discarded_tickets:
+        print(
+            f"{item['issue_id']} - {item['subject']}"
+            if item.get("issue_id")
+            else item["subject"]
+        )
+    return (
+        false_positives,
+        nuc_down,
+        stale_vpn,
+        truly_down,
+        scrypted_outage,
+        speaker_outage,
+        camera_outage,
+        panel_issues,
+        camera_view,
+        discarded_tickets,
+    )
+
+def ping_speaker_status(unit):
+    """Ping a unit's speaker and return its current status plus raw output."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, "", f"Unit {unit} not found in net sheet"
+    code, output = _safe_ping_result(ping_speaker(unit))
+    if code is None and not output:
+        return None, "", f"No speaker endpoint configured for {unit}"
+    return _ping_reachable(output), output, None
+
+def ping_camera_status(unit, target):
+    """Ping one camera endpoint and return its current status plus raw output."""
+    if not net_array:
+        generate_net_array()
+    endpoint = CAMERA_ENDPOINTS.get(target)
+    if not endpoint:
+        return None, "", f"Unknown camera target: {target}"
+    if not _net_row_for_unit(unit):
+        return None, "", f"Unit {unit} not found in net sheet"
+    code, output = _safe_ping_result(ping_camera(unit, target))
+    if code is None and not output:
+        return None, "", f"No {endpoint[1]} endpoint configured for {unit}"
+    return _ping_reachable(output), output, None
+
+def ping_compute_status(unit):
+    """Ping the unit's NUC/PVE endpoint and return its current status."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, "", "", f"Unit {unit} not found in net sheet"
+    label = compute_host_label(unit)
+    code, output = _safe_ping_result(ping_compute(unit))
+    if code is None and not output:
+        return None, label, "", f"No {label} endpoint configured for {unit}"
+    return _ping_reachable(output), label, output, None
+
+def ping_scrypted_status(unit):
+    """Ping the unit's Scrypted endpoint and return its current status."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, "", f"Unit {unit} not found in net sheet"
+    code, output = _safe_ping_result(ping_scrypted(unit))
+    if code is None and not output:
+        return None, "", f"No Scrypted endpoint configured for {unit}"
+    return _ping_reachable(output), output, None
+
+def validate_unit_status(unit):
+    """Run standard connectivity validation and return the resulting list key."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, f"Unit {unit} not found in net sheet"
+
+    false_positives = []
+    nuc_down = []
+    stale_vpn = []
+    truly_down = []
+    scrypted_outage = []
+    _validate_unit_connectivity(
+        unit,
+        false_positives,
+        nuc_down,
+        stale_vpn,
+        truly_down,
+        scrypted_outage,
+    )
+    categories = (
+        ("false_positives", false_positives),
+        ("nuc_down", nuc_down),
+        ("stale_vpn", stale_vpn),
+        ("truly_down", truly_down),
+        ("scrypted_outage", scrypted_outage),
+    )
+    for category, items in categories:
+        if items:
+            return category, None
+    return None, f"Validation produced no result for {unit}"
+
+def validate_stale_vpn_status(unit):
+    """Check router and the unit-appropriate compute endpoint for stale VPN status."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, f"Unit {unit} not found in net sheet"
+
+    compute_label = compute_host_label(unit)
+    router_code, router_output = _safe_ping_result(ping_router(unit))
+    compute_code, compute_output = _safe_ping_result(ping_compute(unit))
+    if router_code is None and not router_output:
+        return None, f"No router endpoint configured for {unit}"
+    if compute_code is None and not compute_output:
+        return None, f"No {compute_label} endpoint configured for {unit}"
+
+    router_up = _ping_reachable(router_output)
+    compute_up = _ping_reachable(compute_output)
+    if router_up and compute_up:
+        status = "green"
+    elif not router_up and compute_up:
+        status = "yellow"
+    else:
+        status = "red"
+    return {
+        "unit": unit,
+        "router_up": router_up,
+        "compute_up": compute_up,
+        "compute_label": compute_label,
+        "status": status,
+        "router_output": router_output,
+        "compute_output": compute_output,
+    }, None
+
+def validate_camera_view_status(unit):
+    """Validate router/compute reachability for a Camera View ticket."""
+    if not net_array:
+        generate_net_array()
+    if not _net_row_for_unit(unit):
+        return None, f"Unit {unit} not found in net sheet"
+
+    compute_label = compute_host_label(unit)
+    router_code, router_output = _safe_ping_result(ping_router(unit))
+    compute_code, compute_output = _safe_ping_result(ping_compute(unit))
+    if router_code is None and not router_output:
+        return None, f"No router endpoint configured for {unit}"
+    if compute_code is None and not compute_output:
+        return None, f"No {compute_label} endpoint configured for {unit}"
+
+    router_up = _ping_reachable(router_output)
+    compute_up = _ping_reachable(compute_output)
+    if router_up and compute_up:
+        status = "green"
+    elif router_up and not compute_up:
+        status = "yellow"
+    else:
+        status = "red"
+    return {
+        "unit": unit,
+        "router_up": router_up,
+        "compute_up": compute_up,
+        "compute_label": compute_label,
+        "status": status,
+        "router_output": router_output,
+        "compute_output": compute_output,
+    }, None
 
 def _read_spreadsheet_rows(report_path):
     rows = []

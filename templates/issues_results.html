@@ -10,15 +10,58 @@
             color: #e2e8f0;
         }
         h1, h2 { margin-bottom: 8px; }
-        .status { color: #94a3b8; margin-bottom: 12px; }
+        .progress-wrap {
+            margin: 0 0 16px;
+        }
+        .progress-label {
+            color: #94a3b8;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+        .progress-track {
+            height: 14px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            background-image: linear-gradient(90deg, #7c3aed, #2563eb, #06b6d4, #22c55e, #7c3aed);
+            background-size: 200% 100%;
+            animation: progress-shift 2.4s linear infinite;
+            transition: width 0.3s ease;
+        }
+        .progress-fill.is-complete {
+            animation: none;
+            background-position: 0% 50%;
+        }
+        @keyframes progress-shift {
+            from { background-position: 0% 50%; }
+            to { background-position: 100% 50%; }
+        }
         .layout {
             display: grid;
-            grid-template-columns: 1.4fr 1fr;
+            grid-template-columns: 7fr 9fr;
             gap: 20px;
             align-items: start;
         }
+        .stdout-panel {
+            position: sticky;
+            top: 20px;
+            align-self: start;
+        }
+        .header-row {
+            margin-bottom: 4px;
+        }
+        .header-row h1 {
+            margin-top: 0;
+        }
         @media (max-width: 900px) {
             .layout { grid-template-columns: 1fr; }
+            .stdout-panel { position: static; }
         }
         .console-toolbar {
             display: flex;
@@ -80,20 +123,156 @@
             align-items: center;
             gap: 8px;
             padding: 2px 0;
+            flex-wrap: wrap;
         }
+        .panel li.checkbox-legend {
+            gap: 8px;
+            padding: 0 0 4px;
+        }
+        .legend-mark {
+            width: 16px;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 16px;
+            flex-shrink: 0;
+        }
+        .legend-r { color: #4ade80; }
+        .legend-w { color: #86efac; }
+        .legend-s { color: #facc15; }
         .panel li input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            border: 2px solid #64748b;
+            border-radius: 3px;
+            background: #0f172a;
             cursor: pointer;
-            accent-color: #2563eb;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .panel li input[type="checkbox"]:checked::after {
+            content: "";
+            position: absolute;
+            left: 4px;
+            top: 0px;
+            width: 4px;
+            height: 8px;
+            border: solid #ffffff;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+        .panel li input[type="checkbox"].resolve-box:checked {
+            background: #166534;
+            border-color: #166534;
+        }
+        .panel li input[type="checkbox"].worked-box:checked {
+            background: #2563eb;
+            border-color: #2563eb;
+        }
+        .panel li input[type="checkbox"].skip-box:checked {
+            background: #ca8a04;
+            border-color: #ca8a04;
         }
         .count { color: #94a3b8; font-size: 13px; font-weight: normal; }
-        .restore {
-            background: none;
-            border: none;
-            color: #93c5fd;
-            cursor: pointer;
+        .ticket-counters {
+            text-align: left;
+            align-self: end;
+            padding-bottom: 8px;
+        }
+        .resolved-counter {
+            color: #4ade80;
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .worked-counter {
+            color: #86efac;
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+            margin-top: 2px;
+        }
+        .skipped-counter {
+            color: #facc15;
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+            margin-top: 2px;
+        }
+        .resolved-row,
+        .worked-row,
+        .skipped-row {
+            opacity: 0.75;
+        }
+        .action-btn {
+            background: #334155;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 4px;
+            padding: 2px 8px;
             font-size: 12px;
-            padding: 0;
-            text-decoration: underline;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .action-btn:hover {
+            background: #475569;
+        }
+        .action-btn:disabled,
+        .action-btn.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .speaker-led {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: #64748b;
+            box-shadow: 0 0 6px rgba(100, 116, 139, 0.8);
+        }
+        .speaker-led.is-up {
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.95);
+        }
+        .speaker-led.is-down {
+            background: #ef4444;
+            box-shadow: 0 0 8px rgba(239, 68, 68, 0.95);
+        }
+        .speaker-led.is-warning {
+            background: #eab308;
+            box-shadow: 0 0 8px rgba(234, 179, 8, 0.95);
+        }
+        .snapshot-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            padding: 24px;
+        }
+        .snapshot-modal.is-open {
+            display: flex;
+        }
+        .snapshot-modal img {
+            max-width: 95vw;
+            max-height: 90vh;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            background: #020617;
+        }
+        .snapshot-modal .snapshot-status {
+            color: #e2e8f0;
+            font-size: 16px;
+        }
+        .nav-links {
+            margin-top: 10px;
         }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
@@ -109,64 +288,118 @@
             font-weight: bold;
             font-size: 12px;
         }
+        .discarded-list li {
+            display: block;
+            color: #94a3b8;
+            padding: 4px 0;
+        }
+        .discarded-reason {
+            color: #fca5a5;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
 
-    <h1>Unit Outage Verification Report</h1>
+    <div class="layout header-row">
+        <h1>Unit Outage Verification Report</h1>
+        <div class="ticket-counters">
+            <div class="resolved-counter" id="tickets_resolved">Tickets resolved: 0</div>
+            <div class="worked-counter" id="tickets_worked">Tickets worked: 0</div>
+            <div class="skipped-counter" id="tickets_skipped">Tickets skipped: 0</div>
+        </div>
+    </div>
     <p class="status" id="status">Running validation... live stdout below.</p>
+    <div class="progress-wrap">
+        <div class="progress-label" id="progress_label">Waiting to start...</div>
+        <div class="progress-track">
+            <div class="progress-fill" id="progress_fill"></div>
+        </div>
+    </div>
 
     <div class="layout">
-        <div>
+        <div class="stdout-panel">
             <h2>Stdout</h2>
             <div class="console-toolbar">
                 <input type="search" id="console_search" placeholder="Search units / stdout..." autocomplete="off">
                 <span class="console-match-count" id="console_match_count"></span>
             </div>
             <div class="console" id="console"></div>
+            <div class="nav-links">
+                <a href="/issues">Run again</a> |
+                <a href="/">Home</a>
+            </div>
         </div>
 
         <div class="panel">
             <h2>
-                False positives (router and compute online)
+                Up Steady
                 <span class="count" id="false_positives_count"></span>
-                <button type="button" class="restore" id="false_positives_restore" hidden>restore</button>
             </h2>
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
 
             <h2>
                 Offline compute (router up, PVE/NUC down)
                 <span class="count" id="nuc_down_count"></span>
-                <button type="button" class="restore" id="nuc_down_restore" hidden>restore</button>
             </h2>
             <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
 
             <h2>
                 Scrypted outage (router+PVE up, Scrypted down)
                 <span class="count" id="scrypted_outage_count"></span>
-                <button type="button" class="restore" id="scrypted_outage_restore" hidden>restore</button>
             </h2>
             <ul id="scrypted_outage"><li class="empty">Waiting...</li></ul>
 
             <h2>
                 Potentially stale VPN (3000-3199)
                 <span class="count" id="stale_vpn_count"></span>
-                <button type="button" class="restore" id="stale_vpn_restore" hidden>restore</button>
             </h2>
             <ul id="stale_vpn"><li class="empty">Waiting...</li></ul>
 
             <h2>
-                Truly down (router and compute offline)
+                Speaker outage
+                <span class="count" id="speaker_outage_count"></span>
+            </h2>
+            <ul id="speaker_outage"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Camera outage
+                <span class="count" id="camera_outage_count"></span>
+            </h2>
+            <ul id="camera_outage"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Down Full
                 <span class="count" id="truly_down_count"></span>
-                <button type="button" class="restore" id="truly_down_restore" hidden>restore</button>
             </h2>
             <ul id="truly_down"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Panel issues
+                <span class="count" id="panel_issues_count"></span>
+            </h2>
+            <ul id="panel_issues"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Camera View
+                <span class="count" id="camera_view_count"></span>
+            </h2>
+            <ul id="camera_view"><li class="empty">Waiting...</li></ul>
+
+            <h2>
+                Miscellaneous
+                <span class="count" id="discarded_tickets_count"></span>
+            </h2>
+            <ul class="discarded-list" id="discarded_tickets">
+                <li class="empty">Waiting...</li>
+            </ul>
         </div>
     </div>
 
-    <br>
-    <a href="/issues">Run again</a> |
-    <a href="/">Home</a>
+    <div class="snapshot-modal" id="snapshot_modal">
+        <div class="snapshot-status" id="snapshot_status">Loading snapshot...</div>
+        <img id="snapshot_img" alt="Fisheye snapshot" hidden>
+    </div>
 
     <script>
         const jobId = {{ job_id|tojson }};
@@ -174,6 +407,8 @@
         const consoleSearchEl = document.getElementById("console_search");
         const consoleMatchCountEl = document.getElementById("console_match_count");
         const statusEl = document.getElementById("status");
+        const progressFillEl = document.getElementById("progress_fill");
+        const progressLabelEl = document.getElementById("progress_label");
         const source = new EventSource("/issues/stream/" + jobId);
         const consoleLines = [];
         let consoleFollow = true;
@@ -209,7 +444,7 @@
             const q = query.toLowerCase();
             const include = new Array(lines.length).fill(false);
             const checkingRe = /^Checking\s+/i;
-            const sectionEndRe = /^(Validating\s|False positives|Offline compute|Potentially stale|Truly down|Scrypted outage)/i;
+            const sectionEndRe = /^(Validating\s|Up Steady|Offline compute|Potentially stale|Down Full|Scrypted outage|Speaker outage|Camera outage|Panel issues|Camera View)/i;
 
             for (let i = 0; i < lines.length; i++) {
                 if (lines[i].toLowerCase().indexOf(q) !== -1) {
@@ -270,24 +505,120 @@
             renderConsole(false);
         });
 
+        const snapshotModal = document.getElementById("snapshot_modal");
+        const snapshotImg = document.getElementById("snapshot_img");
+        const snapshotStatus = document.getElementById("snapshot_status");
+        let snapshotObjectUrl = "";
+
+        function closeFisheyeSnapshot() {
+            snapshotModal.classList.remove("is-open");
+            snapshotImg.hidden = true;
+            snapshotImg.removeAttribute("src");
+            if (snapshotObjectUrl) {
+                URL.revokeObjectURL(snapshotObjectUrl);
+                snapshotObjectUrl = "";
+            }
+        }
+
+        function openFisheyeSnapshot(unit) {
+            snapshotStatus.textContent = "Loading snapshot for " + unit + "...";
+            snapshotStatus.hidden = false;
+            snapshotImg.hidden = true;
+            snapshotModal.classList.add("is-open");
+            if (snapshotObjectUrl) {
+                URL.revokeObjectURL(snapshotObjectUrl);
+                snapshotObjectUrl = "";
+            }
+            fetch("/issues/fisheye/" + encodeURIComponent(unit))
+                .then(function (response) {
+                    if (!response.ok) {
+                        return response.text().then(function (text) {
+                            throw new Error(text || ("HTTP " + response.status));
+                        });
+                    }
+                    return response.blob();
+                })
+                .then(function (blob) {
+                    snapshotObjectUrl = URL.createObjectURL(blob);
+                    snapshotImg.src = snapshotObjectUrl;
+                    snapshotImg.hidden = false;
+                    snapshotStatus.hidden = true;
+                })
+                .catch(function (err) {
+                    snapshotStatus.textContent = "Snapshot failed: " + (err.message || err);
+                    snapshotStatus.hidden = false;
+                    snapshotImg.hidden = true;
+                });
+        }
+
+        snapshotImg.addEventListener("click", function (event) {
+            event.stopPropagation();
+        });
+        snapshotModal.addEventListener("click", function () {
+            closeFisheyeSnapshot();
+        });
+        document.addEventListener("keydown", function (event) {
+            if (event.key === "Escape") {
+                closeFisheyeSnapshot();
+            }
+        });
+
         const listIds = [
             "false_positives",
             "nuc_down",
             "stale_vpn",
             "truly_down",
             "scrypted_outage",
+            "speaker_outage",
+            "camera_outage",
+            "panel_issues",
+            "camera_view",
         ];
         const listState = {};
+        const ticketsResolvedEl = document.getElementById("tickets_resolved");
+        const ticketsWorkedEl = document.getElementById("tickets_worked");
+        const ticketsSkippedEl = document.getElementById("tickets_skipped");
 
         listIds.forEach(function (id) {
             listState[id] = [];
-            document.getElementById(id + "_restore").addEventListener("click", function () {
-                listState[id].forEach(function (entry) {
-                    entry.removed = false;
-                });
-                renderList(id);
-            });
         });
+
+        function updateTicketCounts() {
+            let resolved = 0;
+            let worked = 0;
+            let skipped = 0;
+            let total = 0;
+            listIds.forEach(function (id) {
+                (listState[id] || []).forEach(function (entry) {
+                    total += 1;
+                    if (entry.resolved) {
+                        resolved += 1;
+                    }
+                    if (entry.resolved || entry.worked) {
+                        worked += 1;
+                    }
+                    if (entry.skipped) {
+                        skipped += 1;
+                    }
+                });
+            });
+            ticketsResolvedEl.textContent = total
+                ? "Tickets resolved: " + resolved + " / " + total
+                : "Tickets resolved: 0";
+            ticketsWorkedEl.textContent = total
+                ? "Tickets worked: " + worked + " / " + total
+                : "Tickets worked: 0";
+            ticketsSkippedEl.textContent = total
+                ? "Tickets skipped: " + skipped + " / " + total
+                : "Tickets skipped: 0";
+        }
+
+        function listCountText(entries) {
+            const resolvedCount = entries.filter(function (entry) { return entry.resolved; }).length;
+            const workedCount = entries.filter(function (entry) { return entry.resolved || entry.worked; }).length;
+            const skippedCount = entries.filter(function (entry) { return entry.skipped; }).length;
+            return "(" + resolvedCount + " resolved, " + workedCount + " worked, " + skippedCount + " skipped of " + entries.length + ")";
+        }
 
         function fillList(id, items) {
             listState[id] = (items || []).map(function (item) {
@@ -299,7 +630,31 @@
                     outageType: isObject ? (item.outage_type || "") : "",
                     issueSubtype: isObject ? (item.issue_subtype || "") : "",
                     undiagnosed: isObject ? !!item.undiagnosed : false,
-                    removed: false,
+                    switchUrl: isObject ? (item.switch_url || "") : "",
+                    fisheyeIp: isObject ? (item.fisheye_ip || "") : "",
+                    pveIp: isObject ? (item.pve_ip || "") : "",
+                    hasPve: isObject ? !!item.has_pve : false,
+                    computeLabel: isObject ? (item.compute_label || "NUC") : "NUC",
+                    isSpeaker: isObject ? !!item.is_speaker : false,
+                    speakerUp: isObject && item.speaker_up === true
+                        ? true
+                        : (isObject && item.speaker_up === false ? false : null),
+                    isCamera: isObject ? !!item.is_camera : false,
+                    cameraTarget: isObject ? (item.camera_target || "") : "",
+                    cameraLabel: isObject ? (item.camera_label || "") : "",
+                    cameraUp: isObject && item.camera_up === true
+                        ? true
+                        : (isObject && item.camera_up === false ? false : null),
+                    isPanelIssue: isObject ? !!item.is_panel_issue : false,
+                    panelFisheyeUp: isObject && item.panel_fisheye_up === true
+                        ? true
+                        : (isObject && item.panel_fisheye_up === false ? false : null),
+                    cameraViewStatus: isObject ? (item.camera_view_status || "red") : "red",
+                    vrmMu: isObject ? (item.vrm_mu || "") : "",
+                    vrmUrl: isObject ? (item.vrm_url || "") : "",
+                    resolved: false,
+                    worked: false,
+                    skipped: false,
                 };
             });
             listState[id].sort(function (a, b) {
@@ -309,44 +664,212 @@
                 return (a.unit || "").localeCompare(b.unit || "");
             });
             renderList(id);
+            updateTicketCounts();
+        }
+
+        function moveEntryToList(entry, fromId, toId) {
+            if (!listState[toId]) {
+                throw new Error("Unknown validation category: " + toId);
+            }
+            if (fromId !== toId) {
+                const sourceIndex = listState[fromId].indexOf(entry);
+                if (sourceIndex !== -1) {
+                    listState[fromId].splice(sourceIndex, 1);
+                }
+                listState[toId].push(entry);
+                listState[toId].sort(function (a, b) {
+                    if (a.undiagnosed !== b.undiagnosed) {
+                        return a.undiagnosed ? -1 : 1;
+                    }
+                    return (a.unit || "").localeCompare(b.unit || "");
+                });
+                renderList(fromId);
+            }
+            renderList(toId);
+            updateTicketCounts();
         }
 
         function renderList(id) {
             const el = document.getElementById(id);
             const countEl = document.getElementById(id + "_count");
-            const restoreEl = document.getElementById(id + "_restore");
             const entries = listState[id];
-            const visible = entries.filter(function (entry) { return !entry.removed; });
-            const removedCount = entries.length - visible.length;
 
-            countEl.textContent = entries.length
-                ? "(" + visible.length + " of " + entries.length + ")"
-                : "";
-            restoreEl.hidden = removedCount === 0;
+            countEl.textContent = entries.length ? listCountText(entries) : "";
 
             el.innerHTML = "";
-            if (visible.length === 0) {
+            const legend = document.createElement("li");
+            legend.className = "checkbox-legend";
+            [["R", "legend-r"], ["W", "legend-w"], ["S", "legend-s"]].forEach(function (pair) {
+                const mark = document.createElement("span");
+                mark.className = "legend-mark " + pair[1];
+                mark.textContent = pair[0];
+                legend.appendChild(mark);
+            });
+            el.appendChild(legend);
+
+            if (entries.length === 0) {
                 const li = document.createElement("li");
                 li.className = "empty";
-                li.textContent = entries.length === 0 ? "None" : "All cleared";
+                li.textContent = "None";
                 el.appendChild(li);
                 return;
             }
 
-            visible.forEach(function (entry) {
+            entries.forEach(function (entry) {
                 const li = document.createElement("li");
+                const classes = [];
                 if (entry.undiagnosed) {
-                    li.className = "undiagnosed-row";
+                    classes.push("undiagnosed-row");
+                }
+                if (entry.resolved) {
+                    classes.push("resolved-row");
+                }
+                if (entry.worked) {
+                    classes.push("worked-row");
+                }
+                if (entry.skipped) {
+                    classes.push("skipped-row");
+                }
+                li.className = classes.join(" ");
+
+                function refreshRow() {
+                    li.classList.toggle("resolved-row", entry.resolved);
+                    li.classList.toggle("worked-row", entry.worked);
+                    li.classList.toggle("skipped-row", entry.skipped);
+                    countEl.textContent = listCountText(entries);
+                    updateTicketCounts();
                 }
 
-                const checkbox = document.createElement("input");
-                checkbox.type = "checkbox";
-                checkbox.title = "Remove from list";
-                checkbox.addEventListener("change", function () {
-                    entry.removed = true;
-                    renderList(id);
+                const resolveBox = document.createElement("input");
+                resolveBox.type = "checkbox";
+                resolveBox.className = "resolve-box";
+                resolveBox.title = "Mark ticket as resolved";
+                resolveBox.checked = !!entry.resolved;
+                resolveBox.addEventListener("change", function () {
+                    entry.resolved = resolveBox.checked;
+                    if (entry.resolved) {
+                        entry.worked = false;
+                        entry.skipped = false;
+                        workedBox.checked = false;
+                        skipBox.checked = false;
+                    }
+                    refreshRow();
                 });
-                li.appendChild(checkbox);
+                li.appendChild(resolveBox);
+
+                const workedBox = document.createElement("input");
+                workedBox.type = "checkbox";
+                workedBox.className = "worked-box";
+                workedBox.title = "Mark ticket as worked";
+                workedBox.checked = !!entry.worked;
+                workedBox.addEventListener("change", function () {
+                    entry.worked = workedBox.checked;
+                    if (entry.worked) {
+                        entry.resolved = false;
+                        entry.skipped = false;
+                        resolveBox.checked = false;
+                        skipBox.checked = false;
+                    }
+                    refreshRow();
+                });
+                li.appendChild(workedBox);
+
+                const skipBox = document.createElement("input");
+                skipBox.type = "checkbox";
+                skipBox.className = "skip-box";
+                skipBox.title = "Mark ticket as skipped";
+                skipBox.checked = !!entry.skipped;
+                skipBox.addEventListener("change", function () {
+                    entry.skipped = skipBox.checked;
+                    if (entry.skipped) {
+                        entry.resolved = false;
+                        entry.worked = false;
+                        resolveBox.checked = false;
+                        workedBox.checked = false;
+                    }
+                    refreshRow();
+                });
+                li.appendChild(skipBox);
+
+                let computeLed = null;
+                if (
+                    id === "false_positives"
+                    || id === "truly_down"
+                    || id === "nuc_down"
+                    || id === "scrypted_outage"
+                    || id === "stale_vpn"
+                    || id === "camera_view"
+                ) {
+                    computeLed = document.createElement("span");
+                    computeLed.className = "speaker-led";
+                    if (id === "false_positives") {
+                        computeLed.classList.add("is-up");
+                        computeLed.title = "Unit is up steady";
+                    } else if (id === "camera_view") {
+                        computeLed.classList.toggle("is-up", entry.cameraViewStatus === "green");
+                        computeLed.classList.toggle("is-warning", entry.cameraViewStatus === "yellow");
+                        computeLed.classList.toggle("is-down", entry.cameraViewStatus === "red");
+                        computeLed.title = entry.cameraViewStatus === "green"
+                            ? "Router and " + entry.computeLabel + " are reachable"
+                            : (entry.cameraViewStatus === "yellow"
+                                ? "Router is up and " + entry.computeLabel + " is down"
+                                : "Unit is down");
+                    } else if (id === "truly_down" || id === "stale_vpn") {
+                        computeLed.classList.add("is-down");
+                        computeLed.title = id === "stale_vpn"
+                            ? "Potentially stale VPN requires validation"
+                            : "Unit is fully down";
+                    } else {
+                        computeLed.classList.add("is-warning");
+                        computeLed.title = id === "scrypted_outage"
+                            ? "Scrypted is offline or needs verification"
+                            : entry.computeLabel + " is offline or needs verification";
+                    }
+                    li.appendChild(computeLed);
+                }
+
+                let speakerLed = null;
+                if (entry.isSpeaker) {
+                    speakerLed = document.createElement("span");
+                    speakerLed.className = "speaker-led";
+                    speakerLed.title = "Speaker status unknown";
+                    function updateSpeakerLed() {
+                        speakerLed.classList.toggle("is-up", entry.speakerUp === true);
+                        speakerLed.classList.toggle("is-down", entry.speakerUp === false);
+                        speakerLed.title = entry.speakerUp === true
+                            ? "Speaker is up"
+                            : (entry.speakerUp === false ? "Speaker is down" : "Speaker status unknown");
+                    }
+                    updateSpeakerLed();
+                    li.appendChild(speakerLed);
+                }
+
+                let cameraLed = null;
+                if (entry.isCamera) {
+                    cameraLed = document.createElement("span");
+                    cameraLed.className = "speaker-led";
+                    cameraLed.classList.toggle("is-up", entry.cameraUp === true);
+                    cameraLed.classList.toggle("is-down", entry.cameraUp === false);
+                    cameraLed.title = entry.cameraUp === true
+                        ? entry.cameraLabel + " is up"
+                        : (entry.cameraUp === false
+                            ? entry.cameraLabel + " is down"
+                            : entry.cameraLabel + " status unknown");
+                    li.appendChild(cameraLed);
+                }
+
+                if (entry.isPanelIssue) {
+                    const panelLed = document.createElement("span");
+                    panelLed.className = "speaker-led";
+                    panelLed.classList.toggle("is-up", entry.panelFisheyeUp === true);
+                    panelLed.classList.toggle("is-down", entry.panelFisheyeUp === false);
+                    panelLed.title = entry.panelFisheyeUp === true
+                        ? "Fisheye is up"
+                        : (entry.panelFisheyeUp === false
+                            ? "Fisheye is down"
+                            : "Fisheye status unknown");
+                    li.appendChild(panelLed);
+                }
 
                 const label = document.createElement("span");
                 label.appendChild(document.createTextNode(entry.unit));
@@ -361,6 +884,9 @@
                 }
 
                 const metaBits = [];
+                if (entry.cameraLabel) {
+                    metaBits.push(entry.cameraLabel);
+                }
                 if (entry.outageType) {
                     metaBits.push(entry.outageType);
                 }
@@ -378,13 +904,527 @@
                 }
 
                 li.appendChild(label);
+
+                if (id === "false_positives" || id === "truly_down") {
+                    const validateBtn = document.createElement("button");
+                    validateBtn.type = "button";
+                    validateBtn.className = "action-btn";
+                    validateBtn.textContent = "Validate";
+                    validateBtn.addEventListener("click", function () {
+                        validateBtn.disabled = true;
+                        validateBtn.textContent = "Validating...";
+                        fetch("/issues/validate-unit/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                const category = data.category || "false_positives";
+                                consoleLines.push(
+                                    "Revalidated "
+                                        + entry.unit
+                                        + " — moved to "
+                                        + category.replace(/_/g, " ")
+                                );
+                                renderConsole(true);
+                                moveEntryToList(entry, id, category);
+                            })
+                            .catch(function (error) {
+                                window.alert("Validation failed: " + (error.message || error));
+                                validateBtn.disabled = false;
+                                validateBtn.textContent = "Validate";
+                            });
+                    });
+                    li.appendChild(validateBtn);
+                }
+
+                const fishBtn = document.createElement("button");
+                fishBtn.type = "button";
+                fishBtn.className = "action-btn";
+                fishBtn.textContent = "Fisheye Snapshot";
+                if (!entry.fisheyeIp) {
+                    fishBtn.disabled = true;
+                    fishBtn.title = "No fisheye IP in net sheet";
+                } else {
+                    fishBtn.addEventListener("click", function () {
+                        openFisheyeSnapshot(entry.unit);
+                    });
+                }
+                li.appendChild(fishBtn);
+
+                if (entry.switchUrl) {
+                    const switchBtn = document.createElement("a");
+                    switchBtn.className = "action-btn";
+                    switchBtn.href = "/issues/switch/" + encodeURIComponent(entry.unit);
+                    switchBtn.target = "_blank";
+                    switchBtn.rel = "noopener noreferrer";
+                    switchBtn.textContent = "Open Switch";
+                    li.appendChild(switchBtn);
+                } else {
+                    const switchBtn = document.createElement("button");
+                    switchBtn.type = "button";
+                    switchBtn.className = "action-btn";
+                    switchBtn.textContent = "Open Switch";
+                    switchBtn.disabled = true;
+                    switchBtn.title = "No switch IP in net sheet";
+                    li.appendChild(switchBtn);
+                }
+
+                if (entry.hasPve) {
+                    const pveBtn = document.createElement("a");
+                    pveBtn.className = "action-btn";
+                    pveBtn.href = "/issues/pve/" + encodeURIComponent(entry.unit);
+                    pveBtn.target = "_blank";
+                    pveBtn.rel = "noopener noreferrer";
+                    pveBtn.textContent = "Open PVE";
+                    li.appendChild(pveBtn);
+                }
+
+                if (entry.vrmUrl) {
+                    const vrmBtn = document.createElement("a");
+                    vrmBtn.className = "action-btn";
+                    vrmBtn.href = entry.vrmUrl;
+                    vrmBtn.target = "_blank";
+                    vrmBtn.rel = "noopener noreferrer";
+                    vrmBtn.textContent = "Open VRM";
+                    vrmBtn.title = "Open VRM search for MU" + entry.vrmMu;
+                    li.appendChild(vrmBtn);
+                }
+
+                if (id === "nuc_down") {
+                    const pingComputeBtn = document.createElement("button");
+                    pingComputeBtn.type = "button";
+                    pingComputeBtn.className = "action-btn";
+                    pingComputeBtn.textContent = "Ping " + entry.computeLabel;
+                    pingComputeBtn.addEventListener("click", function () {
+                        pingComputeBtn.disabled = true;
+                        pingComputeBtn.textContent = "Pinging...";
+                        fetch("/issues/ping-compute/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                entry.computeLabel = data.label || entry.computeLabel;
+                                pingComputeBtn.textContent = "Ping " + entry.computeLabel;
+                                if (computeLed) {
+                                    computeLed.classList.toggle("is-up", data.compute_up === true);
+                                    computeLed.classList.toggle("is-warning", data.compute_up !== true);
+                                    computeLed.title = data.compute_up === true
+                                        ? entry.computeLabel + " is up"
+                                        : entry.computeLabel + " is still unreachable";
+                                }
+                                consoleLines.push(
+                                    "Checking " + entry.unit + "'s " + entry.computeLabel + "..."
+                                );
+                                if (data.output) {
+                                    data.output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    entry.computeLabel
+                                        + " is "
+                                        + (data.compute_up === true ? "up" : "down")
+                                        + ": "
+                                        + entry.unit
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Compute ping failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                pingComputeBtn.disabled = false;
+                                if (pingComputeBtn.textContent === "Pinging...") {
+                                    pingComputeBtn.textContent = "Ping " + entry.computeLabel;
+                                }
+                            });
+                    });
+                    li.appendChild(pingComputeBtn);
+                }
+
+                if (id === "scrypted_outage") {
+                    const pingScryptedBtn = document.createElement("button");
+                    pingScryptedBtn.type = "button";
+                    pingScryptedBtn.className = "action-btn";
+                    pingScryptedBtn.textContent = "Ping Scrypted";
+                    pingScryptedBtn.addEventListener("click", function () {
+                        pingScryptedBtn.disabled = true;
+                        pingScryptedBtn.textContent = "Pinging...";
+                        fetch("/issues/ping-scrypted/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                if (computeLed) {
+                                    computeLed.classList.toggle("is-up", data.scrypted_up === true);
+                                    computeLed.classList.toggle("is-warning", data.scrypted_up !== true);
+                                    computeLed.title = data.scrypted_up === true
+                                        ? "Scrypted is up"
+                                        : "Scrypted is still unreachable";
+                                }
+                                consoleLines.push("Checking " + entry.unit + "'s Scrypted...");
+                                if (data.output) {
+                                    data.output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Scrypted is "
+                                        + (data.scrypted_up === true ? "up" : "down")
+                                        + ": "
+                                        + entry.unit
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Scrypted ping failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                pingScryptedBtn.disabled = false;
+                                pingScryptedBtn.textContent = "Ping Scrypted";
+                            });
+                    });
+                    li.appendChild(pingScryptedBtn);
+                }
+
+                if (id === "stale_vpn") {
+                    const validateStaleBtn = document.createElement("button");
+                    validateStaleBtn.type = "button";
+                    validateStaleBtn.className = "action-btn";
+                    validateStaleBtn.textContent = "Validate";
+                    validateStaleBtn.addEventListener("click", function () {
+                        validateStaleBtn.disabled = true;
+                        validateStaleBtn.textContent = "Validating...";
+                        fetch("/issues/validate-stale-vpn/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                if (computeLed) {
+                                    computeLed.classList.toggle("is-up", data.status === "green");
+                                    computeLed.classList.toggle("is-warning", data.status === "yellow");
+                                    computeLed.classList.toggle("is-down", data.status === "red");
+                                    computeLed.title = data.status === "green"
+                                        ? "Router and " + data.compute_label + " are reachable"
+                                        : (data.status === "yellow"
+                                            ? "Only " + data.compute_label + " is reachable"
+                                            : "Unit remains unreachable");
+                                }
+                                consoleLines.push("Checking " + entry.unit + "'s router...");
+                                if (data.router_output) {
+                                    data.router_output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Checking " + entry.unit + "'s " + data.compute_label + "..."
+                                );
+                                if (data.compute_output) {
+                                    data.compute_output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Stale VPN validation: "
+                                        + entry.unit
+                                        + " — "
+                                        + data.status
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Stale VPN validation failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                validateStaleBtn.disabled = false;
+                                validateStaleBtn.textContent = "Validate";
+                            });
+                    });
+                    li.appendChild(validateStaleBtn);
+                }
+
+                if (id === "camera_view") {
+                    const validateCameraViewBtn = document.createElement("button");
+                    validateCameraViewBtn.type = "button";
+                    validateCameraViewBtn.className = "action-btn";
+                    validateCameraViewBtn.textContent = "Validate";
+                    validateCameraViewBtn.addEventListener("click", function () {
+                        validateCameraViewBtn.disabled = true;
+                        validateCameraViewBtn.textContent = "Validating...";
+                        fetch("/issues/validate-camera-view/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                entry.cameraViewStatus = data.status;
+                                entry.computeLabel = data.compute_label || entry.computeLabel;
+                                if (computeLed) {
+                                    computeLed.classList.toggle("is-up", data.status === "green");
+                                    computeLed.classList.toggle("is-warning", data.status === "yellow");
+                                    computeLed.classList.toggle("is-down", data.status === "red");
+                                    computeLed.title = data.status === "green"
+                                        ? "Router and " + data.compute_label + " are reachable"
+                                        : (data.status === "yellow"
+                                            ? "Router is up and " + data.compute_label + " is down"
+                                            : "Unit is down");
+                                }
+                                consoleLines.push("Checking " + entry.unit + "'s router...");
+                                if (data.router_output) {
+                                    data.router_output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Checking " + entry.unit + "'s " + data.compute_label + "..."
+                                );
+                                if (data.compute_output) {
+                                    data.compute_output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Camera View validation: "
+                                        + entry.unit
+                                        + " — "
+                                        + data.status
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Camera View validation failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                validateCameraViewBtn.disabled = false;
+                                validateCameraViewBtn.textContent = "Validate";
+                            });
+                    });
+                    li.appendChild(validateCameraViewBtn);
+                }
+
+                if (entry.isSpeaker) {
+                    const pingSpeakerBtn = document.createElement("button");
+                    pingSpeakerBtn.type = "button";
+                    pingSpeakerBtn.className = "action-btn";
+                    pingSpeakerBtn.textContent = "Ping Speaker";
+                    pingSpeakerBtn.addEventListener("click", function () {
+                        pingSpeakerBtn.disabled = true;
+                        pingSpeakerBtn.textContent = "Pinging...";
+                        fetch("/issues/ping-speaker/" + encodeURIComponent(entry.unit), {
+                            method: "POST",
+                        })
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                entry.speakerUp = data.speaker_up === true;
+                                if (speakerLed) {
+                                    speakerLed.classList.toggle("is-up", entry.speakerUp === true);
+                                    speakerLed.classList.toggle("is-down", entry.speakerUp === false);
+                                    speakerLed.title = entry.speakerUp ? "Speaker is up" : "Speaker is down";
+                                }
+                                consoleLines.push("Checking " + entry.unit + "'s speaker...");
+                                if (data.output) {
+                                    data.output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    "Speaker is " + (entry.speakerUp ? "up" : "down") + ": " + entry.unit
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Speaker ping failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                pingSpeakerBtn.disabled = false;
+                                pingSpeakerBtn.textContent = "Ping Speaker";
+                            });
+                    });
+                    li.appendChild(pingSpeakerBtn);
+                }
+
+                if (entry.isCamera) {
+                    const pingCameraBtn = document.createElement("button");
+                    pingCameraBtn.type = "button";
+                    pingCameraBtn.className = "action-btn";
+                    pingCameraBtn.textContent = "Ping Camera";
+                    pingCameraBtn.addEventListener("click", function () {
+                        pingCameraBtn.disabled = true;
+                        pingCameraBtn.textContent = "Pinging...";
+                        fetch(
+                            "/issues/ping-camera/"
+                                + encodeURIComponent(entry.unit)
+                                + "/"
+                                + encodeURIComponent(entry.cameraTarget),
+                            { method: "POST" }
+                        )
+                            .then(function (response) {
+                                return response.json().then(function (data) {
+                                    if (!response.ok || !data.ok) {
+                                        throw new Error(data.error || ("HTTP " + response.status));
+                                    }
+                                    return data;
+                                });
+                            })
+                            .then(function (data) {
+                                entry.cameraUp = data.camera_up === true;
+                                if (cameraLed) {
+                                    cameraLed.classList.toggle("is-up", entry.cameraUp === true);
+                                    cameraLed.classList.toggle("is-down", entry.cameraUp === false);
+                                    cameraLed.title = entry.cameraLabel
+                                        + (entry.cameraUp ? " is up" : " is down");
+                                }
+                                consoleLines.push(
+                                    "Checking " + entry.unit + "'s " + entry.cameraLabel + "..."
+                                );
+                                if (data.output) {
+                                    data.output.split(/\r?\n/).forEach(function (line) {
+                                        if (line) {
+                                            consoleLines.push(line);
+                                        }
+                                    });
+                                }
+                                consoleLines.push(
+                                    entry.cameraLabel
+                                        + " is "
+                                        + (entry.cameraUp ? "up" : "down")
+                                        + ": "
+                                        + entry.unit
+                                );
+                                renderConsole(true);
+                            })
+                            .catch(function (error) {
+                                window.alert("Camera ping failed: " + (error.message || error));
+                            })
+                            .finally(function () {
+                                pingCameraBtn.disabled = false;
+                                pingCameraBtn.textContent = "Ping Camera";
+                            });
+                    });
+                    li.appendChild(pingCameraBtn);
+                }
+
                 el.appendChild(li);
             });
         }
 
+        function fillDiscardedList(items) {
+            const entries = items || [];
+            const el = document.getElementById("discarded_tickets");
+            const countEl = document.getElementById("discarded_tickets_count");
+            countEl.textContent = "(" + entries.length + ")";
+            el.innerHTML = "";
+            if (entries.length === 0) {
+                const li = document.createElement("li");
+                li.className = "empty";
+                li.textContent = "None";
+                el.appendChild(li);
+                return;
+            }
+            entries.forEach(function (entry) {
+                const li = document.createElement("li");
+                if (entry.issue_id && entry.url) {
+                    const link = document.createElement("a");
+                    link.href = entry.url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = entry.issue_id;
+                    li.appendChild(link);
+                    li.appendChild(document.createTextNode(" — "));
+                }
+                li.appendChild(document.createTextNode(entry.subject || "(No subject)"));
+                if (entry.reason) {
+                    const reason = document.createElement("div");
+                    reason.className = "discarded-reason";
+                    reason.textContent = entry.reason;
+                    li.appendChild(reason);
+                }
+                el.appendChild(li);
+            });
+        }
+
+        function setProgress(current, total, unit) {
+            const safeTotal = total || 0;
+            const pct = safeTotal > 0 ? Math.min(100, Math.round((current / safeTotal) * 100)) : 0;
+            progressFillEl.style.width = pct + "%";
+            if (safeTotal === 0) {
+                progressLabelEl.textContent = "No units to validate";
+                progressFillEl.classList.add("is-complete");
+                return;
+            }
+            if (unit && unit !== "complete" && unit !== "starting") {
+                progressLabelEl.textContent = "Validating " + current + " / " + safeTotal + " — " + unit;
+            } else if (current >= safeTotal) {
+                progressLabelEl.textContent = "Validation complete — " + safeTotal + " / " + safeTotal;
+                progressFillEl.classList.add("is-complete");
+            } else {
+                progressLabelEl.textContent = "Validating " + current + " / " + safeTotal;
+            }
+            if (current >= safeTotal && safeTotal > 0) {
+                progressFillEl.classList.add("is-complete");
+            }
+        }
+
         source.onmessage = function (event) {
             const data = JSON.parse(event.data);
-            if (data.type === "log") {
+            if (data.type === "progress") {
+                setProgress(data.current || 0, data.total || 0, data.unit || "");
+            } else if (data.type === "log") {
                 consoleLines.push(data.line);
                 renderConsole(true);
             } else if (data.type === "done") {
@@ -394,7 +1434,15 @@
                 fillList("stale_vpn", r.stale_vpn);
                 fillList("truly_down", r.truly_down);
                 fillList("scrypted_outage", r.scrypted_outage);
+                fillList("speaker_outage", r.speaker_outage);
+                fillList("camera_outage", r.camera_outage);
+                fillList("panel_issues", r.panel_issues);
+                fillList("camera_view", r.camera_view);
+                fillDiscardedList(r.discarded_tickets);
                 statusEl.textContent = "Validation complete.";
+                if (progressFillEl.style.width !== "100%") {
+                    setProgress(1, 1, "complete");
+                }
                 source.close();
             }
         };

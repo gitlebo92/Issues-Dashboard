@@ -39,8 +39,24 @@ class JobStdout:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             job = stream_jobs.get(self.job_id)
-            if job is not None:
-                job["queue"].put({"type": "log", "line": line})
+            if job is None:
+                continue
+            if line.startswith("__PROGRESS__ "):
+                parts = line.split(" ", 3)
+                try:
+                    current = int(parts[1])
+                    total = int(parts[2])
+                except (IndexError, ValueError):
+                    continue
+                unit = parts[3] if len(parts) > 3 else ""
+                job["queue"].put({
+                    "type": "progress",
+                    "current": current,
+                    "total": total,
+                    "unit": unit,
+                })
+                continue
+            job["queue"].put({"type": "log", "line": line})
         return len(text)
 
     def flush(self):
@@ -55,13 +71,29 @@ def _run_issues_validation(job_id, issue_path):
     try:
         work_tool.generate_false_mu()
         work_tool.generate_net_array()
-        false_positives, nuc_down, stale_vpn, truly_down, scrypted_outage = work_tool.validate_issues_report(issue_path)
+        (
+            false_positives,
+            nuc_down,
+            stale_vpn,
+            truly_down,
+            scrypted_outage,
+            speaker_outage,
+            camera_outage,
+            panel_issues,
+            camera_view,
+            discarded_tickets,
+        ) = work_tool.validate_issues_report(issue_path)
         job["results"] = {
             "false_positives": false_positives,
             "nuc_down": nuc_down,
             "stale_vpn": stale_vpn,
             "truly_down": truly_down,
             "scrypted_outage": scrypted_outage,
+            "speaker_outage": speaker_outage,
+            "camera_outage": camera_outage,
+            "panel_issues": panel_issues,
+            "camera_view": camera_view,
+            "discarded_tickets": discarded_tickets,
         }
         job["queue"].put({"type": "done", "results": job["results"]})
     except Exception as e:
@@ -72,6 +104,11 @@ def _run_issues_validation(job_id, issue_path):
             "stale_vpn": [],
             "truly_down": [],
             "scrypted_outage": [],
+            "speaker_outage": [],
+            "camera_outage": [],
+            "panel_issues": [],
+            "camera_view": [],
+            "discarded_tickets": [],
         }})
     finally:
         sys.stdout = original_stdout
@@ -181,6 +218,104 @@ def issues_watch(job_id):
 @app.route("/issues/stream/<job_id>", methods=["GET"])
 def issues_stream(job_id):
     return _sse_stream(job_id)
+
+@app.route("/issues/fisheye/<unit>", methods=["GET"])
+def issues_fisheye(unit):
+    data, error = work_tool.fetch_fisheye_snapshot(unit)
+    if error:
+        return error, 502
+    return Response(data, mimetype="image/jpeg")
+
+@app.route("/issues/ping-speaker/<unit>", methods=["POST"])
+def issues_ping_speaker(unit):
+    speaker_up, output, error = work_tool.ping_speaker_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "speaker_up": speaker_up,
+        "output": output,
+    })
+
+@app.route("/issues/ping-camera/<unit>/<target>", methods=["POST"])
+def issues_ping_camera(unit, target):
+    camera_up, output, error = work_tool.ping_camera_status(unit, target)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "target": target,
+        "camera_up": camera_up,
+        "output": output,
+    })
+
+@app.route("/issues/ping-compute/<unit>", methods=["POST"])
+def issues_ping_compute(unit):
+    compute_up, label, output, error = work_tool.ping_compute_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "label": label,
+        "compute_up": compute_up,
+        "output": output,
+    })
+
+@app.route("/issues/ping-scrypted/<unit>", methods=["POST"])
+def issues_ping_scrypted(unit):
+    scrypted_up, output, error = work_tool.ping_scrypted_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "scrypted_up": scrypted_up,
+        "output": output,
+    })
+
+@app.route("/issues/validate-unit/<unit>", methods=["POST"])
+def issues_validate_unit(unit):
+    category, error = work_tool.validate_unit_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "category": category,
+    })
+
+@app.route("/issues/validate-stale-vpn/<unit>", methods=["POST"])
+def issues_validate_stale_vpn(unit):
+    result, error = work_tool.validate_stale_vpn_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    result["ok"] = True
+    return jsonify(result)
+
+@app.route("/issues/validate-camera-view/<unit>", methods=["POST"])
+def issues_validate_camera_view(unit):
+    result, error = work_tool.validate_camera_view_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 404
+    result["ok"] = True
+    return jsonify(result)
+
+@app.route("/issues/switch/<unit>", methods=["GET"])
+def issues_switch(unit):
+    info, error = work_tool.switch_login_info(unit)
+    if error:
+        return error, 502
+    return render_template("switch_redirect.html", **info)
+
+@app.route("/issues/pve/<unit>", methods=["GET"])
+def issues_pve(unit):
+    url, error = work_tool.start_pve_local_proxy(unit)
+    if error:
+        return error, 502
+    return redirect(url)
 
 @app.route("/recovery_email", methods=["GET"])
 def recovery_email_form():

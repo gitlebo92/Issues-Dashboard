@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Opening switch {{ unit }}</title>
+</head>
+<body>
+    <p>Opening switch for {{ unit }}...</p>
+    {% if use_dologin %}
+    <form id="switch_login" method="post" action="{{ url }}">
+        <input type="hidden" name="username" value="{{ username }}">
+        <input type="hidden" name="password" value="{{ password }}">
+        <input type="hidden" name="user" value="{{ username }}">
+        <input type="hidden" name="pass" value="{{ password }}">
+        <button type="submit">Continue</button>
+    </form>
+    <script>
+        document.getElementById("switch_login").submit();
+    </script>
+    {% else %}
+    <p><a id="switch_link" href="#">Continue</a></p>
+    <script>
+        const switchUrl = {{ url|tojson }};
+        document.getElementById("switch_link").href = switchUrl;
+        window.location.replace(switchUrl);
+    </script>
+    {% endif %}
+</body>
+</html>
