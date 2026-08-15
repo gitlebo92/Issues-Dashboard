@@ -9,6 +9,7 @@
             background: #0f172a;
             color: #e2e8f0;
         }
+        [hidden] { display: none !important; }
         h1, h2 { margin-bottom: 8px; }
         .progress-wrap {
             margin: 0 0 16px;
@@ -118,6 +119,59 @@
         }
         .panel h2 { font-size: 16px; margin-top: 16px; }
         .panel h2:first-child { margin-top: 0; }
+        .list-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #334155;
+        }
+        .list-toolbar input[type="search"],
+        .list-toolbar select {
+            background: #0f172a;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+        .list-toolbar input[type="search"] {
+            flex: 1 1 220px;
+            min-width: 160px;
+        }
+        .list-toolbar input[type="search"]:focus,
+        .list-toolbar select:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+        .list-view-toggle {
+            display: inline-flex;
+        }
+        .list-view-toggle button {
+            background: #0f172a;
+            color: #94a3b8;
+            border: 1px solid #475569;
+            padding: 8px 10px;
+            cursor: pointer;
+        }
+        .list-view-toggle button:first-child {
+            border-radius: 6px 0 0 6px;
+        }
+        .list-view-toggle button:last-child {
+            border-left: 0;
+            border-radius: 0 6px 6px 0;
+        }
+        .list-view-toggle button.is-active {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #ffffff;
+        }
+        .list-match-count {
+            color: #94a3b8;
+            font-size: 13px;
+            white-space: nowrap;
+        }
         .panel li {
             display: flex;
             align-items: center;
@@ -332,6 +386,26 @@
         </div>
 
         <div class="panel">
+            <div class="list-toolbar">
+                <input type="search" id="list_search" placeholder="Filter by unit..." autocomplete="off">
+                <div class="list-view-toggle" aria-label="Filtered list layout">
+                    <button type="button" id="show_all_lists" class="is-active" aria-pressed="true">All lists</button>
+                    <button type="button" id="show_one_list" aria-pressed="false">One list</button>
+                </div>
+                <select id="list_category" aria-label="Select outage list" hidden>
+                    <option value="false_positives">Up Steady</option>
+                    <option value="nuc_down">Offline compute</option>
+                    <option value="scrypted_outage">Scrypted outage</option>
+                    <option value="stale_vpn">Potentially stale VPN</option>
+                    <option value="speaker_outage">Speaker outage</option>
+                    <option value="camera_outage">Camera outage</option>
+                    <option value="truly_down">Down Full</option>
+                    <option value="panel_issues">Panel issues</option>
+                    <option value="camera_view">Camera View</option>
+                    <option value="discarded_tickets">Miscellaneous</option>
+                </select>
+                <span class="list-match-count" id="list_match_count"></span>
+            </div>
             <h2>
                 Up Steady
                 <span class="count" id="false_positives_count"></span>
@@ -406,6 +480,11 @@
         const consoleEl = document.getElementById("console");
         const consoleSearchEl = document.getElementById("console_search");
         const consoleMatchCountEl = document.getElementById("console_match_count");
+        const listSearchEl = document.getElementById("list_search");
+        const listMatchCountEl = document.getElementById("list_match_count");
+        const showAllListsBtn = document.getElementById("show_all_lists");
+        const showOneListBtn = document.getElementById("show_one_list");
+        const listCategoryEl = document.getElementById("list_category");
         const statusEl = document.getElementById("status");
         const progressFillEl = document.getElementById("progress_fill");
         const progressLabelEl = document.getElementById("progress_label");
@@ -574,6 +653,7 @@
             "panel_issues",
             "camera_view",
         ];
+        const filterableListIds = listIds.concat(["discarded_tickets"]);
         const listState = {};
         const ticketsResolvedEl = document.getElementById("tickets_resolved");
         const ticketsWorkedEl = document.getElementById("tickets_worked");
@@ -582,6 +662,58 @@
         listIds.forEach(function (id) {
             listState[id] = [];
         });
+
+        function applyListFilters() {
+            const query = listSearchEl.value.trim().toLowerCase();
+            const singleList = showOneListBtn.classList.contains("is-active");
+            const selectedId = listCategoryEl.value;
+            let matchCount = 0;
+
+            filterableListIds.forEach(function (id) {
+                const listEl = document.getElementById(id);
+                const headingEl = listEl.previousElementSibling;
+                const rows = Array.from(listEl.querySelectorAll("[data-search-text]"));
+                let visibleRows = 0;
+
+                rows.forEach(function (row) {
+                    const matches = !query || row.dataset.searchText.indexOf(query) !== -1;
+                    row.hidden = !matches;
+                    if (matches) {
+                        visibleRows += 1;
+                    }
+                });
+
+                const selected = !singleList || id === selectedId;
+                const sectionVisible = selected && (!query || visibleRows > 0);
+                headingEl.hidden = !sectionVisible;
+                listEl.hidden = !sectionVisible;
+                if (selected && query) {
+                    matchCount += visibleRows;
+                }
+            });
+
+            listMatchCountEl.textContent = query
+                ? matchCount + (matchCount === 1 ? " match" : " matches")
+                : "";
+        }
+
+        function setListView(singleList) {
+            showAllListsBtn.classList.toggle("is-active", !singleList);
+            showAllListsBtn.setAttribute("aria-pressed", singleList ? "false" : "true");
+            showOneListBtn.classList.toggle("is-active", singleList);
+            showOneListBtn.setAttribute("aria-pressed", singleList ? "true" : "false");
+            listCategoryEl.hidden = !singleList;
+            applyListFilters();
+        }
+
+        listSearchEl.addEventListener("input", applyListFilters);
+        showAllListsBtn.addEventListener("click", function () {
+            setListView(false);
+        });
+        showOneListBtn.addEventListener("click", function () {
+            setListView(true);
+        });
+        listCategoryEl.addEventListener("change", applyListFilters);
 
         function updateTicketCounts() {
             let resolved = 0;
@@ -712,12 +844,13 @@
                 li.className = "empty";
                 li.textContent = "None";
                 el.appendChild(li);
+                applyListFilters();
                 return;
             }
 
             entries.forEach(function (entry) {
                 const li = document.createElement("li");
-                const classes = [];
+                const classes = ["ticket-row"];
                 if (entry.undiagnosed) {
                     classes.push("undiagnosed-row");
                 }
@@ -731,6 +864,12 @@
                     classes.push("skipped-row");
                 }
                 li.className = classes.join(" ");
+                li.dataset.searchText = [
+                    entry.unit,
+                    entry.issueId,
+                    entry.outageType,
+                    entry.issueSubtype,
+                ].join(" ").toLowerCase();
 
                 function refreshRow() {
                     li.classList.toggle("resolved-row", entry.resolved);
@@ -1361,6 +1500,7 @@
 
                 el.appendChild(li);
             });
+            applyListFilters();
         }
 
         function fillDiscardedList(items) {
@@ -1374,10 +1514,17 @@
                 li.className = "empty";
                 li.textContent = "None";
                 el.appendChild(li);
+                applyListFilters();
                 return;
             }
             entries.forEach(function (entry) {
                 const li = document.createElement("li");
+                li.dataset.searchText = [
+                    entry.unit || "",
+                    entry.issue_id || "",
+                    entry.subject || "",
+                    entry.reason || "",
+                ].join(" ").toLowerCase();
                 if (entry.issue_id && entry.url) {
                     const link = document.createElement("a");
                     link.href = entry.url;
@@ -1396,6 +1543,7 @@
                 }
                 el.appendChild(li);
             });
+            applyListFilters();
         }
 
         function setProgress(current, total, unit) {
