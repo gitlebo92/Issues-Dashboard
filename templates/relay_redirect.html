@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Opening relay {{ unit }}</title>
+</head>
+<body>
+    <p>Opening relay for {{ unit }}...</p>
+    <p><a id="relay_link" href="#">Continue</a></p>
+    <script>
+        const relayUrl = {{ url|tojson }};
+        document.getElementById("relay_link").href = relayUrl;
+        window.location.replace(relayUrl);
+    </script>
+</body>
+</html>

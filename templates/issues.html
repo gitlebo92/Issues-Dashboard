@@ -6,17 +6,12 @@
 <body>
 
     <h1>Unit Outage Verification Tool</h1>
-    <h2>Upload Issue.csv — the next page streams live stdout while validation runs (1-3 mins)</h2>
-    <p>Optional columns: if headers include <code>Issue Type</code> and <code>Issue Subtype</code>, Full/Partial and subtype are shown on each unit. Empty subtype = undiagnosed tag (priority within its category list).</p>
+    <h2>Load Open, Monitoring, and On Hold issues directly from ERP</h2>
+    <p>The report refreshes ERP every 30 minutes while it remains open. Use Pull ERP on the report to refresh immediately. New tickets are validated automatically and marked in green.</p>
 
-    <form method="POST" action="/issues/results" enctype="multipart/form-data">
-        <label>Issue CSV:</label>
-        <input type="file" name="issue_file" required>
-
-        <br><br>
-
+    <form method="POST" action="/issues/results">
         <button type="submit">
-            Verify Outages
+            Start ERP Issue Verification
         </button>
     </form>
 

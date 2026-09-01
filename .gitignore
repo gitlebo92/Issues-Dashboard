@@ -11,6 +11,8 @@ build/
 .env
 map_sheet.csv
 net_sheet.csv
+resolved_today.json
+data/sandbox/
 
 # OS junk
 Thumbs.db

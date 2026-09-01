@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Opening cameras for {{ unit }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            background: #0f172a;
+            color: #e2e8f0;
+        }
+        ul {
+            padding-left: 20px;
+        }
+        .error {
+            color: #fca5a5;
+        }
+    </style>
+</head>
+<body>
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% else %}
+    <p>Opened {{ count }} camera{{ '' if count == 1 else 's' }} for {{ unit }} in {{ browser_label }}.</p>
+    <ul>
+        {% for camera in opened %}
+        <li>{{ camera.label }} ({{ camera.host }}{% if camera.port %}:{{ camera.port }}{% endif %})</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</body>
+</html>

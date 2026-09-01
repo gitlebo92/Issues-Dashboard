@@ -56,6 +56,20 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
+load_dotenv(resource_path(".env"))
+
+
+def work_tld() -> str:
+    tld = (os.getenv("workTLD") or "").strip().strip('"').strip("'")
+    tld = tld.replace("https://", "").replace("http://", "").strip()
+    return tld.split("/")[0].lstrip(".")
+
+
+def erp_base_url() -> str:
+    tld = work_tld()
+    return f"https://erp.{tld}" if tld else ""
+
+
 @dataclass
 class Config:
     username: str | None
@@ -265,7 +279,7 @@ def rd_battery_map() -> None:
             "limit_page_length": 0,
         }
         response = requests.get(
-            "https://erp.sentracam.com/api/resource/Component",
+            f"{erp_base_url()}/api/resource/Component",
             headers=headers,
             params=params,
         )
@@ -624,7 +638,7 @@ def low_battery_rd_fisheye_tool() -> None:
             "limit_page_length": 0,
         }
         response = requests.get(
-            "https://erp.sentracam.com/api/resource/Component",
+            f"{erp_base_url()}/api/resource/Component",
             headers=headers,
             params=params,
         )
