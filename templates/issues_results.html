@@ -584,6 +584,11 @@
         .action-btn:hover {
             background: #475569;
         }
+        .action-btn.is-active {
+            background: #b45309;
+            border-color: #d97706;
+            color: #fff7ed;
+        }
         .action-btn:disabled,
         .action-btn.is-disabled {
             opacity: 0.45;
@@ -892,6 +897,7 @@
                         <option value="panel_issues" data-label="Panel issues">Panel issues</option>
                         <option value="camera_view" data-label="Camera View">Camera View</option>
                         <option value="on_hold" data-label="On Hold">On Hold</option>
+                        <option value="monitoring_hours" data-label="Monitoring Hours">Monitoring Hours</option>
                         <option value="termination" data-label="Termination">Termination</option>
                         <option value="relocation" data-label="Relocation">Relocation</option>
                         <option value="discarded_tickets" data-label="Miscellaneous">Miscellaneous</option>
@@ -1000,6 +1006,15 @@
                 <span class="complete-badge">Complete</span>
             </h2>
             <ul id="on_hold"><li class="empty">Waiting...</li></ul>
+            </div>
+
+            <div class="list-section" data-panel="issues">
+            <h2>
+                Monitoring Hours
+                <span class="count" id="monitoring_hours_count"></span>
+                <span class="complete-badge">Complete</span>
+            </h2>
+            <ul id="monitoring_hours"><li class="empty">Waiting...</li></ul>
             </div>
 
             <div class="list-section" data-panel="issues">
@@ -1341,7 +1356,7 @@
             const q = query.toLowerCase();
             const include = new Array(lines.length).fill(false);
             const checkingRe = /^Checking\s+/i;
-            const sectionEndRe = /^(Validating\s|Up Steady|Offline compute|Potentially stale|Down Full|Scrypted outage|Speaker outage|Camera outage|Panel issues|Camera View)/i;
+            const sectionEndRe = /^(Validating\s|Up Steady|Offline compute|Potentially stale|Down Full|Scrypted outage|Speaker outage|Camera outage|Panel issues|Camera View|Monitoring Hours)/i;
 
             for (let i = 0; i < lines.length; i++) {
                 if (lines[i].toLowerCase().indexOf(q) !== -1) {
@@ -1745,6 +1760,7 @@
             "panel_issues",
             "camera_view",
             "on_hold",
+            "monitoring_hours",
             "termination",
             "relocation",
         ];
@@ -1758,6 +1774,7 @@
             "camera_outage",
             "stale_vpn",
             "on_hold",
+            "monitoring_hours",
             "termination",
             "relocation",
             "projects_open",
@@ -1795,6 +1812,7 @@
             panel_issues: "Panel issues",
             camera_view: "Camera View",
             on_hold: "On Hold",
+            monitoring_hours: "Monitoring Hours",
             termination: "Termination",
             relocation: "Relocation",
             projects_open: "Open",
@@ -1803,7 +1821,7 @@
         };
 
         issueListIds.forEach(function (id) {
-            if (id === "termination" || id === "relocation") {
+            if (id === "termination" || id === "relocation" || id === "monitoring_hours") {
                 return;
             }
             const listEl = document.getElementById(id);
@@ -1878,6 +1896,7 @@
             { value: "panel_issues", label: "Panel issues" },
             { value: "camera_view", label: "Camera View" },
             { value: "on_hold", label: "On Hold" },
+            { value: "monitoring_hours", label: "Monitoring Hours" },
             { value: "termination", label: "Termination" },
             { value: "relocation", label: "Relocation" },
             { value: "discarded_tickets", label: "Miscellaneous" },
@@ -2313,6 +2332,135 @@
             return rebootBtn;
         }
 
+        function appendNucMenuItems(nucMenu, entry) {
+            appendRebootComputeButton(
+                nucMenu,
+                "Reboot NUC",
+                "/issues/reboot-nuc/",
+                entry
+            );
+
+            const uptimeBtn = document.createElement("button");
+            uptimeBtn.type = "button";
+            uptimeBtn.className = "action-btn";
+            uptimeBtn.textContent = "Uptime";
+            uptimeBtn.addEventListener("click", function () {
+                uptimeBtn.disabled = true;
+                uptimeBtn.textContent = "Checking...";
+                statusEl.textContent = "NUC uptime for " + entry.unit + "...";
+                fetch("/issues/nuc-uptime/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const output = data.output || "";
+                        consoleLines.push("NUC uptime for " + entry.unit + ":");
+                        if (output) {
+                            output.split(/\r?\n/).forEach(function (line) {
+                                if (line) {
+                                    consoleLines.push(line);
+                                }
+                            });
+                        } else {
+                            consoleLines.push("(no output)");
+                        }
+                        renderConsole(true);
+                        statusEl.textContent = "NUC uptime for " + entry.unit
+                            + (output ? ": " + output.replace(/\s+/g, " ").trim() : " — no output");
+                    })
+                    .catch(function (error) {
+                        const message = "Uptime failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        window.alert(message);
+                    })
+                    .finally(function () {
+                        uptimeBtn.disabled = false;
+                        uptimeBtn.textContent = "Uptime";
+                    });
+            });
+            nucMenu.appendChild(uptimeBtn);
+
+            const chkdskBtn = document.createElement("button");
+            chkdskBtn.type = "button";
+            chkdskBtn.className = "action-btn";
+            chkdskBtn.textContent = "chkdsk (read-only)";
+            chkdskBtn.title = "Run read-only chkdsk on the NUC over SSH";
+            chkdskBtn.addEventListener("click", function () {
+                const raw = window.prompt(
+                    "Drive letter to check (read-only chkdsk):",
+                    "C"
+                );
+                if (raw == null) {
+                    return;
+                }
+                let drive = String(raw || "").trim().toUpperCase();
+                drive = drive.replace(/[:\\/]/g, "");
+                if (!/^[A-Z]$/.test(drive)) {
+                    window.alert("Enter a single drive letter (A-Z).");
+                    return;
+                }
+                chkdskBtn.disabled = true;
+                chkdskBtn.textContent = "Running...";
+                statusEl.textContent = "chkdsk " + drive + ": (read-only) on "
+                    + entry.unit + "...";
+                fetch("/issues/chkdsk/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ drive: drive }),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const header = "chkdsk "
+                            + drive
+                            + ": (read-only) for "
+                            + (data.unit || entry.unit)
+                            + " — "
+                            + (data.message || "done");
+                        consoleLines.push(header);
+                        const output = data.output || "";
+                        if (output) {
+                            output.split(/\r?\n/).forEach(function (line) {
+                                if (line) {
+                                    consoleLines.push(line);
+                                }
+                            });
+                        } else {
+                            consoleLines.push("(no output)");
+                        }
+                        renderConsole(true);
+                        statusEl.textContent = header;
+                    })
+                    .catch(function (error) {
+                        const message = "chkdsk failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        window.alert(message);
+                    })
+                    .finally(function () {
+                        chkdskBtn.disabled = false;
+                        chkdskBtn.textContent = "chkdsk (read-only)";
+                    });
+            });
+            nucMenu.appendChild(chkdskBtn);
+        }
+
         function appendScryptedLinuxMenuItems(scryptedLinuxMenu, entry) {
             const checkPatchBtn = document.createElement("button");
             checkPatchBtn.type = "button";
@@ -2426,8 +2574,14 @@
             if (unitSupportsSnucReboot(entry)) {
                 appendRebootComputeButton(
                     scryptedLinuxMenu,
-                    "Reboot SNUC",
-                    "/issues/reboot-snuc/",
+                    "Reboot Scrypted",
+                    "/issues/reboot-scrypted/",
+                    entry
+                );
+                appendRebootComputeButton(
+                    scryptedLinuxMenu,
+                    "Reboot PVE",
+                    "/issues/reboot-pve/",
                     entry
                 );
             }
@@ -2439,20 +2593,387 @@
             if (!showScrypted && !showNuc) {
                 return;
             }
-            const linuxMenu = appendCommandSubmenu(commandItems, "Linux");
+            if (showNuc) {
+                const nucMenu = appendCommandSubmenu(commandItems, "NUC");
+                appendNucMenuItems(nucMenu, entry);
+            }
             if (showScrypted) {
+                const linuxMenu = appendCommandSubmenu(commandItems, "Linux");
                 const scryptedLinuxMenu = appendCommandSubmenu(linuxMenu, "Scrypted");
                 appendScryptedLinuxMenuItems(scryptedLinuxMenu, entry);
             }
-            if (showNuc) {
-                const nucMenu = appendCommandSubmenu(linuxMenu, "NUC");
-                appendRebootComputeButton(
-                    nucMenu,
-                    "Reboot NUC",
-                    "/issues/reboot-nuc/",
-                    entry
-                );
+        }
+
+        const longPingByUnit = {};
+
+        function appendGetCarrierButton(parentMenu, entry) {
+            const carrierBtn = document.createElement("button");
+            carrierBtn.type = "button";
+            carrierBtn.className = "action-btn";
+            carrierBtn.textContent = "Get Carrier";
+            if (!entry || !entry.unit) {
+                carrierBtn.disabled = true;
+                carrierBtn.title = "No unit on this ticket";
+                parentMenu.appendChild(carrierBtn);
+                return;
             }
+            carrierBtn.title = "Lookup cell carrier from v19 SIM ICCID prefix";
+            carrierBtn.addEventListener("click", function () {
+                carrierBtn.disabled = true;
+                carrierBtn.textContent = "Looking up...";
+                statusEl.textContent = "Getting carrier for " + entry.unit + "...";
+                fetch("/issues/carrier/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const label = data.carrier || ((data.carriers || []).join(" / ")) || "?";
+                        const line = "Carrier for " + (data.unit || entry.unit) + ": " + label;
+                        consoleLines.push(line);
+                        (data.sims || []).forEach(function (sim) {
+                            const bits = [
+                                "  SIM " + (sim.iccid || "?"),
+                                "prefix " + (sim.prefix || "?"),
+                                (sim.carrier || "unknown"),
+                            ];
+                            if (sim.address) {
+                                bits.push(sim.address);
+                            }
+                            consoleLines.push(bits.join(" — "));
+                        });
+                        (data.unknown_iccids || []).forEach(function (iccid) {
+                            consoleLines.push("  Unknown prefix for ICCID " + iccid);
+                        });
+                        renderConsole(true);
+                        statusEl.textContent = line;
+                    })
+                    .catch(function (error) {
+                        const message = "Get Carrier failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        window.alert(message);
+                    })
+                    .finally(function () {
+                        carrierBtn.disabled = false;
+                        carrierBtn.textContent = "Get Carrier";
+                    });
+            });
+            parentMenu.appendChild(carrierBtn);
+        }
+
+        function appendRouterPingButton(parentMenu, entry, label, mode) {
+            const pingBtn = document.createElement("button");
+            pingBtn.type = "button";
+            pingBtn.className = "action-btn";
+            pingBtn.textContent = label;
+            if (!entry || !entry.unit) {
+                pingBtn.disabled = true;
+                pingBtn.title = "No unit on this ticket";
+                parentMenu.appendChild(pingBtn);
+                return;
+            }
+            pingBtn.title = mode === "fixed"
+                ? "Ping router 4 times"
+                : "Ping router up to 4 times; stop on first reply";
+            pingBtn.addEventListener("click", function () {
+                pingBtn.disabled = true;
+                pingBtn.textContent = "Pinging...";
+                statusEl.textContent = label + " for " + entry.unit + "...";
+                fetch("/issues/ping-router/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ mode: mode }),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const state = data.reachable ? "UP" : "DOWN";
+                        const header = label
+                            + " for "
+                            + (data.unit || entry.unit)
+                            + (data.ip ? (" (" + data.ip + ")") : "")
+                            + " — "
+                            + state;
+                        consoleLines.push(header);
+                        String(data.output || "").split(/\r?\n/).forEach(function (line) {
+                            if (line) {
+                                consoleLines.push(line);
+                            }
+                        });
+                        renderConsole(true);
+                        statusEl.textContent = header;
+                    })
+                    .catch(function (error) {
+                        const message = label + " failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        window.alert(message);
+                    })
+                    .finally(function () {
+                        pingBtn.disabled = false;
+                        pingBtn.textContent = label;
+                    });
+            });
+            parentMenu.appendChild(pingBtn);
+        }
+
+        function setLongPingButtonState(btn, active) {
+            if (!btn) {
+                return;
+            }
+            btn.classList.toggle("is-active", !!active);
+            btn.textContent = active ? "Stop Long Ping" : "Long Ping Router";
+            btn.title = active
+                ? "Stop continuous router ping"
+                : "Continuous ping (ping IP -t); auto-stops after 30 minutes";
+        }
+
+        function stopLongPingForUnit(unit, btn) {
+            const state = longPingByUnit[unit];
+            if (!state) {
+                setLongPingButtonState(btn, false);
+                return Promise.resolve();
+            }
+            const jobId = state.jobId;
+            if (state.abortController) {
+                try {
+                    state.abortController.abort();
+                } catch (ignore) {
+                    // ignore
+                }
+            }
+            return fetch("/issues/ping-router-long/" + encodeURIComponent(jobId) + "/stop", {
+                method: "POST",
+            })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    consoleLines.push(
+                        "Long ping stopped for "
+                        + (data.unit || unit)
+                        + (data.ip ? (" (" + data.ip + ")") : "")
+                        + " — "
+                        + (data.reason || data.message || "cancelled")
+                    );
+                    renderConsole(true);
+                    statusEl.textContent = "Long ping stopped for " + unit;
+                })
+                .catch(function (error) {
+                    const message = "Stop long ping failed: " + (error.message || error);
+                    consoleLines.push(message);
+                    renderConsole(true);
+                    statusEl.textContent = message;
+                })
+                .finally(function () {
+                    delete longPingByUnit[unit];
+                    setLongPingButtonState(btn, false);
+                });
+        }
+
+        function startLongPingForUnit(unit, btn) {
+            setLongPingButtonState(btn, true);
+            statusEl.textContent = "Starting long ping for " + unit + "...";
+            return fetch("/issues/ping-router-long/" + encodeURIComponent(unit), {
+                method: "POST",
+            })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    const jobId = data.job_id;
+                    const abortController = new AbortController();
+                    longPingByUnit[unit] = {
+                        jobId: jobId,
+                        abortController: abortController,
+                        button: btn,
+                    };
+                    const header = "Long ping started for "
+                        + (data.unit || unit)
+                        + (data.ip ? (" (" + data.ip + ")") : "")
+                        + " — auto-stop "
+                        + Math.round((data.max_seconds || 1800) / 60)
+                        + " min";
+                    consoleLines.push(header);
+                    renderConsole(true);
+                    statusEl.textContent = header;
+                    return fetch(
+                        "/issues/ping-router-long/"
+                        + encodeURIComponent(jobId)
+                        + "/stream",
+                        { signal: abortController.signal }
+                    ).then(function (response) {
+                        if (!response.ok) {
+                            throw new Error("HTTP " + response.status);
+                        }
+                        if (!response.body || !response.body.getReader) {
+                            return response.text().then(function (text) {
+                                String(text || "").split(/\r?\n/).forEach(function (line) {
+                                    if (line) {
+                                        consoleLines.push(line);
+                                    }
+                                });
+                                renderConsole(true);
+                            });
+                        }
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = "";
+                        function readChunk() {
+                            return reader.read().then(function (result) {
+                                if (result.done) {
+                                    if (buffer) {
+                                        consoleLines.push(buffer);
+                                        renderConsole(true);
+                                    }
+                                    return;
+                                }
+                                buffer += decoder.decode(result.value, { stream: true });
+                                const parts = buffer.split(/\r?\n/);
+                                buffer = parts.pop() || "";
+                                parts.forEach(function (line) {
+                                    if (line) {
+                                        consoleLines.push(line);
+                                    }
+                                });
+                                if (parts.length) {
+                                    renderConsole(true);
+                                    statusEl.textContent = "Long ping running for " + unit + "...";
+                                }
+                                return readChunk();
+                            });
+                        }
+                        return readChunk();
+                    });
+                })
+                .catch(function (error) {
+                    if (error && error.name === "AbortError") {
+                        return;
+                    }
+                    const message = "Long ping failed: " + (error.message || error);
+                    consoleLines.push(message);
+                    renderConsole(true);
+                    statusEl.textContent = message;
+                    window.alert(message);
+                })
+                .finally(function () {
+                    const state = longPingByUnit[unit];
+                    if (state && state.button === btn) {
+                        delete longPingByUnit[unit];
+                    }
+                    setLongPingButtonState(btn, !!longPingByUnit[unit]);
+                });
+        }
+
+        function appendLongPingRouterButton(parentMenu, entry) {
+            const pingBtn = document.createElement("button");
+            pingBtn.type = "button";
+            pingBtn.className = "action-btn";
+            if (!entry || !entry.unit) {
+                setLongPingButtonState(pingBtn, false);
+                pingBtn.disabled = true;
+                pingBtn.title = "No unit on this ticket";
+                parentMenu.appendChild(pingBtn);
+                return;
+            }
+            const active = !!longPingByUnit[entry.unit];
+            setLongPingButtonState(pingBtn, active);
+            if (active) {
+                longPingByUnit[entry.unit].button = pingBtn;
+            }
+            pingBtn.addEventListener("click", function () {
+                if (longPingByUnit[entry.unit]) {
+                    stopLongPingForUnit(entry.unit, pingBtn);
+                    return;
+                }
+                startLongPingForUnit(entry.unit, pingBtn);
+            });
+            parentMenu.appendChild(pingBtn);
+        }
+
+        function appendRouterCommandMenu(commandItems, entry) {
+            const routerMenu = appendCommandSubmenu(commandItems, "Router");
+            appendGetCarrierButton(routerMenu, entry);
+            appendRouterPingButton(routerMenu, entry, "Quick Validate", "quick");
+            appendRouterPingButton(routerMenu, entry, "Ping Router", "fixed");
+            appendLongPingRouterButton(routerMenu, entry);
+        }
+
+        function openSitePageHref(entry) {
+            const unit = (entry && entry.unit) || "-";
+            let href = "/issues/site-page/" + encodeURIComponent(unit);
+            if (entry && entry.ticketSubject) {
+                href += "?subject=" + encodeURIComponent(entry.ticketSubject);
+            }
+            return href;
+        }
+
+        function appendOpenSitePageButton(openMenu, entry) {
+            const hasLookup = !!(entry && (entry.unit || entry.ticketSubject));
+            if (!hasLookup) {
+                const siteBtn = document.createElement("button");
+                siteBtn.type = "button";
+                siteBtn.className = "action-btn";
+                siteBtn.textContent = "Open Site Page";
+                siteBtn.disabled = true;
+                siteBtn.title = "No unit or project subject to resolve Site ID";
+                openMenu.appendChild(siteBtn);
+                return;
+            }
+            const siteBtn = document.createElement("a");
+            siteBtn.className = "action-btn";
+            siteBtn.href = openSitePageHref(entry);
+            siteBtn.target = "_blank";
+            siteBtn.rel = "noopener noreferrer";
+            siteBtn.textContent = "Open Site Page";
+            siteBtn.title = "Open ERP Site page";
+            openMenu.appendChild(siteBtn);
+        }
+
+        function appendOpenEventRecordsButton(openMenu, entry) {
+            if (!entry || !entry.unit) {
+                const eventsBtn = document.createElement("button");
+                eventsBtn.type = "button";
+                eventsBtn.className = "action-btn";
+                eventsBtn.textContent = "Open Event Records";
+                eventsBtn.disabled = true;
+                eventsBtn.title = "No unit on this ticket";
+                openMenu.appendChild(eventsBtn);
+                return;
+            }
+            const eventsBtn = document.createElement("a");
+            eventsBtn.className = "action-btn";
+            eventsBtn.href = "/issues/event-records/" + encodeURIComponent(entry.unit);
+            eventsBtn.target = "_blank";
+            eventsBtn.rel = "noopener noreferrer";
+            eventsBtn.textContent = "Open Event Records";
+            eventsBtn.title = "Open ERP Event Records for SC-" + entry.unit + "% (last 7 days)";
+            openMenu.appendChild(eventsBtn);
         }
 
         function appendOpenScryptedButton(openMenu, entry) {
@@ -2521,139 +3042,101 @@
             openMenu.appendChild(vrmBtn);
         }
 
-        let cameraBrowserPreference = "firefox";
-
-        function selectedCameraBrowser() {
-            return cameraBrowserPreference === "ie" ? "ie" : "firefox";
-        }
-
-        function launchUnitCameras(unit, target, triggerEl) {
+        function launchUnitCameras(unit, target, triggerEl, allTargets) {
             if (!unit) {
-                return Promise.reject(new Error("No unit"));
+                window.alert("Open cameras failed: No unit");
+                return;
             }
-            const busyLabel = triggerEl ? triggerEl.textContent : "";
-            if (triggerEl) {
-                triggerEl.disabled = true;
-                triggerEl.textContent = "Opening...";
-            }
-            const targets = target === "all" ? ["all"] : [target];
-            const browserLabel = selectedCameraBrowser() === "ie"
-                ? "Internet Explorer"
-                : "Firefox";
-            statusEl.textContent = "Launching cameras for " + unit + " in " + browserLabel + "...";
-            return fetch("/issues/open-cameras/" + encodeURIComponent(unit), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    targets: targets,
-                    browser: selectedCameraBrowser(),
-                }),
-            })
-                .then(function (response) {
-                    return response.json().then(function (data) {
-                        if (!response.ok || !data.ok) {
-                            throw new Error(data.error || ("HTTP " + response.status));
-                        }
-                        return data;
-                    });
-                })
-                .then(function (data) {
-                    const names = (data.opened || []).map(function (item) {
-                        return item.label;
-                    });
-                    consoleLines.push(
-                        "Launched "
-                            + (data.count || names.length)
-                            + " camera"
-                            + ((data.count || names.length) === 1 ? "" : "s")
-                            + " for "
-                            + unit
-                            + " in "
-                            + browserLabel
-                            + (names.length ? ": " + names.join(", ") : "")
-                            + ". Check for new "
-                            + browserLabel
-                            + " windows."
+            if (target === "all") {
+                const launchUrl = "/issues/cameras-launch/" + encodeURIComponent(unit);
+                const win = window.open(launchUrl, "_blank", "noopener,noreferrer");
+                if (!win) {
+                    window.alert(
+                        "Pop-up blocked. Allow pop-ups for this site to open cameras."
                     );
-                    renderConsole(true);
-                    statusEl.textContent = "Launched "
-                        + (data.count || names.length)
-                        + " camera"
-                        + ((data.count || names.length) === 1 ? "" : "s")
-                        + " in "
-                        + browserLabel
-                        + ". Check for new browser windows.";
-                    return data;
-                })
-                .catch(function (error) {
-                    window.alert("Open cameras failed: " + (error.message || error));
-                    throw error;
-                })
-                .finally(function () {
-                    if (triggerEl) {
-                        triggerEl.disabled = false;
-                        triggerEl.textContent = busyLabel;
-                    }
-                });
+                    return;
+                }
+                const count = (allTargets || []).length;
+                const line = "Opened camera launcher for " + unit
+                    + (count ? (" (" + count + " cameras)") : "");
+                consoleLines.push(line);
+                renderConsole(true);
+                statusEl.textContent = line;
+                return;
+            }
+            const url = "/issues/camera/"
+                + encodeURIComponent(unit)
+                + "/"
+                + encodeURIComponent(target);
+            const win = window.open(url, "_blank", "noopener,noreferrer");
+            if (!win) {
+                window.alert(
+                    "Pop-up blocked. Allow pop-ups for this site to open cameras."
+                );
+                return;
+            }
+            const line = "Opened camera " + target + " for " + unit;
+            consoleLines.push(line);
+            renderConsole(true);
+            statusEl.textContent = line;
         }
 
-        function wireCameraLaunchButton(button, unit, target) {
+        function wireCameraLaunchButton(button, unit, target, getAllTargets) {
             button.type = "button";
             button.className = "action-btn";
             button.addEventListener("click", function (event) {
                 event.preventDefault();
                 event.stopPropagation();
-                launchUnitCameras(unit, target, button);
+                launchUnitCameras(
+                    unit,
+                    target,
+                    button,
+                    getAllTargets ? getAllTargets() : null
+                );
             });
             return button;
         }
 
-        function createCameraBrowserToggle(container, unit) {
-            const toggle = document.createElement("div");
-            toggle.className = "command-browser-toggle";
-            const browsers = [
-                { id: "firefox", label: "Firefox" },
-                { id: "ie", label: "Internet Explorer" },
-            ];
-            const buttons = browsers.map(function (browser) {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.textContent = browser.label;
-                btn.dataset.browser = browser.id;
-                btn.classList.toggle("is-active", selectedCameraBrowser() === browser.id);
-                btn.addEventListener("click", function (event) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    cameraBrowserPreference = browser.id;
-                    buttons.forEach(function (item) {
-                        item.classList.toggle("is-active", item.dataset.browser === browser.id);
-                    });
-                });
-                toggle.appendChild(btn);
-                return btn;
-            });
-            return toggle;
-        }
-
-        function appendOpenCamerasMenu(openMenu, entry) {
+        function appendCamerasCommandMenu(commandItems, entry) {
             if (!entry || !entry.unit) {
                 return;
             }
-            const camerasMenu = appendCommandSubmenu(openMenu, "Open Cameras");
+            const camerasMenu = appendCommandSubmenu(commandItems, "Cameras");
             const submenu = camerasMenu.parentElement;
             if (submenu) {
                 submenu.addEventListener("click", function (event) {
                     event.stopPropagation();
                 });
             }
-            camerasMenu.appendChild(createCameraBrowserToggle(camerasMenu, entry.unit));
 
+            const fishBtn = document.createElement("button");
+            fishBtn.type = "button";
+            fishBtn.className = "action-btn";
+            fishBtn.textContent = "Fisheye Snapshot";
+            if (!entry.fisheyeIp) {
+                fishBtn.disabled = true;
+                fishBtn.title = "No fisheye IP in net sheet";
+            } else {
+                fishBtn.addEventListener("click", function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openFisheyeSnapshot(entry.unit, entry.url || "");
+                });
+            }
+            camerasMenu.appendChild(fishBtn);
+
+            let availableCameraTargets = [];
             const allBtn = wireCameraLaunchButton(
                 document.createElement("button"),
                 entry.unit,
-                "all"
+                "all",
+                function () {
+                    return availableCameraTargets;
+                }
             );
             allBtn.textContent = "Open All Cameras";
+            allBtn.disabled = true;
+            allBtn.title = "Loading camera list...";
             camerasMenu.appendChild(allBtn);
 
             const individualWrap = document.createElement("div");
@@ -2687,11 +3170,15 @@
                             emptyBtn.textContent = "No cameras in net sheet";
                             emptyBtn.disabled = true;
                             individualWrap.appendChild(emptyBtn);
-                            allBtn.disabled = true;
                             allBtn.title = "No camera IPs configured for this unit";
                             return;
                         }
                         individualWrap.dataset.loaded = "1";
+                        availableCameraTargets = cameras.map(function (camera) {
+                            return camera.target;
+                        });
+                        allBtn.disabled = false;
+                        allBtn.title = "Open all configured cameras in this browser";
                         cameras.forEach(function (camera) {
                             const cameraBtn = wireCameraLaunchButton(
                                 document.createElement("button"),
@@ -2873,19 +3360,8 @@
             appendValidateButton("Validate (Quick)", "/issues/validate-unit/", false);
             appendValidateButton("Validate (Full)", "/issues/validate-unit-full/", true);
 
-            const fishBtn = document.createElement("button");
-            fishBtn.type = "button";
-            fishBtn.className = "action-btn";
-            fishBtn.textContent = "Fisheye Snapshot";
-            if (!entry.fisheyeIp) {
-                fishBtn.disabled = true;
-                fishBtn.title = "No fisheye IP in net sheet";
-            } else {
-                fishBtn.addEventListener("click", function () {
-                    openFisheyeSnapshot(entry.unit, "");
-                });
-            }
-            commandItems.appendChild(fishBtn);
+            appendRouterCommandMenu(commandItems, entry);
+            appendCamerasCommandMenu(commandItems, entry);
 
             const openMenu = appendCommandSubmenu(commandItems, "Open");
 
@@ -2974,9 +3450,10 @@
             shieldBtn.title = "Open Shield site for " + entry.unit;
             openMenu.appendChild(shieldBtn);
 
+            appendOpenSitePageButton(openMenu, entry);
+            appendOpenEventRecordsButton(openMenu, entry);
             appendOpenScryptedButton(openMenu, entry);
             appendOpenVrmButton(openMenu, entry);
-            appendOpenCamerasMenu(openMenu, entry);
 
             const switchMenu = appendCommandSubmenu(commandItems, "Switch");
 
@@ -5388,6 +5865,7 @@
                         });
                     }
                     commandItems.appendChild(createBtn);
+                    appendCamerasCommandMenu(commandItems, entry);
                     const openMenu = appendCommandSubmenu(commandItems, "Open");
                     if (entry.unit) {
                         const raindanceBtn = document.createElement("a");
@@ -5424,9 +5902,10 @@
                         meshBtn.title = "No unit on this project";
                         openMenu.appendChild(meshBtn);
                     }
+                    appendOpenSitePageButton(openMenu, entry);
+                    appendOpenEventRecordsButton(openMenu, entry);
                     appendOpenScryptedButton(openMenu, entry);
                     appendOpenVrmButton(openMenu, entry);
-                    appendOpenCamerasMenu(openMenu, entry);
                 } else {
                 if (id === "termination") {
                     const createTermBtn = document.createElement("button");
@@ -5736,19 +6215,8 @@
                     );
                 }
 
-                const fishBtn = document.createElement("button");
-                fishBtn.type = "button";
-                fishBtn.className = "action-btn";
-                fishBtn.textContent = "Fisheye Snapshot";
-                if (!entry.fisheyeIp) {
-                    fishBtn.disabled = true;
-                    fishBtn.title = "No fisheye IP in net sheet";
-                } else {
-                    fishBtn.addEventListener("click", function () {
-                        openFisheyeSnapshot(entry.unit, entry.url);
-                    });
-                }
-                commandItems.appendChild(fishBtn);
+                appendRouterCommandMenu(commandItems, entry);
+                appendCamerasCommandMenu(commandItems, entry);
 
                 const openMenu = appendCommandSubmenu(commandItems, "Open");
 
@@ -5970,9 +6438,10 @@
                     openMenu.appendChild(shieldBtn);
                 }
 
+                appendOpenSitePageButton(openMenu, entry);
+                appendOpenEventRecordsButton(openMenu, entry);
                 appendOpenScryptedButton(openMenu, entry);
                 appendOpenVrmButton(openMenu, entry);
-                appendOpenCamerasMenu(openMenu, entry);
 
                 function appendBounceButton(label, endpoint, parentMenu) {
                     const bounceBtn = document.createElement("button");

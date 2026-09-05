@@ -13,6 +13,7 @@ import zabbix_tool
 import multiprocessing
 import paramiko
 import threading
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
@@ -229,6 +230,48 @@ def shield_web_url(site_id):
         return ""
     return f"https://shield.{tld}/site/{site}"
 
+
+def erp_site_web_url(site_id):
+    """Open ERP Site at https://erp.{workTLD}/app/site/{siteID}."""
+    base = erp_base_url()
+    site = str(site_id or "").strip()
+    if not base or not site:
+        return ""
+    return f"{base}/app/site/{site}"
+
+
+def erp_event_records_web_url(unit):
+    """Open ERP Event Records filtered by SC-{unit}% for the last 7 days."""
+    from urllib.parse import urlencode
+
+    base = erp_base_url()
+    unit_name = str(unit or "").strip()
+    if unit_name.upper().startswith("SC-"):
+        unit_name = unit_name[3:].strip()
+    if not base or not unit_name:
+        return ""
+    query = urlencode(
+        {
+            "component": f'["like","SC-{unit_name}%"]',
+            "creation": '["Timespan","last 7 days"]',
+        }
+    )
+    return f"{base}/app/event-record?{query}"
+
+
+def resolve_dashboard_site_id(unit, subject=""):
+    """Resolve Site ID the same way Open Shield does, including project subjects."""
+    subject_text = str(subject or "").strip()
+    if _is_noc_deployment_project_subject(subject_text):
+        site, error = find_erp_site_by_project_subject(subject_text)
+        if error:
+            return "", error
+        site_id = str((site or {}).get("site_id") or "").strip()
+        if not site_id:
+            return "", "Matched Site has no id"
+        return site_id, None
+    return resolve_shield_site_id(unit, subject_text)
+
 toolkit = zabbix_tool.Zabbix_Tool_Kit()
 username = os.getenv("username")
 idUser = os.getenv("idUser")
@@ -294,7 +337,7 @@ def main():
         print("17. Check patch version for all units")
         print("18. Unit Outage Verification Tool")
         print("19. Check outages for missing initial/recovery emails")
-        cmd = input("Enter a number 1-26: ")
+        cmd = input("Enter a number 1-27: ")
         if cmd == "1":
             install_checker()
         elif cmd == "2":
@@ -394,10 +437,17 @@ def main():
             if not ok:
                 print(message)
         elif cmd == "26":
-            unit = input('Enter snuc to reboot ')
-            ok, message = reboot_snuc(unit)
+            unit = input('Enter scrypted to reboot ')
+            ok, message = reboot_scrypted(unit)
             if not ok:
                 print(message)
+        elif cmd == "27":
+            unit = input('Enter nuc to chkdsk: ')
+            drive = input('Enter drive: ')
+            ok, message, output = chkdsk(unit, drive, read_only=True)
+            if output:
+                print(output)
+            print(message if ok else f"Error: {message}")
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -436,8 +486,8 @@ def file_search(unit, root=r'C:\Temp'):
 def _ping_reachable(output):
     return bool(output) and "Reply from" in output and "TTL=" in output and "expired" not in output
 
-def _ping_host(host, max_echoes=4, timeout_ms=1000):
-    """Send up to max_echoes pings; stop after the first successful Reply/TTL."""
+def _ping_host(host, max_echoes=4, timeout_ms=1000, stop_on_success=True):
+    """Send up to max_echoes pings; optionally stop after the first successful Reply/TTL."""
     host = str(host or "").strip()
     if not host:
         return None, ""
@@ -454,15 +504,217 @@ def _ping_host(host, max_echoes=4, timeout_ms=1000):
         if text:
             chunks.append(text.rstrip())
         combined = "\n".join(chunks)
-        if _ping_reachable(combined):
+        if stop_on_success and _ping_reachable(combined):
             return 0, combined
-    return last_code, "\n".join(chunks)
+    combined = "\n".join(chunks)
+    if _ping_reachable(combined):
+        return 0, combined
+    return last_code, combined
 
-def ping_router(unit):
+def ping_router(unit, max_echoes=4, stop_on_success=True):
     row = ensure_unit_net_info(unit, needed_indexes=(1,))
     if not row or len(row) <= 1 or not str(row[1]).strip():
         return None
-    return _ping_host(row[1])
+    return _ping_host(
+        row[1],
+        max_echoes=max_echoes,
+        stop_on_success=stop_on_success,
+    )
+
+def router_ip_for_unit(unit):
+    """Return the netsheet router IP/host for a unit, or empty string."""
+    row = ensure_unit_net_info(unit, needed_indexes=(1,))
+    if not row or len(row) <= 1:
+        return ""
+    return _host_only(row[1]) or str(row[1]).strip()
+
+def ping_router_status(unit, mode="quick"):
+    """
+    Ping the unit router.
+    mode: quick (stop on first reply), fixed (always 4 echoes).
+    Returns (payload_dict, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    mode_key = str(mode or "quick").strip().lower()
+    stop_on_success = mode_key != "fixed"
+    label = "Quick Validate" if stop_on_success else "Ping Router"
+    result = ping_router(unit_key, max_echoes=4, stop_on_success=stop_on_success)
+    if result is None:
+        return None, f"No router IP for {unit_key}"
+    code, output = result
+    reachable = _ping_reachable(output)
+    return {
+        "unit": unit_key,
+        "ip": router_ip_for_unit(unit_key),
+        "mode": "quick" if stop_on_success else "fixed",
+        "label": label,
+        "reachable": reachable,
+        "returncode": code,
+        "output": output or "",
+    }, None
+
+_LONG_PING_MAX_SEC = 30 * 60
+_long_ping_lock = threading.Lock()
+_long_ping_jobs = {}
+
+
+def _kill_process_tree(process):
+    if process is None or process.poll() is not None:
+        return
+    pid = process.pid
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def stop_router_long_ping(job_id, reason="stopped"):
+    """Stop a long ping job. Returns (ok, message, job_info)."""
+    job_key = str(job_id or "").strip()
+    with _long_ping_lock:
+        job = _long_ping_jobs.get(job_key)
+        if not job:
+            return False, "Long ping job not found", None
+        timer = job.get("timer")
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            job["timer"] = None
+        process = job.get("process")
+        already_done = process is None or process.poll() is not None
+        if not already_done:
+            _kill_process_tree(process)
+        job["stop_reason"] = reason or "stopped"
+        job["stopped"] = True
+        info = {
+            "job_id": job_key,
+            "unit": job.get("unit"),
+            "ip": job.get("ip"),
+            "reason": job["stop_reason"],
+        }
+    return True, f"Long ping {job['stop_reason']}", info
+
+
+def start_router_long_ping(unit):
+    """
+    Start `ping {router_ip} -t` for a unit.
+    Auto-cancels after 30 minutes. Returns (payload, error).
+    """
+    import uuid
+
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    ip = router_ip_for_unit(unit_key)
+    if not ip:
+        return None, f"No router IP for {unit_key}"
+
+    replace_ids = []
+    with _long_ping_lock:
+        for existing_id, existing in list(_long_ping_jobs.items()):
+            if existing.get("unit") == unit_key and not existing.get("stopped"):
+                replace_ids.append(existing_id)
+    for existing_id in replace_ids:
+        stop_router_long_ping(existing_id, reason="replaced")
+
+    try:
+        process = subprocess.Popen(
+            ["ping", ip, "-t"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as exc:
+        return None, f"Unable to start ping: {exc}"
+
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "unit": unit_key,
+        "ip": ip,
+        "process": process,
+        "started": time.time(),
+        "stopped": False,
+        "stop_reason": "",
+        "timer": None,
+    }
+
+    def _auto_stop(job_key=job_id):
+        stop_router_long_ping(job_key, reason="auto-cancelled after 30 minutes")
+
+    timer = threading.Timer(_LONG_PING_MAX_SEC, _auto_stop)
+    timer.daemon = True
+    job["timer"] = timer
+    with _long_ping_lock:
+        _long_ping_jobs[job_id] = job
+    timer.start()
+
+    return {
+        "job_id": job_id,
+        "unit": unit_key,
+        "ip": ip,
+        "max_seconds": _LONG_PING_MAX_SEC,
+    }, None
+
+
+def iter_router_long_ping_output(job_id):
+    """Yield stdout lines from a long ping job until it exits or is stopped."""
+    job_key = str(job_id or "").strip()
+    with _long_ping_lock:
+        job = _long_ping_jobs.get(job_key)
+        process = job.get("process") if job else None
+        unit = job.get("unit") if job else ""
+        ip = job.get("ip") if job else ""
+    if not job or process is None:
+        yield f"Long ping job {job_key} not found\n"
+        return
+    yield f"Long ping started for {unit} ({ip}) — toggle off to cancel (auto-stop 30 min)\n"
+    try:
+        for line in process.stdout:
+            yield line
+            with _long_ping_lock:
+                current = _long_ping_jobs.get(job_key) or {}
+                if current.get("stopped"):
+                    break
+    except Exception as exc:
+        yield f"Long ping read error: {exc}\n"
+    finally:
+        with _long_ping_lock:
+            current = _long_ping_jobs.get(job_key) or {}
+            reason = current.get("stop_reason") or "finished"
+            if process.poll() is None:
+                _kill_process_tree(process)
+            current["stopped"] = True
+            timer = current.get("timer")
+            if timer is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+                current["timer"] = None
+        yield f"Long ping {reason} for {unit} ({ip})\n"
 
 def ping_speaker(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(4,))
@@ -946,6 +1198,7 @@ CAMERA_ENDPOINTS = {
     "camera3": (8, "Camera 3"),
     "camera4": (9, "Camera 4"),
 }
+HIGH_UNIT_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2"})
 
 def ping_camera(unit, target):
     endpoint = CAMERA_ENDPOINTS.get(target)
@@ -986,6 +1239,13 @@ def unit_number(unit):
         return int(str(unit).strip()[-4:])
     except (TypeError, ValueError):
         return None
+
+def open_camera_targets_for_unit(unit):
+    """Open Cameras targets; units above 3300 only have fisheye + C1/C2 (C3/C4 duplicate C1/C2 in netsheet)."""
+    n = unit_number(unit)
+    if n is not None and n > 3300:
+        return HIGH_UNIT_OPEN_CAMERA_TARGETS
+    return frozenset(CAMERA_ENDPOINTS.keys())
 
 def in_potential_stale_vpn_range(unit):
     """Units 3000-3199 inclusive may be potentially stale VPN when both router and NUC are down."""
@@ -1645,6 +1905,59 @@ def parse_v19_inventory_output(text):
             inventory[index] = host
     return inventory
 
+def run_v19_commands(unit, commands, timeout=None):
+    """
+    Run one or more stdin commands against Sentra_Network_toolv19.exe.
+    Returns (stdout_text, error_message).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return "", f"Invalid unit: {unit}"
+
+    tool_dir = sentra_network_tool_v19_dir()
+    exe_path = os.path.join(tool_dir, "Sentra_Network_toolv19.exe")
+    if not os.path.isfile(exe_path):
+        return "", f"Network utility not found: {exe_path}"
+
+    command_list = [str(item).strip() for item in (commands or []) if str(item).strip()]
+    if not command_list:
+        return "", "No v19 commands provided"
+
+    stdin_input = "\n".join(command_list + ["close"]) + "\n"
+    timeout_sec = timeout or V19_INVENTORY_TIMEOUT_SEC
+
+    try:
+        process = subprocess.Popen(
+            [exe_path, unit_key],
+            cwd=tool_dir,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            shell=False,
+        )
+    except OSError as exc:
+        return "", f"Unable to start Sentra_Network_toolv19.exe: {exc}"
+
+    try:
+        stdout, _ = process.communicate(input=stdin_input, timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            stdout, _ = process.communicate(timeout=5)
+        except Exception:
+            stdout = ""
+        return stdout or "", f"v19 command timed out for {unit_key}"
+
+    output = stdout or ""
+    if process.returncode not in (0, None) and not output.strip():
+        return output, f"v19 exited with code {process.returncode} for {unit_key}"
+    return output, None
+
 def fetch_unit_inventory_via_v19_exe(unit):
     """
     Query unit IPs through Sentra_Network_toolv19.exe (stdin protocol).
@@ -1660,51 +1973,12 @@ def fetch_unit_inventory_via_v19_exe(unit):
         inventory, error, _ts = cached
         return dict(inventory), error
 
-    tool_dir = sentra_network_tool_v19_dir()
-    exe_path = os.path.join(tool_dir, "Sentra_Network_toolv19.exe")
-    if not os.path.isfile(exe_path):
-        error = f"Network utility not found: {exe_path}"
+    output, error = run_v19_commands(unit, ["show"], timeout=V19_INVENTORY_TIMEOUT_SEC)
+    if error and not output.strip():
         with _v19_inventory_cache_lock:
             _v19_inventory_cache[unit_key] = ({}, error, time.time())
         return {}, error
 
-    try:
-        process = subprocess.Popen(
-            [exe_path, unit_key],
-            cwd=tool_dir,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            shell=False,
-        )
-    except OSError as exc:
-        error = f"Unable to start Sentra_Network_toolv19.exe: {exc}"
-        with _v19_inventory_cache_lock:
-            _v19_inventory_cache[unit_key] = ({}, error, time.time())
-        return {}, error
-
-    try:
-        stdout, _ = process.communicate(
-            input="show\nclose\n",
-            timeout=V19_INVENTORY_TIMEOUT_SEC,
-        )
-    except subprocess.TimeoutExpired:
-        try:
-            process.kill()
-        except OSError:
-            pass
-        try:
-            stdout, _ = process.communicate(timeout=5)
-        except Exception:
-            stdout = ""
-        error = f"v19 inventory timed out for {unit_key}"
-        with _v19_inventory_cache_lock:
-            _v19_inventory_cache[unit_key] = ({}, error, time.time())
-        return {}, error
-
-    output = stdout or ""
     if "No ERP component was found" in output:
         error = f"No ERP component was found for {unit_key}"
         with _v19_inventory_cache_lock:
@@ -1721,6 +1995,105 @@ def fetch_unit_inventory_via_v19_exe(unit):
     with _v19_inventory_cache_lock:
         _v19_inventory_cache[unit_key] = (dict(inventory), None, time.time())
     return inventory, None
+
+
+# ICCID issuer prefixes observed on Sentra SIMs (first 6 digits).
+ICCID_CARRIER_PREFIXES = (
+    ("891480", "Verizon Wireless"),
+    ("890124", "TMOBILE"),
+    ("890103", "AT&T"),
+)
+
+
+def carrier_from_iccid(iccid):
+    """Map an ICCID to AT&T / TMOBILE / Verizon Wireless via Cell carrier prefix."""
+    digits = re.sub(r"\D", "", str(iccid or ""))
+    if len(digits) < 6:
+        return None
+    for prefix, name in ICCID_CARRIER_PREFIXES:
+        if digits.startswith(prefix):
+            return name
+    return None
+
+
+def parse_v19_sim_rows(text):
+    """Parse unique SIM rows from Sentra_Network_toolv19 inventory output."""
+    sims = []
+    seen = set()
+    for raw in str(text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped.upper().startswith("SIM"):
+            continue
+        iccid = ""
+        address = ""
+        if len(line) >= 64 and line[:12].strip().upper() == "SIM":
+            iccid = line[12:64].strip()
+            address = line[64:].strip()
+        else:
+            parts = re.split(r"\s{2,}", stripped)
+            if len(parts) >= 2 and parts[0].upper() == "SIM":
+                iccid = parts[1].strip()
+                if len(parts) > 2:
+                    address = parts[-1].strip()
+        digits = re.sub(r"\D", "", iccid)
+        # Real ICCIDs are typically 19–22 digits; skip junk like role noise ("2").
+        if len(digits) < 15:
+            continue
+        if digits in seen:
+            continue
+        seen.add(digits)
+        host = _host_only(address) if address else ""
+        if host and not re.search(r"\d+\.\d+\.\d+\.\d+", host):
+            host = ""
+        sims.append(
+            {
+                "iccid": digits,
+                "address": host,
+                "carrier": carrier_from_iccid(digits),
+                "prefix": digits[:6],
+            }
+        )
+    return sims
+
+
+def get_unit_carriers(unit):
+    """
+    Query v19 inventory SIMs and return mapped cell carriers.
+    Returns (payload_dict, error_message).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+
+    output, error = run_v19_commands(unit_key, ["show"], timeout=V19_INVENTORY_TIMEOUT_SEC)
+    if error and not str(output or "").strip():
+        return None, error
+    if "No ERP component was found" in (output or ""):
+        return None, f"No ERP component was found for {unit_key}"
+
+    sims = parse_v19_sim_rows(output)
+    if not sims:
+        return None, f"No SIM components found for {unit_key}"
+
+    carriers = []
+    for sim in sims:
+        name = sim.get("carrier")
+        if name and name not in carriers:
+            carriers.append(name)
+    unknown = [sim["iccid"] for sim in sims if not sim.get("carrier")]
+    if not carriers:
+        detail = ", ".join(unknown) if unknown else "unknown"
+        return None, f"Unknown carrier prefix for ICCID(s): {detail}"
+
+    return {
+        "unit": unit_key,
+        "carriers": carriers,
+        "carrier": " / ".join(carriers),
+        "sims": sims,
+        "unknown_iccids": unknown,
+    }, None
+
 
 def fetch_unit_inventory(unit):
     """Unit inventory provider. Currently v19.exe; swap to native ERP later."""
@@ -2588,6 +2961,38 @@ def fetch_fisheye_snapshot(unit):
                 continue
     return None, last_error
 
+_camera_port_cache = {}
+_camera_port_lock = threading.Lock()
+
+
+def _camera_port_open(host, port, timeout=2.0):
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _resolve_camera_port(host, port):
+    """Netsheet cells often omit the port; fall back to the other common web port."""
+    if not host or not port:
+        return port
+    key = f"{host}:{port}"
+    with _camera_port_lock:
+        cached = _camera_port_cache.get(key)
+    if cached:
+        return cached
+    resolved = port
+    extras = [item for item in (80, 10080) if item != port]
+    for candidate in [port] + extras:
+        if _camera_port_open(host, candidate):
+            resolved = candidate
+            break
+    with _camera_port_lock:
+        _camera_port_cache[key] = resolved
+    return resolved
+
+
 def _camera_host_port(value, target):
     """Parse host and port from a netsheet camera cell."""
     text = (value or "").strip()
@@ -2595,14 +3000,18 @@ def _camera_host_port(value, target):
         return "", None
     text = text.replace("http://", "").replace("https://", "").split("/")[0]
     default_port = 10080 if target == "fisheye" else 80
+    parsed_port = None
     if ":" in text:
         host, port_text = text.rsplit(":", 1)
         try:
-            return host.strip(), int(port_text)
+            parsed_port = int(port_text)
+            text = host
         except ValueError:
-            pass
-    host = _host_only(value)
-    return host, default_port if host else None
+            parsed_port = None
+    host = _host_only(text) or _host_only(value)
+    if not host:
+        return host, None
+    return host, _resolve_camera_port(host, parsed_port or default_port)
 
 def list_unit_cameras(unit):
     """Return configured cameras for a unit (target, label, host, port — no credentials)."""
@@ -2615,8 +3024,11 @@ def list_unit_cameras(unit):
     )
     if not row:
         return None, f"Unit {unit} not found in net sheet"
+    allowed_targets = open_camera_targets_for_unit(unit)
     cameras = []
     for target, (column, label) in CAMERA_ENDPOINTS.items():
+        if target not in allowed_targets:
+            continue
         cell = row[column] if len(row) > column else ""
         host, port = _camera_host_port(cell, target)
         if not host:
@@ -2630,7 +3042,7 @@ def list_unit_cameras(unit):
     return cameras, None
 
 def camera_login_info(unit, target):
-    """Return camera web login URL for a unit endpoint (fisheye, camera1, etc.)."""
+    """Return camera web UI launch info (Flask Digest proxy URL)."""
     load_dotenv(env_path)
     fishuser = (os.getenv("fishuser") or "").strip().strip('"').strip("'")
     fishpass = (os.getenv("fishpass") or "").strip().strip('"').strip("'")
@@ -2648,131 +3060,402 @@ def camera_login_info(unit, target):
     )
     if not camera:
         return None, f"No {target_key} configured for {unit}"
+    unit_key = _normalize_netsheet_unit(unit) or str(unit).strip()
+    proxy_path = (
+        f"/issues/camera-proxy/"
+        f"{quote(unit_key, safe='')}/"
+        f"{quote(target_key, safe='')}/"
+    )
     return {
-        "unit": unit,
+        "unit": unit_key,
         "target": target_key,
         "label": camera["label"],
         "host": camera["host"],
         "port": camera["port"],
-        "url": _camera_web_url(
-            camera["host"],
-            camera["port"],
-            fishuser,
-            fishpass,
-        ),
+        "username": fishuser,
+        "auth": "digest-or-basic",
+        "camera_url": f"http://{camera['host']}:{camera['port']}/",
+        "url": proxy_path,
     }, None
 
-def camera_launch_page_url(base_url, unit, target):
-    """Flask redirect page URL opened in Firefox/IE before hitting the camera."""
-    base = str(base_url or "").strip().rstrip("/")
-    if not base:
-        base = "http://127.0.0.1:5000"
-    return f"{base}/issues/camera/{quote(str(unit).strip())}/{quote(str(target).strip())}"
 
-def _camera_web_url(host, port, fishuser, fishpass):
-    user = quote(str(fishuser), safe="")
-    password = quote(str(fishpass), safe="")
-    return f"http://{user}:{password}@{host}:{port}/"
+_camera_session_lock = threading.Lock()
+_camera_sessions = {}
+_CAMERA_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "authorization",
+}
+_CAMERA_SKIP_RESP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "content-encoding",
+    "content-length",
+}
 
-def _resolve_camera_browser(browser):
-    browser_key = str(browser or "").strip().lower()
-    if browser_key in ("ie", "internet explorer", "internetexplorer", "iexplore"):
-        browser_key = "ie"
-    elif browser_key in ("firefox", "ff"):
-        browser_key = "firefox"
-    else:
-        return None, f"Unsupported browser: {browser}"
-    candidates = {
-        "firefox": (
-            r"C:\Program Files\Mozilla Firefox\firefox.exe",
-            r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
-        ),
-        "ie": (
-            r"C:\Program Files\Internet Explorer\iexplore.exe",
-            r"C:\Program Files (x86)\Internet Explorer\iexplore.exe",
-        ),
-    }.get(browser_key, ())
-    for path in candidates:
-        if os.path.isfile(path):
-            return path, None
-    return None, (
-        f"{'Firefox' if browser_key == 'firefox' else 'Internet Explorer'} "
-        f"was not found on this machine"
+
+_CAMERA_SHIM_VERSION = "19"
+
+
+def _rewrite_camera_css(content, content_type, proxy_prefix):
+    """Point root-relative url(/...) assets in camera CSS back through the proxy."""
+    if "css" not in str(content_type or "").lower():
+        return content
+    raw = content or b""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+    prefix = str(proxy_prefix or "").rstrip("/")
+    rewritten = re.sub(
+        r'(?i)url\(\s*(["\']?)/(?!/)',
+        lambda match: f"url({match.group(1)}{prefix}/",
+        text,
     )
+    return rewritten.encode("utf-8") if rewritten != text else raw
 
-def _launch_browser_url(browser_path, url, browser_key="firefox"):
-    """Open a URL in Firefox or IE on the machine running this app."""
-    args = [browser_path]
-    if browser_key == "firefox":
-        args.append("-new-window")
-    args.append(url)
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
+
+def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, username, password):
+    """Rewrite root-relative URLs and load the camera shim (storage split + auto-login)."""
+    ctype = str(content_type or "").lower()
+    raw = content or b""
+    if "html" not in ctype and not raw.lstrip()[:32].lower().startswith((b"<!doctype", b"<html")):
+        return _rewrite_camera_css(raw, ctype, proxy_prefix)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except Exception:
+            return raw
+    if "work-tool-camera-shim" in text:
+        return raw
+    prefix = str(proxy_prefix or "").rstrip("/")
+    text = re.sub(
+        r'(?i)\b(src|href|action)=(["\'])/(?!/)',
+        lambda match: f"{match.group(1)}={match.group(2)}{prefix}/",
+        text,
     )
+    origin = str(camera_origin or "")
+    config = json.dumps({
+        "prefix": prefix,
+        "origin": origin,
+        "wsOrigin": re.sub(r"(?i)^https?://", "ws://", origin) if origin else "",
+        "user": str(username or ""),
+        "pass": str(password or ""),
+    })
+    snippet = (
+        f'<script id="work-tool-camera-shim">window.__workToolCamera = {config};</script>'
+        f'<script src="/static/camera_shim.js?v={_CAMERA_SHIM_VERSION}"></script>'
+    )
+    # The shim has to run before the camera app's own scripts request anything.
+    opening = re.search(r"<head[^>]*>", text, re.IGNORECASE) or re.search(
+        r"<body[^>]*>", text, re.IGNORECASE
+    )
+    idx = opening.end() if opening else 0
+    return (text[:idx] + snippet + text[idx:]).encode("utf-8")
 
-def open_unit_cameras(unit, targets=None, browser="firefox", launch_base_url=None):
-    """Launch camera web UIs locally in Firefox or Internet Explorer."""
-    load_dotenv(env_path)
-    fishuser = (os.getenv("fishuser") or "").strip().strip('"').strip("'")
-    fishpass = (os.getenv("fishpass") or "").strip().strip('"').strip("'")
-    if not fishuser or not fishpass:
-        return None, "fishuser/fishpass not set in .env"
-    browser_path, browser_error = _resolve_camera_browser(browser)
-    if browser_error:
-        return None, browser_error
-    browser_key = "ie" if "iexplore" in os.path.basename(browser_path).lower() else "firefox"
+
+def _inject_camera_worker_prelude(content, content_type, path, proxy_prefix, camera_origin):
+    """Prepend URL rewrites to camera decoder workers so they stay on the proxy."""
+    name = str(path or "").rsplit("/", 1)[-1].lower()
+    ctype = str(content_type or "").lower()
+    if "worker.js" not in name and "javascript" not in ctype:
+        return content
+    if "worker" not in name and "worker" not in ctype:
+        return content
+    raw = content or b""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw
+    if "work-tool-worker-prelude" in text:
+        return raw
+    prefix = str(proxy_prefix or "").rstrip("/")
+    ws_origin = re.sub(r"(?i)^https?://", "ws://", str(camera_origin or ""))
+    config = json.dumps({"prefix": prefix, "wsOrigin": ws_origin})
+    prelude = (
+        "/*work-tool-worker-prelude*/(function(config){"
+        "function rewrite(url){"
+        "var out=String(url||'');"
+        "if(out.charAt(0)!=='/'||out.charAt(1)==='/')return out;"
+        "if(out===config.prefix||out.indexOf(config.prefix+'/')===0)return out;"
+        "return config.prefix+out;"
+        "}"
+        "self.Module=self.Module||{};"
+        "self.Module.locateFile=function(path){"
+        "var name=String(path||'').split('/').pop();"
+        "return config.prefix+(name.indexOf('ffmpegasm')===0?'/module/':'/')+name;"
+        "};"
+        "if(self.importScripts){var ni=self.importScripts;"
+        "self.importScripts=function(){return ni.apply(self,Array.prototype.map.call(arguments,rewrite));};}"
+        "if(self.fetch){var nf=self.fetch;"
+        "self.fetch=function(input,init){"
+        "return nf.call(self,typeof input==='string'?rewrite(input):input,init);};}"
+        "if(self.XMLHttpRequest){var no=XMLHttpRequest.prototype.open;"
+        "XMLHttpRequest.prototype.open=function(method,url){"
+        "var args=Array.prototype.slice.call(arguments);args[1]=rewrite(url);"
+        "return no.apply(this,args);};}"
+        "if(self.WebSocket&&config.wsOrigin){var NS=self.WebSocket;"
+        "self.WebSocket=function(url,protocols){"
+        "var target=String(url||'');"
+        "if(/^wss?:\\/\\/(127\\.0\\.0\\.1|localhost):(23450|23490)/i.test(target))"
+        "{return {readyState:3,send:function(){},close:function(){},"
+        "addEventListener:function(){},removeEventListener:function(){}};}"
+        "if(target.indexOf(config.wsOrigin)!==0){"
+        "var path=target.replace(/^wss?:\\/\\/[^/]*/i,'')||'/';"
+        "if(path.indexOf(config.prefix+'/')===0)path=path.slice(config.prefix.length);"
+        "if(/rtspoverwebsocket|httpprivateoverwebsocket/i.test(path)||path==='/')"
+        "{path=/httpprivate/i.test(path)?'/httpprivateoverwebsocket':'/rtspoverwebsocket';}"
+        "target=config.wsOrigin+path;}"
+        "return protocols===undefined?new NS(target):new NS(target,protocols);"
+        "};self.WebSocket.prototype=NS.prototype;}"
+        "})(" + config + ");\n"
+    )
+    return (prelude + text).encode("utf-8")
+
+
+def camera_snapshot(unit, target, channel=1, timeout=20):
+    """Return (jpeg_bytes, error) for one camera using the authenticated proxy path."""
+    status, _headers, content, error = proxy_camera_http(
+        unit,
+        target,
+        "cgi-bin/snapshot.cgi",
+        "GET",
+        query_string=f"channel={int(channel)}".encode(),
+        timeout=timeout,
+    )
+    if error:
+        return None, error
+    if status != 200:
+        return None, f"Snapshot returned HTTP {status}"
+    if not content:
+        return None, "Camera returned an empty snapshot"
+    if not content.startswith(b"\xff\xd8"):
+        return None, "Camera returned a non-image response"
+    return content, None
+
+
+def cameras_launch_info(unit):
+    """Build Open All Cameras launcher payload with proxy URLs."""
     cameras, error = list_unit_cameras(unit)
     if error:
         return None, error
     if not cameras:
-        return None, f"No camera IPs configured for {unit}"
-    requested = [str(item).strip().lower() for item in (targets or ["all"]) if str(item).strip()]
-    if not requested or "all" in requested:
-        selected = list(cameras)
-    else:
-        wanted = set(requested)
-        selected = [camera for camera in cameras if camera["target"] in wanted]
-        if not selected:
-            return None, f"No matching cameras for {unit}"
-    opened = []
-    for camera in selected:
-        if launch_base_url:
-            url = camera_launch_page_url(
-                launch_base_url,
-                unit,
-                camera["target"],
-            )
-        else:
-            url = _camera_web_url(
-                camera["host"],
-                camera["port"],
-                fishuser,
-                fishpass,
-            )
-        try:
-            _launch_browser_url(browser_path, url, browser_key)
-        except OSError as exc:
-            return None, f"Failed to open {camera['label']}: {exc}"
-        opened.append({
+        return None, f"No cameras configured for {unit}"
+    unit_key = _normalize_netsheet_unit(unit) or str(unit).strip()
+    rows = []
+    for camera in cameras:
+        info, info_error = camera_login_info(unit_key, camera["target"])
+        if info_error:
+            return None, info_error
+        rows.append({
             "target": camera["target"],
             "label": camera["label"],
             "host": camera["host"],
             "port": camera["port"],
+            "url": info["url"],
+            "direct_url": info["camera_url"],
         })
-    return {
-        "unit": unit,
-        "browser": browser_key,
-        "opened": opened,
-        "count": len(opened),
-    }, None
+    return {"unit": unit_key, "cameras": rows, "count": len(rows)}, None
+
+
+def _camera_proxy_session(unit, target, host, port, username, password, force_auth=None):
+    """Reuse a camera session; Digest by default, optional forced Basic."""
+    key = f"{unit}|{target}|{host}|{port}"
+    with _camera_session_lock:
+        existing = _camera_sessions.get(key)
+        if existing is not None and force_auth is None:
+            return existing
+        mode = str(force_auth or "digest").strip().lower()
+        if mode not in ("digest", "basic"):
+            mode = "digest"
+        session = requests.Session()
+        if mode == "basic":
+            session.auth = HTTPBasicAuth(username, password)
+        else:
+            session.auth = HTTPDigestAuth(username, password)
+        session.headers.update({"User-Agent": "work_tool-camera-proxy/1.0"})
+        session._work_tool_auth = mode
+        _camera_sessions[key] = session
+        return session
+
+
+def proxy_camera_http(
+    unit,
+    target,
+    subpath,
+    method,
+    query_string=b"",
+    headers=None,
+    body=None,
+    timeout=None,
+):
+    """
+    Proxy an HTTP request to a unit camera using Digest auth, falling back to Basic.
+    Returns (status_code, response_headers_dict, content_bytes, error).
+    """
+    info, error = camera_login_info(unit, target)
+    if error:
+        return None, None, None, error
+    host = info["host"]
+    port = info["port"]
+    username = info["username"]
+    load_dotenv(env_path)
+    password = (os.getenv("fishpass") or "").strip().strip('"').strip("'")
+    if not password:
+        return None, None, None, "fishpass not set in .env"
+
+    path = str(subpath or "").lstrip("/")
+    if timeout is None:
+        # The camera long-polls RPC2 for roughly a minute at a time; timing those out
+        # tears down the session keepalive that live video depends on.
+        timeout = 180 if path.upper().endswith("RPC2") else 60
+    target_url = f"http://{host}:{port}/"
+    if path:
+        target_url = f"http://{host}:{port}/{path}"
+    qs = query_string.decode("utf-8", errors="replace") if isinstance(query_string, (bytes, bytearray)) else str(query_string or "")
+    if qs:
+        target_url = f"{target_url}?{qs}"
+
+    outbound = {}
+    for key, value in (headers or {}).items():
+        if str(key).lower() in _CAMERA_HOP_HEADERS:
+            continue
+        outbound[key] = value
+
+    session = _camera_proxy_session(
+        info["unit"],
+        info["target"],
+        host,
+        port,
+        username,
+        password,
+    )
+    try:
+        response = session.request(
+            method=str(method or "GET").upper(),
+            url=target_url,
+            headers=outbound,
+            data=body if body else None,
+            allow_redirects=False,
+            timeout=timeout,
+        )
+        if (
+            response.status_code == 401
+            and getattr(session, "_work_tool_auth", "digest") == "digest"
+        ):
+            session = _camera_proxy_session(
+                info["unit"],
+                info["target"],
+                host,
+                port,
+                username,
+                password,
+                force_auth="basic",
+            )
+            response = session.request(
+                method=str(method or "GET").upper(),
+                url=target_url,
+                headers=outbound,
+                data=body if body else None,
+                allow_redirects=False,
+                timeout=timeout,
+            )
+        mem_name = path.rsplit("/", 1)[-1].lower() if path else ""
+        if (
+            response.status_code == 404
+            and mem_name in {"ffmpegasm.js.mem", "ffmpegasm.wasm", "ffmpegasm.js"}
+        ):
+            # Decoder workers ask next to /module/, but cameras serve these at site root.
+            for retry_name in (mem_name, f"module/{mem_name}"):
+                if retry_name == path:
+                    continue
+                retry_url = f"http://{host}:{port}/{retry_name}"
+                response = session.request(
+                    method=str(method or "GET").upper(),
+                    url=retry_url,
+                    headers=outbound,
+                    data=body if body else None,
+                    allow_redirects=False,
+                    timeout=timeout,
+                )
+                if response.status_code != 404:
+                    break
+    except requests.RequestException as exc:
+        return None, None, None, f"Camera proxy failed: {exc}"
+
+    proxy_prefix = (
+        f"/issues/camera-proxy/"
+        f"{quote(info['unit'], safe='')}/"
+        f"{quote(info['target'], safe='')}"
+    )
+    camera_origin = f"http://{host}:{port}"
+    resp_headers = {}
+    for key, value in response.headers.items():
+        lower = key.lower()
+        if lower in _CAMERA_SKIP_RESP_HEADERS:
+            continue
+        if lower == "location":
+            location = str(value or "")
+            if location.startswith(camera_origin):
+                location = proxy_prefix + location[len(camera_origin):]
+            elif location.startswith("/"):
+                location = proxy_prefix + location
+            resp_headers[key] = location
+            continue
+        if lower == "set-cookie":
+            # Scope cookies to this camera's proxy path so a grid of cameras on the
+            # dashboard origin does not overwrite each other's sessions.
+            cleaned = re.sub(r"(?i);\s*domain=[^;]*", "", str(value or ""))
+            cleaned = re.sub(r"(?i);\s*path=[^;]*", "", cleaned)
+            resp_headers[key] = f"{cleaned}; Path={proxy_prefix}/"
+            continue
+        if lower == "x-frame-options":
+            # Allow same-origin Open All launcher iframes.
+            continue
+        resp_headers[key] = value
+
+    body = response.content or b""
+    content_type = response.headers.get("Content-Type") or resp_headers.get("Content-Type") or ""
+    if str(method or "GET").upper() in ("GET", "HEAD") and response.status_code == 200:
+        body = _inject_camera_shim(
+            body,
+            content_type,
+            proxy_prefix,
+            camera_origin,
+            username,
+            password,
+        )
+        body = _inject_camera_worker_prelude(
+            body,
+            content_type,
+            path,
+            proxy_prefix,
+            camera_origin,
+        )
+        if body is not response.content:
+            # Ensure browsers treat rewritten pages as HTML even if upstream omitted type.
+            if b"work-tool-camera-shim" in body and "content-type" not in {
+                k.lower() for k in resp_headers
+            }:
+                resp_headers["Content-Type"] = "text/html; charset=utf-8"
+            # A cached copy of the page would skip the shim on the next visit.
+            for key in [k for k in resp_headers if k.lower() in ("cache-control", "expires", "pragma", "etag", "last-modified")]:
+                resp_headers.pop(key)
+            resp_headers["Cache-Control"] = "no-store, max-age=0"
+
+    return response.status_code, resp_headers, body, None
+
 
 def _parse_outage_kind(issue_type):
     text = (issue_type or "").strip()
@@ -3343,7 +4026,7 @@ def build_prep_project_entries(project_records):
         percent_complete = (project or {}).get("percent_complete")
         unit = _match_unit_from_subject(subject)
         if unit:
-            print(f"Matched Prep project {project_id} → {unit}")
+            print(f"Matched Prep project {project_id} -> {unit}")
         else:
             print(f"Prep project without net-sheet unit: {project_id} — {subject}")
         switch_url = fisheye_ip = pve_ip = ""
@@ -4607,7 +5290,7 @@ def validate_project_records(project_records):
                 f"{project_id or '(no id)'} — {subject or '(no subject)'}"
             )
             continue
-        print(f"Matched project {project_id} → {unit} ({subject})")
+        print(f"Matched project {project_id} -> {unit} ({subject})")
         category, output, error = validate_unit_status(unit)
         if output:
             for line in str(output).splitlines():
@@ -5539,6 +6222,7 @@ def validate_issues_report(issue_path=None):
     panel_issues = []
     camera_view = []
     on_hold = []
+    monitoring_hours_tickets = []
     termination_tickets = []
     relocation_tickets = []
     discarded_tickets = []
@@ -5724,6 +6408,65 @@ def validate_issues_report(issue_path=None):
                         "url": _issue_ticket_url(issue_id),
                         "subject": subject_cell,
                         "reason": "Thermal plates ticket",
+                    })
+                    continue
+                if "monitoring hours" in subject_lower:
+                    print(f"Monitoring Hours ticket (no validation): {subject_cell}")
+                    if not net_array:
+                        generate_net_array()
+                    unit = _match_unit_from_subject(subject_cell)
+                    switch_url = fisheye_ip = pve_ip = platform_url = ""
+                    has_pve = has_relay = has_platform = has_scrypted = False
+                    scrypted_url = ""
+                    compute_label = "NUC"
+                    if unit:
+                        (
+                            switch_url,
+                            fisheye_ip,
+                            pve_ip,
+                            has_pve,
+                            has_relay,
+                            has_platform,
+                            platform_url,
+                            has_scrypted,
+                            scrypted_url,
+                        ) = _unit_device_info(unit)
+                        compute_label = compute_host_label(unit)
+                    vrm_mu, vrm_url = _vrm_info_from_subject(subject_cell, unit)
+                    monitoring_hours_tickets.append({
+                        "unit": unit,
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "issue_type": issue_type,
+                        "outage_type": outage_type,
+                        "issue_subtype": issue_subtype,
+                        "subject": subject_cell,
+                        "undiagnosed": undiagnosed,
+                        "switch_url": switch_url,
+                        "fisheye_ip": fisheye_ip,
+                        "pve_ip": pve_ip,
+                        "has_pve": has_pve,
+                        "has_relay": has_relay,
+                        "has_platform": has_platform,
+                        "platform_url": platform_url,
+                        "has_scrypted": has_scrypted,
+                        "scrypted_url": scrypted_url,
+                        "compute_label": compute_label,
+                        "is_speaker": False,
+                        "speaker_up": None,
+                        "is_camera": False,
+                        "camera_target": "",
+                        "camera_label": "",
+                        "camera_up": None,
+                        "is_panel_issue": False,
+                        "panel_fisheye_up": None,
+                        "is_camera_view": False,
+                        "camera_view_status": None,
+                        "vrm_mu": vrm_mu,
+                        "vrm_url": vrm_url,
+                        "erp_status": erp_status,
+                        "hold_kind": "",
+                        "led_status": None,
                     })
                     continue
                 if "relocation" in subject_lower:
@@ -5974,10 +6717,11 @@ def validate_issues_report(issue_path=None):
                     })
     except Exception as e:
         print(f'Task failed: {e}')
-        return [], [], [], [], [], [], [], [], [], [], [], []
+        return [], [], [], [], [], [], [], [], [], [], [], [], [], []
 
     print(
         f"Discarded {len(discarded_tickets)} tickets without a unit; "
+        f"Monitoring Hours list: {len(monitoring_hours_tickets)}; "
         f"Termination list: {len(termination_tickets)}; "
         f"Relocation list: {len(relocation_tickets)}; "
         f"validating {len(issue_items)} units..."
@@ -6166,12 +6910,16 @@ def validate_issues_report(issue_path=None):
     _print_linked_units("Panel issues:", panel_issues)
     _print_linked_units("Camera View:", camera_view)
     _print_linked_units("On Hold:", on_hold)
+    monitoring_hours_tickets.sort(
+        key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or "", item.get("issue_id") or "")
+    )
     termination_tickets.sort(
         key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or "", item.get("issue_id") or "")
     )
     relocation_tickets.sort(
         key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or "", item.get("issue_id") or "")
     )
+    _print_linked_units("Monitoring Hours:", monitoring_hours_tickets)
     _print_linked_units("Termination:", termination_tickets)
     _print_linked_units("Relocation:", relocation_tickets)
     print(f"Miscellaneous tickets: {len(discarded_tickets)}")
@@ -6192,6 +6940,7 @@ def validate_issues_report(issue_path=None):
         panel_issues,
         camera_view,
         on_hold,
+        monitoring_hours_tickets,
         termination_tickets,
         relocation_tickets,
         discarded_tickets,
@@ -7155,7 +7904,7 @@ def reboot_nuc(nuc):
     if not unit:
         return False, "Missing unit"
     if uses_pve(unit):
-        return False, f"{unit} uses PVE — use Reboot SNUC instead"
+        return False, f"{unit} uses PVE — use Reboot Scrypted instead"
     row = ensure_unit_net_info(unit, needed_indexes=(3,))
     if not row:
         return False, f"Unit {unit} not found in net sheet"
@@ -7199,12 +7948,62 @@ def reboot_nuc(nuc):
     finally:
         client.close()
 
-def reboot_snuc(snuc):
+def nuc_uptime(nuc):
+    """SSH to the unit NUC and return system boot info stdout."""
+    load_dotenv(env_path)
+    if not net_array:
+        generate_net_array()
+    unit = str(nuc or "").strip()
+    if not unit:
+        return False, "Missing unit", ""
+    if uses_pve(unit):
+        return False, f"{unit} uses PVE — NUC uptime is not available", ""
+    row = ensure_unit_net_info(unit, needed_indexes=(3,))
+    if not row:
+        return False, f"Unit {unit} not found in net sheet", ""
+    ip = _host_only(row[3] if len(row) > 3 else "")
+    if not ip:
+        return False, f"No NUC IP for {unit}", ""
+    username = (os.getenv("nucuser") or "").strip().strip('"').strip("'")
+    password = (os.getenv("nucpass") or "").strip().strip('"').strip("'")
+    if not username or not password:
+        return False, "nucuser/nucpass not set in .env", ""
+
+    command = 'cmd /c "systeminfo | findstr \"System Boot Info\""'
+    client = paramiko.SSHClient()
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=ip,
+            port=22,
+            username=username,
+            password=password,
+            timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _stdin, stdout, stderr = client.exec_command(command, timeout=60)
+        error = stderr.read().decode("utf-8", errors="replace").strip()
+        output = stdout.read().decode("utf-8", errors="replace").strip()
+        if error and not output:
+            return False, error, ""
+        return True, output, output
+    except paramiko.AuthenticationException:
+        return False, (
+            f"NUC SSH authentication failed for {username}@{ip}. "
+            "Check nucuser and nucpass in .env."
+        ), ""
+    except Exception as exc:
+        return False, str(exc), ""
+    finally:
+        client.close()
+
+def reboot_scrypted(scrypted):
     """SSH to the unit PVE host and reboot VM 101 (Scrypted/NUC guest)."""
     load_dotenv(env_path)
     if not net_array:
         generate_net_array()
-    unit = str(snuc or "").strip()
+    unit = str(scrypted or "").strip()
     if not unit:
         return False, "Missing unit"
     row = ensure_unit_net_info(unit, needed_indexes=(11,))
@@ -7250,7 +8049,128 @@ def reboot_snuc(snuc):
         return False, str(exc)
     finally:
         client.close()
+def reboot_pve(pve):
+    """SSH to the unit PVE host and reboot VM 101 (Scrypted/NUC guest)."""
+    load_dotenv(env_path)
+    if not net_array:
+        generate_net_array()
+    unit = str(pve or "").strip()
+    if not unit:
+        return False, "Missing unit"
+    row = ensure_unit_net_info(unit, needed_indexes=(11,))
+    if not row:
+        return False, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[11] if len(row) > 11 else "")
+    if not ip:
+        return False, f"No PVE IP for {unit}"
+    username, password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return False, cred_error
 
+    command = "reboot"
+    client = paramiko.SSHClient()
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=ip,
+            port=22,
+            username=username,
+            password=password,
+            timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _stdin, stdout, stderr = client.exec_command(command, timeout=60)
+        error = stderr.read().decode("utf-8", errors="replace").strip()
+        output = stdout.read().decode("utf-8", errors="replace").strip()
+        if error:
+            return False, error
+        print("Restarting...")
+        if output:
+            print(output)
+        return True, "Restarting"
+    except paramiko.AuthenticationException:
+        return False, (
+            f"PVE SSH authentication failed for {username}@{ip}. "
+            "SSH uses the Linux user only (usually root), not root@pam — "
+            "@pam is for the web UI/API. Set pvesshuser=root and pvepass in .env."
+        )
+    except Exception as exc:
+        print(f"Exception caught: {exc}")
+        return False, str(exc)
+    finally:
+        client.close()
+
+def chkdsk(nuc, drive, read_only=True):
+    """
+    SSH to the unit NUC and run chkdsk.
+    read_only=True runs `chkdsk X:` (no /F). Returns (ok, message, output).
+    """
+    load_dotenv(env_path)
+    if not net_array:
+        generate_net_array()
+    unit = str(nuc or "").strip()
+    if not unit:
+        return False, "Missing unit", ""
+    if uses_pve(unit):
+        return False, f"{unit} uses PVE — chkdsk is only available for NUC units", ""
+
+    drive_letter = str(drive or "").strip().upper().replace("\\", "").replace("/", "")
+    if drive_letter.endswith(":"):
+        drive_letter = drive_letter[:-1]
+    if len(drive_letter) != 1 or not ("A" <= drive_letter <= "Z"):
+        return False, "Drive must be a single letter (A-Z)", ""
+
+    row = ensure_unit_net_info(unit, needed_indexes=(3,))
+    if not row:
+        return False, f"Unit {unit} not found in net sheet", ""
+    ip = _host_only(row[3] if len(row) > 3 else "")
+    if not ip:
+        return False, f"No NUC IP for {unit}", ""
+
+    username = (os.getenv("nucuser") or "").strip().strip('"').strip("'")
+    password = (os.getenv("nucpass") or "").strip().strip('"').strip("'")
+    if not username or not password:
+        return False, "nucuser/nucpass not set in .env", ""
+
+    if read_only:
+        command = f"chkdsk {drive_letter}:"
+    else:
+        command = f"chkdsk {drive_letter}: /F"
+
+    client = paramiko.SSHClient()
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=ip,
+            port=22,
+            username=username,
+            password=password,
+            timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _stdin, stdout, stderr = client.exec_command(command, timeout=900)
+        stdout.channel.settimeout(900)
+        output = stdout.read().decode("utf-8", errors="replace")
+        error = stderr.read().decode("utf-8", errors="replace").strip()
+        combined = "\n".join(
+            part for part in (output.strip(), error) if part
+        )
+        if "No further action is required" in output:
+            return True, f"chkdsk passed for {drive_letter}: (read-only)", combined
+        if error and not output.strip():
+            return False, error, combined
+        return True, f"chkdsk finished for {drive_letter}: (review output)", combined
+    except paramiko.AuthenticationException:
+        return False, (
+            f"NUC SSH authentication failed for {username}@{ip}. "
+            "Check nucuser and nucpass in .env."
+        ), ""
+    except Exception as exc:
+        return False, str(exc), ""
+    finally:
+        client.close()
 
 def install_checker():
     idUser = os.getenv("idUser")
@@ -7260,7 +8180,7 @@ def install_checker():
         "idUser": f"{idUser}",
         "X-Authorization": f"Token {api_token}"
     }
-    
+
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         while True:

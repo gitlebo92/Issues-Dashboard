@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template, Response, redirect, url_for
 import os
 import copy
+import re
 import requests
 import work_tool
 from datetime import datetime, timedelta, timezone
@@ -79,6 +80,7 @@ ISSUE_RESULT_KEYS = (
     "panel_issues",
     "camera_view",
     "on_hold",
+    "monitoring_hours",
     "termination",
     "relocation",
     "discarded_tickets",
@@ -539,6 +541,16 @@ def _ensure_shared_issue_job():
 def dedupe(lst):
     return list(dict.fromkeys(lst))
 
+def _safe_stream_write(stream, text):
+    """Write text to a console stream without crashing on unsupported Unicode."""
+    if not stream:
+        return
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        stream.write(text.encode(encoding, errors="replace").decode(encoding))
+
 class JobStdout:
     """Tee stdout into a per-job queue so the browser can stream it. This endpoint was created by Cursor reusing code I wrote from work tool"""
     def __init__(self, job_id, original):
@@ -547,8 +559,7 @@ class JobStdout:
         self._buf = ""
 
     def write(self, text):
-        if self.original:
-            self.original.write(text)
+        _safe_stream_write(self.original, text)
         self._buf += text
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
@@ -1122,13 +1133,35 @@ def issues_list_cameras(unit):
         "cameras": cameras or [],
     })
 
-def _camera_launch_base_url():
-    """Base URL for pages opened locally via subprocess (always loopback)."""
-    env_base = str(os.getenv("WORK_TOOL_URL") or "").strip().rstrip("/")
-    if env_base:
-        return env_base
-    port = str(WORK_TOOL_PORT or request.environ.get("SERVER_PORT") or "5000").strip() or "5000"
-    return f"http://127.0.0.1:{port}"
+@app.route("/issues/cameras-launch/<unit>", methods=["GET"])
+def issues_cameras_launch(unit):
+    info, error = work_tool.cameras_launch_info(unit)
+    if error:
+        return render_template(
+            "camera_launch.html",
+            unit=unit,
+            cameras=[],
+            direct_urls=[],
+            count=0,
+            error=error,
+        ), 404
+    return render_template(
+        "camera_launch.html",
+        unit=info["unit"],
+        cameras=info["cameras"],
+        direct_urls=[row["direct_url"] for row in info["cameras"]],
+        count=info["count"],
+        error=None,
+    )
+
+@app.route("/issues/camera-snapshot/<unit>/<target>", methods=["GET"])
+def issues_camera_snapshot(unit, target):
+    image, error = work_tool.camera_snapshot(unit, target)
+    if error:
+        return error, 502
+    response = Response(image, mimetype="image/jpeg")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 @app.route("/issues/camera/<unit>/<target>", methods=["GET"])
 def issues_camera(unit, target):
@@ -1137,65 +1170,52 @@ def issues_camera(unit, target):
         return error, 404
     return render_template("camera_redirect.html", **info)
 
-@app.route("/issues/open-cameras/<unit>", methods=["GET", "POST"])
-def issues_open_cameras(unit):
-    launch_base = _camera_launch_base_url()
-    if request.method == "GET":
-        targets_param = request.args.get("targets")
-        if targets_param is None:
-            target = str(request.args.get("target") or "").strip()
-            targets = [target] if target else ["all"]
-        else:
-            targets = [
-                part.strip()
-                for part in str(targets_param).split(",")
-                if part.strip()
-            ] or ["all"]
-        browser = str(request.args.get("browser") or "firefox").strip()
-        result, error = work_tool.open_unit_cameras(
-            unit,
-            targets=targets,
-            browser=browser,
-            launch_base_url=launch_base,
-        )
-        browser_label = (
-            "Internet Explorer"
-            if (result or {}).get("browser") == "ie"
-            else "Firefox"
-        )
-        if error:
-            return render_template(
-                "camera_launch.html",
-                unit=unit,
-                error=error,
-                count=0,
-                opened=[],
-                browser_label=browser_label,
-            ), 400
-        return render_template(
-            "camera_launch.html",
-            unit=unit,
-            error="",
-            count=result.get("count", 0),
-            opened=result.get("opened") or [],
-            browser_label=browser_label,
-        )
-
-    payload = request.get_json(silent=True) or {}
-    targets = payload.get("targets")
-    if targets is None:
-        target = str(payload.get("target") or "").strip()
-        targets = [target] if target else ["all"]
-    browser = str(payload.get("browser") or "firefox").strip()
-    result, error = work_tool.open_unit_cameras(
+@app.route(
+    "/issues/camera-proxy/<unit>/<target>/",
+    defaults={"subpath": ""},
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+@app.route(
+    "/issues/camera-proxy/<unit>/<target>/<path:subpath>",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+)
+def issues_camera_proxy(unit, target, subpath):
+    status, headers, content, error = work_tool.proxy_camera_http(
         unit,
-        targets=targets,
-        browser=browser,
-        launch_base_url=launch_base,
+        target,
+        subpath,
+        method=request.method,
+        query_string=request.query_string,
+        headers={key: value for key, value in request.headers if key.lower() != "host"},
+        body=request.get_data() or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
-    return jsonify({"ok": True, **result})
+        return error, 502
+    response = Response(content if request.method != "HEAD" else b"", status=status or 502)
+    for key, value in (headers or {}).items():
+        if key.lower() == "set-cookie":
+            response.headers.add(key, value)
+        else:
+            response.headers[key] = value
+    return response
+
+@app.errorhandler(404)
+def camera_proxy_root_fallback(error):
+    """
+    Send stray camera-app requests back through their proxy.
+
+    The camera UI builds some URLs (its video decoder worker, image assets) at runtime
+    from a public path of "/", so they land on the dashboard root instead of the camera.
+    The referring page tells us which camera asked.
+    """
+    referrer = request.referrer or ""
+    match = re.search(r"/issues/camera-proxy/([^/]+)/([^/]+)/", referrer)
+    if not match or request.path.startswith("/issues/camera-proxy/"):
+        return error
+    location = f"/issues/camera-proxy/{match.group(1)}/{match.group(2)}{request.path}"
+    if request.query_string:
+        location = f"{location}?{request.query_string.decode('utf-8', 'replace')}"
+    return redirect(location)
 
 @app.route("/issues/fisheye/<unit>", methods=["GET"])
 def issues_fisheye(unit):
@@ -1280,6 +1300,47 @@ def _bounce_output_response(result, action_label, endpoint_label):
             "X-Accel-Buffering": "no",
         },
     )
+
+@app.route("/issues/ping-router/<unit>", methods=["POST"])
+def issues_ping_router(unit):
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode") or request.args.get("mode") or "quick").strip()
+    info, error = work_tool.ping_router_status(unit, mode=mode)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/ping-router-long/<unit>", methods=["POST"])
+def issues_ping_router_long_start(unit):
+    info, error = work_tool.start_router_long_ping(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/ping-router-long/<job_id>/stream", methods=["GET"])
+def issues_ping_router_long_stream(job_id):
+    def generate():
+        for chunk in work_tool.iter_router_long_ping_output(job_id):
+            yield chunk
+
+    return Response(
+        generate(),
+        content_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@app.route("/issues/ping-router-long/<job_id>/stop", methods=["POST"])
+def issues_ping_router_long_stop(job_id):
+    ok, message, info = work_tool.stop_router_long_ping(job_id, reason="cancelled")
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 404
+    payload = {"ok": True, "message": message}
+    if info:
+        payload.update(info)
+    return jsonify(payload)
 
 @app.route("/issues/ping-camera/<unit>/<target>", methods=["POST"])
 def issues_ping_camera(unit, target):
@@ -1636,11 +1697,26 @@ def issues_check_patch(unit):
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
 
+@app.route("/issues/carrier/<unit>", methods=["POST"])
+def issues_carrier(unit):
+    info, error = work_tool.get_unit_carriers(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/reboot-scrypted/<unit>", methods=["POST"])
 @app.route("/issues/reboot-snuc/<unit>", methods=["POST"])
-def issues_reboot_snuc(unit):
-    ok, message = work_tool.reboot_snuc(unit)
+def issues_reboot_scrypted(unit):
+    ok, message = work_tool.reboot_scrypted(unit)
     if not ok:
-        return jsonify({"ok": False, "error": message or "Reboot SNUC failed"}), 400
+        return jsonify({"ok": False, "error": message or "Reboot Scrypted failed"}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
+
+@app.route("/issues/reboot-pve/<unit>", methods=["POST"])
+def issues_reboot_pve(unit):
+    ok, message = work_tool.reboot_pve(unit)
+    if not ok:
+        return jsonify({"ok": False, "error": message or "Reboot PVE failed"}), 400
     return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
 
 @app.route("/issues/reboot-nuc/<unit>", methods=["POST"])
@@ -1649,6 +1725,37 @@ def issues_reboot_nuc(unit):
     if not ok:
         return jsonify({"ok": False, "error": message or "Reboot NUC failed"}), 400
     return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
+
+@app.route("/issues/nuc-uptime/<unit>", methods=["POST"])
+def issues_nuc_uptime(unit):
+    ok, message, output = work_tool.nuc_uptime(unit)
+    if not ok:
+        return jsonify({"ok": False, "error": message or "NUC uptime failed"}), 400
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "message": message or "OK",
+        "output": output or "",
+    })
+
+@app.route("/issues/chkdsk/<unit>", methods=["POST"])
+def issues_chkdsk(unit):
+    payload = request.get_json(silent=True) or {}
+    drive = payload.get("drive") or request.args.get("drive") or ""
+    ok, message, output = work_tool.chkdsk(unit, drive, read_only=True)
+    if not ok:
+        return jsonify({
+            "ok": False,
+            "error": message or "chkdsk failed",
+            "output": output or "",
+        }), 400
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "drive": str(drive or "").strip().upper()[:1],
+        "message": message or "OK",
+        "output": output or "",
+    })
 
 @app.route("/issues/update-patch/<unit>", methods=["POST"])
 def issues_update_patch(unit):
@@ -1855,6 +1962,7 @@ def issues_validate_unit_full(unit):
 def issues_revalidate_list(list_id):
     if list_id not in ISSUE_RESULT_KEYS or list_id in (
         "discarded_tickets",
+        "monitoring_hours",
         "termination",
         "relocation",
     ):
@@ -1914,6 +2022,7 @@ def issues_revalidate_list(list_id):
                     destination = category or list_id
                     if destination not in ISSUE_RESULT_KEYS or destination in (
                         "discarded_tickets",
+                        "monitoring_hours",
                         "termination",
                         "relocation",
                     ):
@@ -2023,23 +2132,41 @@ def issues_unit_context(unit):
         return jsonify({"ok": False, "error": error}), 400
     return jsonify(payload)
 
+def _issues_site_id_from_request(unit):
+    subject = str(request.args.get("subject") or "").strip()
+    site_id, error = work_tool.resolve_dashboard_site_id(unit, subject)
+    if error:
+        return None, error
+    return site_id, None
+
+
 @app.route("/issues/shield/<unit>", methods=["GET"])
 def issues_shield(unit):
-    subject = str(request.args.get("subject") or "").strip()
-    if work_tool._is_noc_deployment_project_subject(subject):
-        site, error = work_tool.find_erp_site_by_project_subject(subject)
-        if error:
-            return error, 404
-        site_id = str((site or {}).get("site_id") or "").strip()
-        if not site_id:
-            return "Matched Site has no id", 404
-    else:
-        site_id, error = work_tool.resolve_shield_site_id(unit, subject)
-        if error:
-            return error, 404
+    site_id, error = _issues_site_id_from_request(unit)
+    if error:
+        return error, 404
     url = work_tool.shield_web_url(site_id)
     if not url:
         return "workTLD is not set in .env", 502
+    return redirect(url)
+
+
+@app.route("/issues/site-page/<unit>", methods=["GET"])
+def issues_site_page(unit):
+    site_id, error = _issues_site_id_from_request(unit)
+    if error:
+        return error, 404
+    url = work_tool.erp_site_web_url(site_id)
+    if not url:
+        return "workTLD is not set in .env", 502
+    return redirect(url)
+
+
+@app.route("/issues/event-records/<unit>", methods=["GET"])
+def issues_event_records(unit):
+    url = work_tool.erp_event_records_web_url(unit)
+    if not url:
+        return "Unit or workTLD is missing", 404
     return redirect(url)
 
 @app.route("/issues/switch/<unit>", methods=["GET"])

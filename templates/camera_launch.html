@@ -1,32 +1,277 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Opening cameras for {{ unit }}</title>
+    <meta charset="UTF-8">
+    <title>Cameras — {{ unit }}</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
-            margin: 24px;
+            margin: 0;
             background: #0f172a;
             color: #e2e8f0;
+            font-family: Segoe UI, Arial, sans-serif;
         }
-        ul {
-            padding-left: 20px;
+        .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            padding: 10px 12px;
+            background: #1e293b;
+            border-bottom: 1px solid #334155;
+            position: sticky;
+            top: 0;
+            z-index: 5;
         }
-        .error {
+        .toolbar h1 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 600;
+            margin-right: auto;
+        }
+        .toolbar label {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+        .toolbar select,
+        .toolbar button,
+        .toolbar a.button {
+            background: #334155;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .toolbar button:hover,
+        .toolbar a.button:hover {
+            background: #475569;
+        }
+        .grid {
+            display: grid;
+            gap: 8px;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        .card {
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #020617;
+        }
+        .card-head {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 6px 8px;
+            background: #1e293b;
+            font-size: 12px;
+        }
+        .card-head strong { margin-right: auto; }
+        .card-head span.host { color: #94a3b8; }
+        .card-head a,
+        .card-head button {
+            color: #93c5fd;
+            background: none;
+            border: 0;
+            padding: 0;
+            font-size: 12px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .card-head a:hover,
+        .card-head button:hover { text-decoration: underline; }
+        .frame-wrap {
+            position: relative;
+            overflow: hidden;
+            background: #111827;
+        }
+        .frame-wrap iframe {
+            border: 0;
+            display: block;
+            transform-origin: top left;
+            background: #111827;
+        }
+        .signed-out {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #94a3b8;
+            background: #0b1220;
+        }
+        .signed-out.is-hidden { display: none; }
+        .empty {
+            padding: 24px;
             color: #fca5a5;
         }
     </style>
 </head>
 <body>
+    <div class="toolbar">
+        <h1>{{ unit }} — {{ count }} camera{{ '' if count == 1 else 's' }}</h1>
+        <label for="cols_sel">Columns</label>
+        <select id="cols_sel">
+            <option value="1">1</option>
+            <option value="2" selected>2</option>
+            <option value="3">3</option>
+        </select>
+        <label for="zoom_sel">Zoom</label>
+        <select id="zoom_sel">
+            <option value="0.5">50%</option>
+            <option value="0.65">65%</option>
+            <option value="0.8" selected>80%</option>
+            <option value="1">100%</option>
+        </select>
+        <label for="height_sel">Height</label>
+        <select id="height_sel">
+            <option value="420">Short</option>
+            <option value="560" selected>Medium</option>
+            <option value="760">Tall</option>
+        </select>
+        <button type="button" id="reload_btn">Reload all</button>
+        <button type="button" id="open_tabs_btn">Open all in tabs</button>
+        <a class="button" href="/issues/results" target="_self">Back</a>
+    </div>
     {% if error %}
-    <p class="error">{{ error }}</p>
+    <p class="empty">{{ error }}</p>
     {% else %}
-    <p>Opened {{ count }} camera{{ '' if count == 1 else 's' }} for {{ unit }} in {{ browser_label }}.</p>
-    <ul>
-        {% for camera in opened %}
-        <li>{{ camera.label }} ({{ camera.host }}{% if camera.port %}:{{ camera.port }}{% endif %})</li>
+    <div class="grid" id="camera_grid">
+        {% for camera in cameras %}
+        <div class="card">
+            <div class="card-head">
+                <strong>{{ camera.label }}</strong>
+                <span class="host">{{ camera.host }}{% if camera.port %}:{{ camera.port }}{% endif %}</span>
+                <button type="button" class="session-toggle">Log out</button>
+                <button type="button" class="reload-one">Reload</button>
+                <a href="{{ camera.direct_url }}" target="_blank" rel="noopener noreferrer">Open tab</a>
+            </div>
+            <div class="frame-wrap">
+                <iframe
+                    title="{{ camera.label }}"
+                    allow="fullscreen"
+                    data-src="{{ camera.url }}"></iframe>
+                <div class="signed-out is-hidden">Logged out — click Log in to reconnect</div>
+            </div>
+        </div>
         {% endfor %}
-    </ul>
+    </div>
+    <script>
+        const directUrls = {{ direct_urls|tojson }};
+        const grid = document.getElementById("camera_grid");
+        const colsSel = document.getElementById("cols_sel");
+        const zoomSel = document.getElementById("zoom_sel");
+        const heightSel = document.getElementById("height_sel");
+
+        // The camera UI needs roughly a desktop-width viewport, so each iframe is laid
+        // out wide and scaled down to fit its tile.
+        function applyLayout() {
+            const cols = parseInt(colsSel.value, 10) || 2;
+            const zoom = parseFloat(zoomSel.value) || 0.8;
+            const height = parseInt(heightSel.value, 10) || 560;
+            grid.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+            document.querySelectorAll(".frame-wrap").forEach(function (wrap) {
+                const frame = wrap.querySelector("iframe");
+                wrap.style.height = height + "px";
+                frame.style.width = (100 / zoom) + "%";
+                frame.style.height = (height / zoom) + "px";
+                frame.style.transform = "scale(" + zoom + ")";
+            });
+        }
+
+        // A cached camera page would come back without the proxy shim, so every load
+        // is made unique.
+        function reload(frame) {
+            const base = frame.dataset.src;
+            frame.src = base + (base.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
+        }
+
+        colsSel.addEventListener("change", applyLayout);
+        zoomSel.addEventListener("change", applyLayout);
+        heightSel.addEventListener("change", applyLayout);
+
+        function signedOutPanel(card) {
+            return card.querySelector(".signed-out");
+        }
+
+        function logIn(card) {
+            const frame = card.querySelector("iframe");
+            signedOutPanel(card).classList.add("is-hidden");
+            card.dataset.session = "on";
+            card.querySelector(".session-toggle").textContent = "Log out";
+            reload(frame);
+        }
+
+        // Ending the camera session and unloading the frame is what actually stops the
+        // video stream, which is the point of logging a camera out here.
+        function logOut(card) {
+            const frame = card.querySelector("iframe");
+            try {
+                const cam = frame.contentWindow.__workToolCamera;
+                if (cam && cam.logout) {
+                    cam.logout();
+                }
+            } catch (err) {
+                /* frame may already be blank or still loading */
+            }
+            card.dataset.session = "off";
+            card.querySelector(".session-toggle").textContent = "Log in";
+            signedOutPanel(card).classList.remove("is-hidden");
+            setTimeout(function () {
+                frame.src = "about:blank";
+            }, 800);
+        }
+
+        document.getElementById("reload_btn").addEventListener("click", function () {
+            document.querySelectorAll(".card").forEach(function (card) {
+                if (card.dataset.session !== "off") {
+                    reload(card.querySelector("iframe"));
+                }
+            });
+        });
+
+        document.querySelectorAll(".reload-one").forEach(function (button) {
+            button.addEventListener("click", function () {
+                logIn(button.closest(".card"));
+            });
+        });
+
+        document.querySelectorAll(".session-toggle").forEach(function (button) {
+            button.addEventListener("click", function () {
+                const card = button.closest(".card");
+                if (card.dataset.session === "off") {
+                    logIn(card);
+                } else {
+                    logOut(card);
+                }
+            });
+        });
+
+        document.getElementById("open_tabs_btn").addEventListener("click", function () {
+            let opened = 0;
+            directUrls.forEach(function (url, index) {
+                const win = window.open(url, "camera_tab_" + index);
+                if (win) {
+                    opened += 1;
+                }
+            });
+            if (opened < directUrls.length) {
+                window.alert(
+                    "Opened " + opened + " of " + directUrls.length
+                    + " tabs. Allow pop-ups for this site to open the rest."
+                );
+            }
+        });
+
+        window.addEventListener("resize", applyLayout);
+        applyLayout();
+        document.querySelectorAll(".frame-wrap iframe").forEach(reload);
+    </script>
     {% endif %}
 </body>
 </html>
