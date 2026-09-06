@@ -181,16 +181,20 @@ These open browser tabs / redirects. They do **not** write ERP fields by themsel
 - **NUC:** reboot, uptime, chkdsk (read-only), Check Patch Version  
 - **Linux → Scrypted:** Set No Audio, Reboot Scrypted / Reboot PVE (destructive — use carefully; not ERP writes, but they reboot gear)
 
-### Avoid while documenting / training
+### Disabled ERP write functions
+
+With `DISABLE_ERP_WRITES=1` (default), these stay **visible but disabled** in the UI, and matching POST routes return 403:
 
 - **Set Fields** (ERP field writes)  
-- **Create Deployment Project**, **Create Refurbish**  
+- **Create Deployment / Termination / Relocation / Refurbish** projects  
 - **Terminate Site** / **Activate Site**  
 - **Clear MU Coordinates** / **Clear MU Site**  
 - **Tech Checks (180 Unit)** confirm  
-- **Update Patch Version**  
-- Checking **R** if your flow posts resolve to ERP  
+- **Add Missing Components** (manual and scheduled)
 
+**Resolve (R)** is local-only and is **not** blocked by this flag. Set `DISABLE_ERP_WRITES=0` in `.env` to re-enable the write actions above.
+
+**Note:** **Update Patch Version** is separate from this gate (not an ERP ticket write); treat it carefully when enabled.
 ---
 
 ## 3. Camera launch grid
