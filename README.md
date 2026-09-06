@@ -131,20 +131,30 @@ LED colors (compute):
 
 ### Open (external / proxied UIs)
 
-![Open / Shield / ERP (blurred)](docs/screenshots/04-open-menu.png)
+In-app **Open** menu with **Shield** and **ERP** expanded. Button labels are unblurred; ticket/unit context elsewhere on the page is blurred.
 
-**Shield**
+![Open menu — Shield & ERP](docs/screenshots/11-open-shield-erp-buttons.png)
 
-- Open Site  
-- Open RD/FD/MU Component  
-- Open Trailer Component (disabled with “No trailer” when ACRD / no MU)
+**Shield** (opens `shield.{workTLD}` in a new tab — may require login):
 
-**ERP**
+![Shield open buttons](docs/screenshots/12-shield-open-buttons.png)
 
-- Open Event Records  
-- Open Site Page  
-- Open RD/FD/MU Component  
-- Open Trailer Component  
+| Button | Opens |
+|--------|--------|
+| **Open Site** | Shield site page for the ticket’s site ID |
+| **Open RD Component** | Shield component `SC-{unit}` (RD/FD/MU as applicable) |
+| **Open Trailer Component** | Attached MU/trailer component, or disabled when none (e.g. ACRD) |
+
+**ERP** (opens `erp.{workTLD}` — may require login):
+
+![ERP open buttons](docs/screenshots/13-erp-open-buttons.png)
+
+| Button | Opens |
+|--------|--------|
+| **Open Event Records** | ERP event-record list filtered to the unit |
+| **Open Site Page** | ERP site page |
+| **Open RD Component** | ERP component `SC-{unit}` |
+| **Open Trailer Component** | Attached trailer/MU component when present |
 
 **Also under Open**
 
@@ -157,7 +167,7 @@ LED colors (compute):
 - Open Scrypted  
 - Open VRM  
 
-These open browser tabs / redirects. They do **not** write ERP fields by themselves.
+These open browser tabs / redirects. They do **not** write ERP fields by themselves. Destination Shield/ERP pages are behind company auth, so docs show the in-app buttons rather than live site forms.
 
 ### Switch
 
