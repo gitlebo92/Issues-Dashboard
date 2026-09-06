@@ -148,6 +148,12 @@ In-app **Open** menu with **Shield** and **ERP** expanded. Button labels are unb
 | **Open RD Component** | Shield component `SC-{unit}` (RD/FD/MU as applicable) |
 | **Open Trailer Component** | Attached MU/trailer component, or disabled when none (e.g. ACRD) |
 
+Example destinations from an Up Steady RD (URL left readable; field values / notes blurred; component name kept):
+
+![Shield RD component](docs/screenshots/17-shield-rd-component.png)
+
+![Shield site page](docs/screenshots/18-shield-site.png)
+
 **ERP** (opens `erp.{workTLD}` — may require login):
 
 ![ERP open buttons](docs/screenshots/13-erp-open-buttons.png)
@@ -158,6 +164,10 @@ In-app **Open** menu with **Shield** and **ERP** expanded. Button labels are unb
 | **Open Site Page** | ERP site page |
 | **Open RD Component** | ERP component `SC-{unit}` |
 | **Open Trailer Component** | Attached trailer/MU component when present |
+
+Example destination from **Open Event Records** (Up Steady RD). URL keeps the GET filters readable (`component` like `SC-RD####%`, `creation` last 7 days); record IDs / site values may be blurred in docs:
+
+![ERP Event Record filters](docs/screenshots/16-erp-event-records.png)
 
 **Also under Open**
 
@@ -170,7 +180,7 @@ In-app **Open** menu with **Shield** and **ERP** expanded. Button labels are unb
 - Open Scrypted  
 - Open VRM  
 
-These open browser tabs / redirects. They do **not** write ERP fields by themselves. Destination Shield/ERP pages are behind company auth, so docs show the in-app buttons rather than live site forms.
+These open browser tabs / redirects. They do **not** write ERP fields by themselves. Destination Shield/ERP pages are behind company auth.
 
 ### Switch
 
@@ -281,4 +291,18 @@ See `.env.example` for the full list. Common ones:
 
 ## Regenerating screenshots
 
-Screenshots live in `docs/screenshots/`. They were captured with the Cursor browser tools against a local `:5000` instance (gowitness is optional; not required). Before capture, inject CSS blur on `.ticket-label`, unit command buttons, and `.console`, and **do not** press ERP write confirmations.
+Screenshots live in `docs/screenshots/`. They were captured with the Cursor browser tools against a local `:5000` instance (gowitness is optional; not required).
+
+**Issues Dashboard blur rules**
+
+- Blur ticket subject / unit link text (`.ticket-label > a`), unit command-button labels, stdout, and counters.
+- **Leave readable:** status LEDs, issue type / subtype meta (`.meta`), **UNDIAGNOSED** (`.undiagnosed-badge`), **(New!)** (`.new-ticket-badge`), and menu chrome labels.
+- Do **not** press ERP write confirmations.
+
+**Shield / ERP destination pages** (from Open → Shield / ERP on an Up Steady RD)
+
+- Prefer **Open RD Component** (Shield + ERP) and **Open Event Records** (ERP) so the address bar / URL shows the GET path and filters.
+- Blur field **values**; leave field **names** readable.
+- OK to blur site IDs; component names (e.g. `SC-RD####`) can stay visible.
+- Do **not** blur the page URL (inject a URL ribbon if the browser chrome is not in the capture).
+- Cursor browser must be logged into Shield and ERP separately from your system browser.
