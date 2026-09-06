@@ -372,6 +372,7 @@ def _erp_row_fields(issue):
     issue_type = str((issue or {}).get("issue_type") or "").strip()
     issue_subtype = str((issue or {}).get("issue_subtype") or "").strip()
     subject = str((issue or {}).get("subject") or "").strip()
+    site = str((issue or {}).get("site") or "").strip()
     fields = {
         "issue_type": issue_type,
         "outage_type": work_tool._parse_outage_kind(issue_type),
@@ -380,7 +381,10 @@ def _erp_row_fields(issue):
     }
     if subject:
         fields["subject"] = subject
+    if site:
+        fields["site"] = site
     return fields
+
 
 def _patch_issue_class_on_results(results, issue):
     """Write current ERP type/subtype onto every listed row for this ticket."""
@@ -389,10 +393,16 @@ def _patch_issue_class_on_results(results, issue):
     patched = []
     if not issue_id:
         return patched
+    site = str(fields.get("site") or "").strip()
     for key in ISSUE_RESULT_KEYS:
         for item in (results or {}).get(key) or []:
             if _item_issue_id(item) == issue_id:
                 item.update(fields)
+                if site:
+                    unit = str(item.get("unit") or "").strip()
+                    subject = str(item.get("subject") or fields.get("subject") or "").strip()
+                    if unit:
+                        work_tool._store_site_id_cache(unit, subject, site)
                 patched.append((key, item))
     return patched
 
@@ -1143,6 +1153,7 @@ def issues_cameras_launch(unit):
             cameras=[],
             direct_urls=[],
             count=0,
+            vendor="dahua",
             error=error,
         ), 404
     return render_template(
@@ -1151,8 +1162,21 @@ def issues_cameras_launch(unit):
         cameras=info["cameras"],
         direct_urls=[row["direct_url"] for row in info["cameras"]],
         count=info["count"],
+        vendor=info.get("vendor") or "dahua",
         error=None,
     )
+
+@app.route("/issues/open-camera-urls", methods=["POST"])
+def issues_open_camera_urls():
+    payload = request.get_json(silent=True) or {}
+    urls = payload.get("urls") or []
+    ie_mode = payload.get("ie_mode")
+    if ie_mode is None:
+        ie_mode = True
+    result, error = work_tool.open_camera_urls(urls, ie_mode=bool(ie_mode))
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify(result)
 
 @app.route("/issues/camera-snapshot/<unit>/<target>", methods=["GET"])
 def issues_camera_snapshot(unit, target):
@@ -2149,6 +2173,26 @@ def issues_shield(unit):
     if not url:
         return "workTLD is not set in .env", 502
     return redirect(url)
+
+
+@app.route("/issues/shield-component/<unit>", methods=["GET"])
+def issues_shield_component(unit):
+    url = work_tool.shield_component_web_url(unit)
+    if not url:
+        return "Unit or workTLD is missing", 404
+    return redirect(url)
+
+
+@app.route("/issues/attached-mu/<unit>", methods=["GET"])
+def issues_attached_mu(unit):
+    subject = (request.args.get("subject") or "").strip()
+    mu = work_tool.resolve_attached_mu_code(unit, subject)
+    url = work_tool.shield_component_web_url(mu) if mu else ""
+    return jsonify({
+        "unit": str(unit or "").strip(),
+        "mu": mu or "",
+        "url": url,
+    })
 
 
 @app.route("/issues/site-page/<unit>", methods=["GET"])

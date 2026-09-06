@@ -890,7 +890,6 @@
                         <option value="false_positives" data-label="Up Steady">Up Steady</option>
                         <option value="nuc_down" data-label="Offline compute">Offline compute</option>
                         <option value="scrypted_outage" data-label="Scrypted outage">Scrypted outage</option>
-                        <option value="stale_vpn" data-label="Potentially stale VPN">Potentially stale VPN</option>
                         <option value="speaker_outage" data-label="Speaker outage">Speaker outage</option>
                         <option value="camera_outage" data-label="Camera outage">Camera outage</option>
                         <option value="truly_down" data-label="Down Full">Down Full</option>
@@ -943,15 +942,6 @@
                 <span class="complete-badge">Complete</span>
             </h2>
             <ul id="scrypted_outage"><li class="empty">Waiting...</li></ul>
-            </div>
-
-            <div class="list-section" data-panel="issues">
-            <h2>
-                Potentially stale VPN (3000-3199)
-                <span class="count" id="stale_vpn_count"></span>
-                <span class="complete-badge">Complete</span>
-            </h2>
-            <ul id="stale_vpn"><li class="empty">Waiting...</li></ul>
             </div>
 
             <div class="list-section" data-panel="issues">
@@ -1088,8 +1078,8 @@
                 </button>
                 <button type="button" class="action-btn" id="snapshot_close_btn">Close</button>
             </div>
-            <div class="snapshot-status" id="snapshot_status">Loading snapshot...</div>
-            <img id="snapshot_img" alt="Fisheye snapshot" hidden>
+        <div class="snapshot-status" id="snapshot_status">Loading snapshot...</div>
+        <img id="snapshot_img" alt="Fisheye snapshot" hidden>
         </div>
     </div>
     <div class="confirm-modal" id="clear_checkboxes_modal">
@@ -1356,7 +1346,7 @@
             const q = query.toLowerCase();
             const include = new Array(lines.length).fill(false);
             const checkingRe = /^Checking\s+/i;
-            const sectionEndRe = /^(Validating\s|Up Steady|Offline compute|Potentially stale|Down Full|Scrypted outage|Speaker outage|Camera outage|Panel issues|Camera View|Monitoring Hours)/i;
+            const sectionEndRe = /^(Validating\s|Up Steady|Offline compute|Down Full|Scrypted outage|Speaker outage|Camera outage|Panel issues|Camera View|Monitoring Hours)/i;
 
             for (let i = 0; i < lines.length; i++) {
                 if (lines[i].toLowerCase().indexOf(q) !== -1) {
@@ -1752,7 +1742,6 @@
         const issueListIds = [
             "false_positives",
             "nuc_down",
-            "stale_vpn",
             "truly_down",
             "scrypted_outage",
             "speaker_outage",
@@ -1772,7 +1761,6 @@
             "scrypted_outage",
             "speaker_outage",
             "camera_outage",
-            "stale_vpn",
             "on_hold",
             "monitoring_hours",
             "termination",
@@ -1804,7 +1792,6 @@
         const listHeadingLabels = {
             false_positives: "Up Steady",
             nuc_down: "Offline compute",
-            stale_vpn: "Potentially stale VPN",
             truly_down: "Down Full",
             scrypted_outage: "Scrypted outage",
             speaker_outage: "Speaker outage",
@@ -1889,7 +1876,6 @@
             { value: "false_positives", label: "Up Steady" },
             { value: "nuc_down", label: "Offline compute" },
             { value: "scrypted_outage", label: "Scrypted outage" },
-            { value: "stale_vpn", label: "Potentially stale VPN" },
             { value: "speaker_outage", label: "Speaker outage" },
             { value: "camera_outage", label: "Camera outage" },
             { value: "truly_down", label: "Down Full" },
@@ -2925,12 +2911,47 @@
         }
 
         function openSitePageHref(entry) {
+            const direct = erpSiteHref(entry && entry.siteId);
+            if (direct) {
+                return direct;
+            }
             const unit = (entry && entry.unit) || "-";
             let href = "/issues/site-page/" + encodeURIComponent(unit);
             if (entry && entry.ticketSubject) {
                 href += "?subject=" + encodeURIComponent(entry.ticketSubject);
             }
             return href;
+        }
+
+        function shieldSiteHref(siteId) {
+            const site = String(siteId || "").trim();
+            if (!site || !workTLD) {
+                return "";
+            }
+            return "https://shield." + workTLD + "/site/" + encodeURIComponent(site);
+        }
+
+        function erpSiteHref(siteId) {
+            const site = String(siteId || "").trim();
+            if (!site || !workTLD) {
+                return "";
+            }
+            return "https://erp." + workTLD + "/app/site/" + encodeURIComponent(site);
+        }
+
+        function eventRecordsHref(unit) {
+            const code = String(unit || "").trim().replace(/^SC-/i, "");
+            if (!code) {
+                return "";
+            }
+            if (!workTLD) {
+                return "/issues/event-records/" + encodeURIComponent(code);
+            }
+            const params = new URLSearchParams({
+                component: '["like","SC-' + code + '%"]',
+                creation: '["Timespan","last 7 days"]',
+            });
+            return "https://erp." + workTLD + "/app/event-record?" + params.toString();
         }
 
         function appendOpenSitePageButton(openMenu, entry) {
@@ -2955,6 +2976,284 @@
             openMenu.appendChild(siteBtn);
         }
 
+        function shieldComponentHref(code) {
+            const raw = String(code || "").trim();
+            if (!raw || !workTLD) {
+                return "";
+            }
+            const body = raw.toUpperCase().indexOf("SC-") === 0 ? raw.slice(3) : raw;
+            if (!body) {
+                return "";
+            }
+            return "https://shield." + workTLD + "/component/SC-"
+                + encodeURIComponent(body.replace(/\s+/g, "").toUpperCase());
+        }
+
+        function unitKindFromEntry(entry) {
+            const unit = String((entry && entry.unit) || "").trim().toUpperCase();
+            if (/^MU\d+/.test(unit)) {
+                return "MU";
+            }
+            if (/^FD\d+/.test(unit)) {
+                return "FD";
+            }
+            if (/^RD\d+/.test(unit)) {
+                return "RD";
+            }
+            return "";
+        }
+
+        function attachedMuFromEntry(entry) {
+            if (!entry) {
+                return "";
+            }
+            const kind = unitKindFromEntry(entry);
+            if (kind === "MU") {
+                return String(entry.unit || "").trim().toUpperCase();
+            }
+            if (entry.vrmMu) {
+                const digits = String(entry.vrmMu).replace(/\D/g, "");
+                if (digits) {
+                    return "MU" + digits;
+                }
+            }
+            const subject = String(entry.ticketSubject || "");
+            const paren = subject.match(/\b(?:RD|FD)\s*\d+\s*\(\s*(MU\s*\d+)\s*\)/i);
+            if (paren) {
+                return paren[1].replace(/\s+/g, "").toUpperCase();
+            }
+            const bare = subject.match(/\bMU\s*(\d{3,6})\b/i);
+            if (bare && (kind === "RD" || kind === "FD")) {
+                return "MU" + bare[1];
+            }
+            return "";
+        }
+
+        function appendShieldMenu(openMenu, entry) {
+            const shieldMenu = appendCommandSubmenu(openMenu, "Shield");
+            const unit = entry && entry.unit ? String(entry.unit).trim() : "";
+            const kind = unitKindFromEntry(entry);
+
+            if (unit) {
+                const siteBtn = document.createElement("a");
+                siteBtn.className = "action-btn";
+                const directShield = shieldSiteHref(entry.siteId);
+                siteBtn.href = directShield || (
+                    "/issues/shield/" + encodeURIComponent(unit)
+                    + (entry.ticketSubject
+                        ? ("?subject=" + encodeURIComponent(entry.ticketSubject))
+                        : "")
+                );
+                siteBtn.target = "_blank";
+                siteBtn.rel = "noopener noreferrer";
+                siteBtn.textContent = "Open Site";
+                siteBtn.title = directShield
+                    ? ("Open Shield site " + entry.siteId)
+                    : ("Open Shield site for " + unit);
+                shieldMenu.appendChild(siteBtn);
+            } else {
+                const siteBtn = document.createElement("button");
+                siteBtn.type = "button";
+                siteBtn.className = "action-btn";
+                siteBtn.textContent = "Open Site";
+                siteBtn.disabled = true;
+                siteBtn.title = "No unit to resolve Shield site";
+                shieldMenu.appendChild(siteBtn);
+            }
+
+            if (kind === "RD" || kind === "FD" || kind === "MU") {
+                const headHref = shieldComponentHref(unit);
+                const headLabel = kind === "MU"
+                    ? "Open MU Component"
+                    : (kind === "FD" ? "Open FD Component" : "Open RD Component");
+                if (headHref) {
+                    const headBtn = document.createElement("a");
+                    headBtn.className = "action-btn";
+                    headBtn.href = headHref;
+                    headBtn.target = "_blank";
+                    headBtn.rel = "noopener noreferrer";
+                    headBtn.textContent = headLabel;
+                    headBtn.title = headHref;
+                    shieldMenu.appendChild(headBtn);
+                } else {
+                    const headBtn = document.createElement("button");
+                    headBtn.type = "button";
+                    headBtn.className = "action-btn";
+                    headBtn.textContent = headLabel;
+                    headBtn.disabled = true;
+                    headBtn.title = "workTLD is not set";
+                    shieldMenu.appendChild(headBtn);
+                }
+            }
+
+            // MU units are the trailer — no separate trailer button.
+            if (kind === "MU") {
+                return;
+            }
+
+            const trailerMu = attachedMuFromEntry(entry);
+            const trailerHref = trailerMu ? shieldComponentHref(trailerMu) : "";
+            if (trailerHref) {
+                const trailerBtn = document.createElement("a");
+                trailerBtn.className = "action-btn";
+                trailerBtn.href = trailerHref;
+                trailerBtn.target = "_blank";
+                trailerBtn.rel = "noopener noreferrer";
+                trailerBtn.textContent = "Open Trailer Component";
+                trailerBtn.title = trailerHref;
+                shieldMenu.appendChild(trailerBtn);
+                return;
+            }
+
+            const trailerBtn = document.createElement("button");
+            trailerBtn.type = "button";
+            trailerBtn.className = "action-btn";
+            trailerBtn.textContent = "Open Trailer Component";
+            trailerBtn.disabled = true;
+            trailerBtn.title = "No trailer attached";
+            shieldMenu.appendChild(trailerBtn);
+
+            if (!unit || (kind !== "RD" && kind !== "FD")) {
+                return;
+            }
+            // ACRD / missing subject MU: ask ERP; enable if a parent trailer exists.
+            let lookupUrl = "/issues/attached-mu/" + encodeURIComponent(unit);
+            if (entry.ticketSubject) {
+                lookupUrl += "?subject=" + encodeURIComponent(entry.ticketSubject);
+            }
+            fetch(lookupUrl)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    return response.json();
+                })
+                .then(function (data) {
+                    const mu = data && data.mu ? String(data.mu) : "";
+                    const url = (data && data.url) || shieldComponentHref(mu);
+                    if (!mu || !url || !trailerBtn.parentNode) {
+                        return;
+                    }
+                    const link = document.createElement("a");
+                    link.className = "action-btn";
+                    link.href = url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = "Open Trailer Component";
+                    link.title = url;
+                    trailerBtn.parentNode.replaceChild(link, trailerBtn);
+                })
+                .catch(function () {
+                    // Keep disabled "No trailer attached".
+                });
+        }
+
+        function erpComponentHref(code) {
+            const raw = String(code || "").trim();
+            if (!raw || !workTLD) {
+                return "";
+            }
+            const body = raw.toUpperCase().indexOf("SC-") === 0 ? raw.slice(3) : raw;
+            if (!body) {
+                return "";
+            }
+            return "https://erp." + workTLD + "/app/component/SC-"
+                + encodeURIComponent(body.replace(/\s+/g, "").toUpperCase());
+        }
+
+        function appendErpMenu(openMenu, entry) {
+            const erpMenu = appendCommandSubmenu(openMenu, "ERP");
+            const unit = entry && entry.unit ? String(entry.unit).trim() : "";
+            const kind = unitKindFromEntry(entry);
+
+            appendOpenEventRecordsButton(erpMenu, entry);
+            appendOpenSitePageButton(erpMenu, entry);
+
+            if (kind === "RD" || kind === "FD" || kind === "MU") {
+                const headHref = erpComponentHref(unit);
+                const headLabel = kind === "MU"
+                    ? "Open MU Component"
+                    : (kind === "FD" ? "Open FD Component" : "Open RD Component");
+                if (headHref) {
+                    const headBtn = document.createElement("a");
+                    headBtn.className = "action-btn";
+                    headBtn.href = headHref;
+                    headBtn.target = "_blank";
+                    headBtn.rel = "noopener noreferrer";
+                    headBtn.textContent = headLabel;
+                    headBtn.title = headHref;
+                    erpMenu.appendChild(headBtn);
+                } else {
+                    const headBtn = document.createElement("button");
+                    headBtn.type = "button";
+                    headBtn.className = "action-btn";
+                    headBtn.textContent = headLabel;
+                    headBtn.disabled = true;
+                    headBtn.title = "workTLD is not set";
+                    erpMenu.appendChild(headBtn);
+                }
+            }
+
+            if (kind === "MU") {
+                return;
+            }
+
+            const trailerMu = attachedMuFromEntry(entry);
+            const trailerHref = trailerMu ? erpComponentHref(trailerMu) : "";
+            if (trailerHref) {
+                const trailerBtn = document.createElement("a");
+                trailerBtn.className = "action-btn";
+                trailerBtn.href = trailerHref;
+                trailerBtn.target = "_blank";
+                trailerBtn.rel = "noopener noreferrer";
+                trailerBtn.textContent = "Open Trailer Component";
+                trailerBtn.title = trailerHref;
+                erpMenu.appendChild(trailerBtn);
+                return;
+            }
+
+            const trailerBtn = document.createElement("button");
+            trailerBtn.type = "button";
+            trailerBtn.className = "action-btn";
+            trailerBtn.textContent = "Open Trailer Component";
+            trailerBtn.disabled = true;
+            trailerBtn.title = "No trailer attached";
+            erpMenu.appendChild(trailerBtn);
+
+            if (!unit || (kind !== "RD" && kind !== "FD")) {
+                return;
+            }
+            let lookupUrl = "/issues/attached-mu/" + encodeURIComponent(unit);
+            if (entry.ticketSubject) {
+                lookupUrl += "?subject=" + encodeURIComponent(entry.ticketSubject);
+            }
+            fetch(lookupUrl)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    return response.json();
+                })
+                .then(function (data) {
+                    const mu = data && data.mu ? String(data.mu) : "";
+                    const url = erpComponentHref(mu);
+                    if (!mu || !url || !trailerBtn.parentNode) {
+                        return;
+                    }
+                    const link = document.createElement("a");
+                    link.className = "action-btn";
+                    link.href = url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = "Open Trailer Component";
+                    link.title = url;
+                    trailerBtn.parentNode.replaceChild(link, trailerBtn);
+                })
+                .catch(function () {
+                    // Keep disabled "No trailer attached".
+                });
+        }
+
         function appendOpenEventRecordsButton(openMenu, entry) {
             if (!entry || !entry.unit) {
                 const eventsBtn = document.createElement("button");
@@ -2968,7 +3267,7 @@
             }
             const eventsBtn = document.createElement("a");
             eventsBtn.className = "action-btn";
-            eventsBtn.href = "/issues/event-records/" + encodeURIComponent(entry.unit);
+            eventsBtn.href = eventRecordsHref(entry.unit);
             eventsBtn.target = "_blank";
             eventsBtn.rel = "noopener noreferrer";
             eventsBtn.textContent = "Open Event Records";
@@ -3042,6 +3341,20 @@
             openMenu.appendChild(vrmBtn);
         }
 
+        function openBlankTab(url) {
+            // Do not pass noopener in windowFeatures — Chrome then always returns
+            // null, which we used to treat as "popup blocked" even when the tab opened.
+            const win = window.open(url, "_blank");
+            if (win) {
+                try {
+                    win.opener = null;
+                } catch (err) {
+                    /* ignore */
+                }
+            }
+            return win;
+        }
+
         function launchUnitCameras(unit, target, triggerEl, allTargets) {
             if (!unit) {
                 window.alert("Open cameras failed: No unit");
@@ -3049,7 +3362,7 @@
             }
             if (target === "all") {
                 const launchUrl = "/issues/cameras-launch/" + encodeURIComponent(unit);
-                const win = window.open(launchUrl, "_blank", "noopener,noreferrer");
+                const win = openBlankTab(launchUrl);
                 if (!win) {
                     window.alert(
                         "Pop-up blocked. Allow pop-ups for this site to open cameras."
@@ -3068,7 +3381,7 @@
                 + encodeURIComponent(unit)
                 + "/"
                 + encodeURIComponent(target);
-            const win = window.open(url, "_blank", "noopener,noreferrer");
+            const win = openBlankTab(url);
             if (!win) {
                 window.alert(
                     "Pop-up blocked. Allow pop-ups for this site to open cameras."
@@ -3364,6 +3677,8 @@
             appendCamerasCommandMenu(commandItems, entry);
 
             const openMenu = appendCommandSubmenu(commandItems, "Open");
+            appendShieldMenu(openMenu, entry);
+            appendErpMenu(openMenu, entry);
 
             const meshBtn = document.createElement("a");
             meshBtn.className = "action-btn";
@@ -3441,17 +3756,6 @@
                 openMenu.appendChild(relayBtn);
             }
 
-            const shieldBtn = document.createElement("a");
-            shieldBtn.className = "action-btn";
-            shieldBtn.href = "/issues/shield/" + encodeURIComponent(entry.unit);
-            shieldBtn.target = "_blank";
-            shieldBtn.rel = "noopener noreferrer";
-            shieldBtn.textContent = "Open Shield";
-            shieldBtn.title = "Open Shield site for " + entry.unit;
-            openMenu.appendChild(shieldBtn);
-
-            appendOpenSitePageButton(openMenu, entry);
-            appendOpenEventRecordsButton(openMenu, entry);
             appendOpenScryptedButton(openMenu, entry);
             appendOpenVrmButton(openMenu, entry);
 
@@ -5107,6 +5411,7 @@
                 outageType: isObject ? (item.outage_type || "") : "",
                 issueSubtype: isObject ? (item.issue_subtype || "") : "",
                 ticketSubject: isObject ? (item.subject || "") : "",
+                siteId: isObject ? (item.site || item.site_id || "") : "",
                 undiagnosed: isObject ? !!item.undiagnosed : false,
                 switchUrl: isObject ? (item.switch_url || "") : "",
                 fisheyeIp: isObject ? (item.fisheye_ip || "") : "",
@@ -5320,17 +5625,22 @@
             const nextSubtype = item.issue_subtype || "";
             const nextUndiagnosed = !!item.undiagnosed;
             const nextSubject = item.subject || entry.ticketSubject || "";
+            const nextSite = item.site || item.site_id || entry.siteId || "";
             const changed = (
                 entry.outageType !== nextType
                 || entry.issueSubtype !== nextSubtype
                 || !!entry.undiagnosed !== nextUndiagnosed
                 || (item.subject && entry.ticketSubject !== nextSubject)
+                || (nextSite && entry.siteId !== nextSite)
             );
             entry.outageType = nextType;
             entry.issueSubtype = nextSubtype;
             entry.undiagnosed = nextUndiagnosed;
             if (item.subject) {
                 entry.ticketSubject = item.subject;
+            }
+            if (nextSite) {
+                entry.siteId = nextSite;
             }
             entry.isNucDown = (
                 !!item.is_nuc_down
@@ -5369,6 +5679,9 @@
         }
 
         function moveEntryToList(entry, fromId, toId) {
+            if (toId === "stale_vpn") {
+                toId = "truly_down";
+            }
             if (!listState[toId]) {
                 throw new Error("Unknown validation category: " + toId);
             }
@@ -5376,7 +5689,6 @@
                 false_positives: "green",
                 nuc_down: "yellow",
                 scrypted_outage: "yellow",
-                stale_vpn: "red",
                 truly_down: "red",
             };
             if (moveLed[toId]) {
@@ -5651,7 +5963,6 @@
                     || ledListId === "truly_down"
                     || ledListId === "nuc_down"
                     || ledListId === "scrypted_outage"
-                    || ledListId === "stale_vpn"
                     || ledListId === "camera_view"
                     || isNocProjectsList(ledListId)
                     || (id === "on_hold" && entry.ledStatus)
@@ -5670,26 +5981,20 @@
                         computeLed.title = entry.ledStatus === "green"
                             ? (ledListId === "scrypted_outage"
                                 ? "Scrypted is up"
-                                : (ledListId === "stale_vpn"
-                                    ? "Router and " + entry.computeLabel + " are reachable"
-                                    : (isNocProjectsList(ledListId)
-                                        ? "Project unit is up"
-                                        : entry.computeLabel + " is up")))
+                                : (isNocProjectsList(ledListId)
+                                    ? "Project unit is up"
+                                    : entry.computeLabel + " is up"))
                             : (entry.ledStatus === "yellow"
                                 ? (ledListId === "scrypted_outage"
                                     ? "Scrypted is still unreachable"
-                                    : (ledListId === "stale_vpn"
-                                        ? "Only " + entry.computeLabel + " is reachable"
-                                        : (isNocProjectsList(ledListId)
-                                            ? "Project unit has offline compute / Scrypted"
-                                            : entry.computeLabel + " is still unreachable")))
+                                    : (isNocProjectsList(ledListId)
+                                        ? "Project unit has offline compute / Scrypted"
+                                        : entry.computeLabel + " is still unreachable"))
                                 : (entry.ledStatus === "orange"
                                     ? "Multiple endpoints down"
-                                    : (ledListId === "stale_vpn"
-                                        ? "Unit remains unreachable"
-                                        : (isNocProjectsList(ledListId)
-                                            ? "Project unit is down / stale VPN"
-                                            : "Unit is down"))));
+                                    : (isNocProjectsList(ledListId)
+                                        ? "Project unit is down"
+                                        : "Unit is down")));
                     } else if (ledListId === "camera_view") {
                         computeLed.classList.toggle("is-up", entry.cameraViewStatus === "green");
                         computeLed.classList.toggle("is-warning", entry.cameraViewStatus === "yellow");
@@ -5699,11 +6004,9 @@
                             : (entry.cameraViewStatus === "yellow"
                                 ? "Router is up and " + entry.computeLabel + " is down"
                                 : "Unit is down");
-                    } else if (ledListId === "truly_down" || ledListId === "stale_vpn") {
+                    } else if (ledListId === "truly_down") {
                         computeLed.classList.add("is-down");
-                        computeLed.title = ledListId === "stale_vpn"
-                            ? "Potentially stale VPN requires validation"
-                            : "Unit is fully down";
+                        computeLed.title = "Unit is fully down";
                     } else if (isNocProjectsList(ledListId)) {
                         computeLed.classList.add("is-warning");
                         computeLed.title = "Project connectivity unknown";
@@ -5867,6 +6170,8 @@
                     commandItems.appendChild(createBtn);
                     appendCamerasCommandMenu(commandItems, entry);
                     const openMenu = appendCommandSubmenu(commandItems, "Open");
+                    appendShieldMenu(openMenu, entry);
+                    appendErpMenu(openMenu, entry);
                     if (entry.unit) {
                         const raindanceBtn = document.createElement("a");
                         raindanceBtn.className = "action-btn";
@@ -5902,8 +6207,6 @@
                         meshBtn.title = "No unit on this project";
                         openMenu.appendChild(meshBtn);
                     }
-                    appendOpenSitePageButton(openMenu, entry);
-                    appendOpenEventRecordsButton(openMenu, entry);
                     appendOpenScryptedButton(openMenu, entry);
                     appendOpenVrmButton(openMenu, entry);
                 } else {
@@ -6137,12 +6440,13 @@
                                         return;
                                     }
 
-                                    const category = data.category || "false_positives";
+                                    const category = data.category === "stale_vpn"
+                                        ? "truly_down"
+                                        : (data.category || "false_positives");
                                     const connectivityLed = {
                                         false_positives: "green",
                                         nuc_down: "yellow",
                                         scrypted_outage: "yellow",
-                                        stale_vpn: "red",
                                         truly_down: "red",
                                     };
                                     if (isNocProjectsList(id)) {
@@ -6219,6 +6523,8 @@
                 appendCamerasCommandMenu(commandItems, entry);
 
                 const openMenu = appendCommandSubmenu(commandItems, "Open");
+                appendShieldMenu(openMenu, entry);
+                appendErpMenu(openMenu, entry);
 
                 if (entry.unit) {
                     const meshBtn = document.createElement("a");
@@ -6424,22 +6730,6 @@
                     openMenu.appendChild(relayBtn);
                 }
 
-                if (entry.unit) {
-                    const shieldBtn = document.createElement("a");
-                    shieldBtn.className = "action-btn";
-                    shieldBtn.href = "/issues/shield/" + encodeURIComponent(entry.unit)
-                        + (entry.ticketSubject
-                            ? ("?subject=" + encodeURIComponent(entry.ticketSubject))
-                            : "");
-                    shieldBtn.target = "_blank";
-                    shieldBtn.rel = "noopener noreferrer";
-                    shieldBtn.textContent = "Open Shield";
-                    shieldBtn.title = "Open Shield site for " + entry.unit;
-                    openMenu.appendChild(shieldBtn);
-                }
-
-                appendOpenSitePageButton(openMenu, entry);
-                appendOpenEventRecordsButton(openMenu, entry);
                 appendOpenScryptedButton(openMenu, entry);
                 appendOpenVrmButton(openMenu, entry);
 
@@ -6760,9 +7050,9 @@
                                         entry.isNucDown = true;
                                         entry.ledStatus = "yellow";
                                     } else {
-                                        entry.cameraViewStatus =
-                                            entry.cameraViewStatus || entry.ledStatus || "green";
-                                        entry.ledStatus = entry.cameraViewStatus;
+                                    entry.cameraViewStatus =
+                                        entry.cameraViewStatus || entry.ledStatus || "green";
+                                    entry.ledStatus = entry.cameraViewStatus;
                                     }
                                     saveEntryState(entry);
                                     moveEntryToList(entry, id, moveTarget);
@@ -7118,76 +7408,6 @@
                         pingPveBtn.title = "No PVE IP in net sheet";
                         cliMenu.appendChild(pingPveBtn);
                     }
-                }
-
-                if (cliActionId === "stale_vpn") {
-                    const validateStaleBtn = document.createElement("button");
-                    validateStaleBtn.type = "button";
-                    validateStaleBtn.className = "action-btn";
-                    validateStaleBtn.textContent = "Validate";
-                    validateStaleBtn.addEventListener("click", function () {
-                        validateStaleBtn.disabled = true;
-                        validateStaleBtn.textContent = "Validating...";
-                        fetch("/issues/validate-stale-vpn/" + encodeURIComponent(entry.unit), {
-                            method: "POST",
-                        })
-                            .then(function (response) {
-                                return response.json().then(function (data) {
-                                    if (!response.ok || !data.ok) {
-                                        throw new Error(data.error || ("HTTP " + response.status));
-                                    }
-                                    return data;
-                                });
-                            })
-                            .then(function (data) {
-                                entry.ledStatus = data.status;
-                                entry.computeLabel = data.compute_label || entry.computeLabel;
-                                if (computeLed) {
-                                    computeLed.classList.toggle("is-up", data.status === "green");
-                                    computeLed.classList.toggle("is-warning", data.status === "yellow");
-                                    computeLed.classList.toggle("is-down", data.status === "red");
-                                    computeLed.title = data.status === "green"
-                                        ? "Router and " + data.compute_label + " are reachable"
-                                        : (data.status === "yellow"
-                                            ? "Only " + data.compute_label + " is reachable"
-                                            : "Unit remains unreachable");
-                                }
-                                saveEntryState(entry);
-                                consoleLines.push("Checking " + entry.unit + "'s router...");
-                                if (data.router_output) {
-                                    data.router_output.split(/\r?\n/).forEach(function (line) {
-                                        if (line) {
-                                            consoleLines.push(line);
-                                        }
-                                    });
-                                }
-                                consoleLines.push(
-                                    "Checking " + entry.unit + "'s " + data.compute_label + "..."
-                                );
-                                if (data.compute_output) {
-                                    data.compute_output.split(/\r?\n/).forEach(function (line) {
-                                        if (line) {
-                                            consoleLines.push(line);
-                                        }
-                                    });
-                                }
-                                consoleLines.push(
-                                    "Stale VPN validation: "
-                                        + entry.unit
-                                        + " — "
-                                        + data.status
-                                );
-                                renderConsole(true);
-                            })
-                            .catch(function (error) {
-                                window.alert("Stale VPN validation failed: " + (error.message || error));
-                            })
-                            .finally(function () {
-                                validateStaleBtn.disabled = false;
-                                validateStaleBtn.textContent = "Validate";
-                            });
-                    });
-                    cliMenu.appendChild(validateStaleBtn);
                 }
 
                 if (cliActionId === "camera_view") {
@@ -7558,7 +7778,7 @@
                         if (data.paused) {
                             statusEl.textContent =
                                 "ERP refresh skipped — automated tasks are paused (PAUSE_AUTOMATED_TASKS).";
-                            return;
+                        return;
                         }
                         if (!force) {
                             return;
@@ -7572,7 +7792,7 @@
                         });
                         renderConsole(true);
                     }
-                    const r = data.results || {};
+                    const r = foldStaleVpnIntoTrulyDown(data.results || {});
                     const resultScope = data.scope || scope;
                     if (data.snapshot) {
                         applyResultsSnapshot(data.snapshot, {
@@ -7643,8 +7863,18 @@
             }
         }
 
-        function applyResultsSnapshot(results, options) {
+        function foldStaleVpnIntoTrulyDown(results) {
             const r = results || {};
+            const stale = Array.isArray(r.stale_vpn) ? r.stale_vpn : [];
+            if (stale.length) {
+                r.truly_down = (r.truly_down || []).concat(stale);
+            }
+            r.stale_vpn = [];
+            return r;
+        }
+
+        function applyResultsSnapshot(results, options) {
+            const r = foldStaleVpnIntoTrulyDown(results || {});
             const scope = options && options.scope;
             if (!scope || scope === "issues") {
                 issueListIds.forEach(function (id) {

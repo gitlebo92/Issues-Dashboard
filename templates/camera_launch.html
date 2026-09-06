@@ -106,6 +106,12 @@
             background: #0b1220;
         }
         .signed-out.is-hidden { display: none; }
+        .toolbar .hint {
+            font-size: 12px;
+            color: #fbbf24;
+            max-width: 420px;
+            line-height: 1.3;
+        }
         .empty {
             padding: 24px;
             color: #fca5a5;
@@ -134,22 +140,33 @@
             <option value="560" selected>Medium</option>
             <option value="760">Tall</option>
         </select>
+        <label title="When checked, Open all prefers IE/Edge IE mode. Hikvision Open IE always opens the camera URL in your browser (use Edge IE mode for the ActiveX plugin).">
+            <input type="checkbox" id="ie_mode_chk" checked style="vertical-align:middle;margin-right:4px;">
+            IE mode
+        </label>
         <button type="button" id="reload_btn">Reload all</button>
         <button type="button" id="open_tabs_btn">Open all in tabs</button>
         <a class="button" href="/issues/results" target="_self">Back</a>
+        {% if vendor == 'hikvision' %}
+        <span class="hint">Hikvision: tiles stay on Configuration. Live/PTZ in a tile uses JPEG preview. Smart Event draw (intrusion / line cross) needs the ActiveX plugin — use Open IE (Edge IE mode) or the in-tile banner.</span>
+        {% endif %}
     </div>
     {% if error %}
     <p class="empty">{{ error }}</p>
     {% else %}
     <div class="grid" id="camera_grid">
         {% for camera in cameras %}
-        <div class="card">
+        <div class="card" data-target="{{ camera.target }}" data-vendor="{{ camera.vendor or vendor or 'dahua' }}">
             <div class="card-head">
                 <strong>{{ camera.label }}</strong>
                 <span class="host">{{ camera.host }}{% if camera.port %}:{{ camera.port }}{% endif %}</span>
                 <button type="button" class="session-toggle">Log out</button>
                 <button type="button" class="reload-one">Reload</button>
-                <a href="{{ camera.direct_url }}" target="_blank" rel="noopener noreferrer">Open tab</a>
+                <button type="button" class="open-tab"
+                    data-url="{{ camera.direct_url }}"
+                    data-proxy-url="{{ camera.url }}"
+                    data-force-ie="{% if (camera.vendor or vendor) == 'hikvision' %}1{% else %}0{% endif %}"
+                    title="{% if (camera.vendor or vendor) == 'hikvision' %}Opens this camera’s URL in a new tab on your PC (use Edge IE mode for ActiveX){% else %}Open camera in a new tab{% endif %}">{% if (camera.vendor or vendor) == 'hikvision' %}Open IE{% else %}Open tab{% endif %}</button>
             </div>
             <div class="frame-wrap">
                 <iframe
@@ -167,6 +184,118 @@
         const colsSel = document.getElementById("cols_sel");
         const zoomSel = document.getElementById("zoom_sel");
         const heightSel = document.getElementById("height_sel");
+        const ieModeChk = document.getElementById("ie_mode_chk");
+        const IE_MODE_KEY = "workToolCameraIeMode";
+
+        try {
+            const saved = localStorage.getItem(IE_MODE_KEY);
+            if (saved === "0") {
+                ieModeChk.checked = false;
+            } else if (saved === "1") {
+                ieModeChk.checked = true;
+            }
+        } catch (err) {
+            /* ignore */
+        }
+        ieModeChk.addEventListener("change", function () {
+            try {
+                localStorage.setItem(IE_MODE_KEY, ieModeChk.checked ? "1" : "0");
+            } catch (err) {
+                /* ignore */
+            }
+        });
+
+        function ieModeEnabled() {
+            return !!ieModeChk.checked;
+        }
+
+        const unitVendor = {{ (vendor or 'dahua')|tojson }};
+
+        // Open camera URLs in *this* browser so remote operators see the tab.
+        // Server-side iexplore only helps when someone is sitting at the Flask host.
+        function openOnServerIe(urls) {
+            return fetch("/issues/open-camera-urls", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ urls: urls, ie_mode: true })
+            }).then(function (response) {
+                return response.json().then(function (data) {
+                    if (!response.ok || !data.ok) {
+                        throw new Error((data && data.error) || ("HTTP " + response.status));
+                    }
+                    return data;
+                });
+            });
+        }
+
+        function openInClientBrowser(urls) {
+            let opened = 0;
+            const list = (urls || []).filter(Boolean);
+            list.forEach(function (url, index) {
+                // Avoid noopener in windowFeatures — it makes window.open return null
+                // even when the tab opens, which falsely trips the "blocked" alert.
+                const win = window.open(url, "_blank");
+                if (win) {
+                    opened += 1;
+                    try {
+                        win.opener = null;
+                        win.focus();
+                    } catch (err) {
+                        /* ignore */
+                    }
+                } else if (index === 0 && list.length === 1) {
+                    window.location.assign(url);
+                    opened = 1;
+                }
+            });
+            if (opened < list.length) {
+                window.alert(
+                    "Opened " + opened + " of " + list.length
+                    + " tabs. Allow pop-ups for this site to open the rest."
+                );
+            }
+            return Promise.resolve({ ok: true, opened: opened });
+        }
+
+        function isFlaskLocalHost() {
+            const host = (window.location.hostname || "").toLowerCase();
+            return host === "127.0.0.1" || host === "localhost" || host === "::1";
+        }
+
+        function absoluteUrl(pathOrUrl) {
+            if (!pathOrUrl) {
+                return "";
+            }
+            if (/^https?:\/\//i.test(pathOrUrl)) {
+                return pathOrUrl;
+            }
+            return window.location.origin + (pathOrUrl.charAt(0) === "/" ? pathOrUrl : "/" + pathOrUrl);
+        }
+
+        function openCameraUrls(urls, forceIe) {
+            const list = (urls || []).map(absoluteUrl).filter(Boolean);
+            if (!list.length) {
+                window.alert("No camera URL available to open.");
+                return Promise.resolve();
+            }
+            // Hikvision Open IE: always open the direct camera URL in *this* browser
+            // so Edge IE mode / ActiveX can work on the operator machine.
+            if (forceIe) {
+                return openInClientBrowser(list);
+            }
+            const wantIe = ieModeEnabled();
+            // Dahua + IE mode on the Flask host only: optional server iexplore.
+            if (wantIe && isFlaskLocalHost()) {
+                return openOnServerIe(list).catch(function (err) {
+                    window.alert(
+                        "Server IE launch failed (" + err.message
+                        + "). Opening in this browser instead."
+                    );
+                    return openInClientBrowser(list);
+                });
+            }
+            return openInClientBrowser(list);
+        }
 
         // The camera UI needs roughly a desktop-width viewport, so each iframe is laid
         // out wide and scaled down to fit its tile.
@@ -175,6 +304,16 @@
             const zoom = parseFloat(zoomSel.value) || 0.8;
             const height = parseInt(heightSel.value, 10) || 560;
             grid.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+            const cards = Array.prototype.slice.call(grid.querySelectorAll(".card"));
+            cards.forEach(function (card, index) {
+                // Odd counts leave fisheye alone on the last row — span full width
+                // so it reads as "bottom". Even filled rows keep bottom-right (e.g. 4).
+                const aloneOnLastRow = index === cards.length - 1
+                    && card.dataset.target === "fisheye"
+                    && cols > 1
+                    && (cards.length % cols === 1);
+                card.style.gridColumn = aloneOnLastRow ? "1 / -1" : "";
+            });
             document.querySelectorAll(".frame-wrap").forEach(function (wrap) {
                 const frame = wrap.querySelector("iframe");
                 wrap.style.height = height + "px";
@@ -252,20 +391,43 @@
             });
         });
 
-        document.getElementById("open_tabs_btn").addEventListener("click", function () {
-            let opened = 0;
-            directUrls.forEach(function (url, index) {
-                const win = window.open(url, "camera_tab_" + index);
-                if (win) {
-                    opened += 1;
+        document.querySelectorAll(".open-tab").forEach(function (button) {
+            button.addEventListener("click", function (event) {
+                event.preventDefault();
+                const forceIe = button.getAttribute("data-force-ie") === "1";
+                const direct = (button.getAttribute("data-url") || "").trim();
+                const proxy = (button.getAttribute("data-proxy-url") || "").trim();
+                const url = direct || proxy;
+                if (!url) {
+                    window.alert("No camera URL on this tile.");
+                    return;
                 }
+                const label = button.textContent;
+                button.textContent = "Opening…";
+                openCameraUrls([url], forceIe).finally(function () {
+                    setTimeout(function () {
+                        button.textContent = label;
+                    }, 700);
+                });
             });
-            if (opened < directUrls.length) {
-                window.alert(
-                    "Opened " + opened + " of " + directUrls.length
-                    + " tabs. Allow pop-ups for this site to open the rest."
-                );
+        });
+
+        // In-tile Smart Event banner posts here so Open IE uses the same client-tab path.
+        window.addEventListener("message", function (event) {
+            const data = event && event.data;
+            if (!data || data.type !== "workToolOpenCameraIe") {
+                return;
             }
+            const url = String(data.url || "").trim();
+            if (!url) {
+                return;
+            }
+            openCameraUrls([url], true);
+        });
+
+        document.getElementById("open_tabs_btn").addEventListener("click", function () {
+            // Hikvision: client tabs (plugin via Edge IE mode). Not server iexplore.
+            openCameraUrls(directUrls, unitVendor === "hikvision");
         });
 
         window.addEventListener("resize", applyLayout);

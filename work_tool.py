@@ -231,6 +231,36 @@ def shield_web_url(site_id):
     return f"https://shield.{tld}/site/{site}"
 
 
+def shield_component_web_url(component_or_unit):
+    """Open Shield component at https://shield.{workTLD}/component/SC-{unit}."""
+    tld = work_tld()
+    raw = str(component_or_unit or "").strip()
+    if not tld or not raw:
+        return ""
+    if raw.upper().startswith("SC-"):
+        code = raw[3:].strip()
+    else:
+        code = _normalize_netsheet_unit(raw) or raw.upper()
+    if not code:
+        return ""
+    return f"https://shield.{tld}/component/SC-{code}"
+
+
+def erp_component_web_url(component_or_unit):
+    """Open ERP Component at https://erp.{workTLD}/app/component/SC-{unit}."""
+    base = erp_base_url()
+    raw = str(component_or_unit or "").strip()
+    if not base or not raw:
+        return ""
+    if raw.upper().startswith("SC-"):
+        code = raw[3:].strip()
+    else:
+        code = _normalize_netsheet_unit(raw) or raw.upper()
+    if not code:
+        return ""
+    return f"{base}/app/component/SC-{code}"
+
+
 def erp_site_web_url(site_id):
     """Open ERP Site at https://erp.{workTLD}/app/site/{siteID}."""
     base = erp_base_url()
@@ -259,9 +289,42 @@ def erp_event_records_web_url(unit):
     return f"{base}/app/event-record?{query}"
 
 
+_SITE_ID_CACHE = {}
+_SITE_ID_CACHE_TTL_SEC = 300
+_SITE_ID_CACHE_LOCK = threading.Lock()
+
+
+def _site_id_cache_key(unit, subject=""):
+    unit_key = (_normalize_netsheet_unit(unit) or str(unit or "").strip()).upper()
+    subject_key = str(subject or "").strip()
+    return f"{unit_key}|{subject_key}"
+
+
+def _cached_site_id(unit, subject=""):
+    key = _site_id_cache_key(unit, subject)
+    now = time.time()
+    with _SITE_ID_CACHE_LOCK:
+        cached = _SITE_ID_CACHE.get(key)
+    if cached and len(cached) >= 2 and cached[1] > now:
+        return str(cached[0] or ""), None
+    return None, None
+
+
+def _store_site_id_cache(unit, subject, site_id):
+    site = str(site_id or "").strip()
+    if not site:
+        return
+    key = _site_id_cache_key(unit, subject)
+    with _SITE_ID_CACHE_LOCK:
+        _SITE_ID_CACHE[key] = (site, time.time() + _SITE_ID_CACHE_TTL_SEC)
+
+
 def resolve_dashboard_site_id(unit, subject=""):
     """Resolve Site ID the same way Open Shield does, including project subjects."""
     subject_text = str(subject or "").strip()
+    cached, _ = _cached_site_id(unit, subject_text)
+    if cached is not None:
+        return cached, None
     if _is_noc_deployment_project_subject(subject_text):
         site, error = find_erp_site_by_project_subject(subject_text)
         if error:
@@ -269,6 +332,7 @@ def resolve_dashboard_site_id(unit, subject=""):
         site_id = str((site or {}).get("site_id") or "").strip()
         if not site_id:
             return "", "Matched Site has no id"
+        _store_site_id_cache(unit, subject_text, site_id)
         return site_id, None
     return resolve_shield_site_id(unit, subject_text)
 
@@ -1199,6 +1263,10 @@ CAMERA_ENDPOINTS = {
     "camera4": (9, "Camera 4"),
 }
 HIGH_UNIT_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2"})
+# ACRD = RD/FD with no MU trailer attached: fisheye + C1–C3 only (never C4).
+ACRD_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2", "camera3"})
+_RD_MU_PARENT_CACHE = {}
+_RD_MU_PARENT_CACHE_TTL_SEC = 300
 
 def ping_camera(unit, target):
     endpoint = CAMERA_ENDPOINTS.get(target)
@@ -1234,17 +1302,127 @@ def uses_pve(unit):
 def is_fd_unit(unit):
     return str(unit or "").strip().upper().startswith("FD")
 
+def is_hikvision_unit(unit, cameras=None):
+    """
+    MU sites (no RD prefix) with C1–C4 and no fisheye are Hikvision in the netsheet.
+    Example: MU1001.
+
+    Optional cameras list avoids a second list_unit_cameras() on the proxy hot path.
+    """
+    code = str(unit or "").strip().upper()
+    if not code.startswith("MU"):
+        return False
+    if cameras is None:
+        cameras, error = list_unit_cameras(unit)
+        if error or not cameras:
+            # Still treat bare MU units as Hikvision when the sheet is incomplete.
+            return True
+    elif not cameras:
+        return True
+    if any(item.get("target") == "fisheye" for item in cameras):
+        return False
+    return True
+
 def unit_number(unit):
     try:
         return int(str(unit).strip()[-4:])
     except (TypeError, ValueError):
         return None
 
+def _mu_code_from_parent_component(parent_component):
+    """Extract MU#### from an ERP parent_component value like SC-MU8088."""
+    text = str(parent_component or "").strip().upper()
+    match = re.search(r"\bMU\s*(\d{3,6})\b", text)
+    if not match:
+        return ""
+    return f"MU{match.group(1)}"
+
+
+def _erp_parent_mu_code(unit):
+    """Return attached MU#### from ERP parent_component for an RD/FD unit (cached)."""
+    code = _normalize_netsheet_unit(unit)
+    if not code:
+        return ""
+    now = time.time()
+    cached = _RD_MU_PARENT_CACHE.get(code)
+    if cached and len(cached) >= 3 and cached[2] > now:
+        return str(cached[1] or "")
+    if cached and len(cached) == 2 and cached[1] > now:
+        # Legacy (has_mu, expires) cache entry — refresh with MU code.
+        pass
+    mu_code = ""
+    try:
+        doc, error = _get_erp_component_doc(_sc_component_name(code))
+        if not error and isinstance(doc, dict):
+            mu_code = _mu_code_from_parent_component(doc.get("parent_component"))
+    except Exception:
+        mu_code = ""
+    _RD_MU_PARENT_CACHE[code] = (
+        bool(mu_code),
+        mu_code,
+        now + _RD_MU_PARENT_CACHE_TTL_SEC,
+    )
+    return mu_code
+
+
+def _rd_has_mu_parent(unit):
+    """True when ERP Component.parent_component points at an MU trailer (e.g. SC-MU6004)."""
+    code = _normalize_netsheet_unit(unit)
+    if not code:
+        return False
+    now = time.time()
+    cached = _RD_MU_PARENT_CACHE.get(code)
+    if cached and len(cached) >= 3 and cached[2] > now:
+        return bool(cached[0])
+    return bool(_erp_parent_mu_code(code))
+
+
+def resolve_attached_mu_code(unit, subject=""):
+    """
+    Resolve the MU trailer code attached to a unit.
+    Prefer RD####(MU####) / MU in subject; else ERP parent_component for RD/FD;
+    MU units return themselves.
+    """
+    parent = _parent_mu_from_subject(subject)
+    if parent:
+        return parent.upper()
+    code = _normalize_netsheet_unit(unit)
+    if not code:
+        return ""
+    if code.startswith("MU"):
+        return code
+    if code.startswith("RD") or code.startswith("FD"):
+        match = re.search(r"\bMU\s*(\d{3,6})\b", str(subject or ""), flags=re.IGNORECASE)
+        if match:
+            return f"MU{match.group(1)}"
+        return _erp_parent_mu_code(code)
+    return ""
+
+def is_acrd_unit(unit):
+    """
+    ACRD units are RD/FD heads with no MU trailer attached in ERP.
+    They only have fisheye + Camera 1–3 (never Camera 4).
+    """
+    code = _normalize_netsheet_unit(unit)
+    if not code or not (code.startswith("RD") or code.startswith("FD")):
+        return False
+    n = unit_number(code)
+    if n is not None and n > 3300:
+        return False
+    return not _rd_has_mu_parent(code)
+
 def open_camera_targets_for_unit(unit):
-    """Open Cameras targets; units above 3300 only have fisheye + C1/C2 (C3/C4 duplicate C1/C2 in netsheet)."""
+    """Open Cameras targets for a unit.
+
+    - Units above 3300: fisheye + C1/C2 only (C3/C4 duplicate C1/C2 in netsheet).
+    - ACRD (RD/FD with no MU parent in ERP): fisheye + C1–C3 only (never C4).
+    - Otherwise: all configured camera endpoints.
+    """
     n = unit_number(unit)
     if n is not None and n > 3300:
         return HIGH_UNIT_OPEN_CAMERA_TARGETS
+    if is_acrd_unit(unit):
+        return ACRD_OPEN_CAMERA_TARGETS
     return frozenset(CAMERA_ENDPOINTS.keys())
 
 def in_potential_stale_vpn_range(unit):
@@ -1723,38 +1901,21 @@ def _validate_unit_connectivity(
         return
 
     # Router down (pre-3300)
-    if in_potential_stale_vpn_range(unit):
-        compute_result = ping_nuc
-        host_checked = "NUC"
-    else:
-        compute_result = ping_compute
-        host_checked = host
-    log(f"Checking {unit}'s {host_checked}...")
+    log(f"Checking {unit}'s {host}...")
     missing_compute = _missing_netsheet_ip_message(
         unit,
-        (11,) if host_checked == "PVE" else (3,),
+        (11,) if uses_pve(unit) else (3,),
     )
     code, output = _safe_ping_result(
-        compute_result(unit),
+        ping_compute(unit),
         missing_message=missing_compute,
     )
     log(output)
     if _ping_reachable(output):
-        # Classic stale VPN (router down, compute up) — only for the 3000-3199 band
-        if in_potential_stale_vpn_range(unit):
-            log(f"{host_checked} is up {code}, router is down, potentially stale VPN on {unit}")
-            stale_vpn.append(result_value)
-        else:
-            log(f"{host_checked} is up {code}, router is down on {unit} (outside potential-stale range)")
-            truly_down.append(result_value)
+        log(f"{host} is up {code}, router is down on {unit}")
     else:
-        # Both unreachable: band 3000-3199 => potentially stale VPN; else truly down
-        if in_potential_stale_vpn_range(unit):
-            log(f"Router and NUC unreachable on {unit} (3000-3199) — potentially stale VPN")
-            stale_vpn.append(result_value)
-        else:
-            log(f"{host_checked} and router are offline. {code}")
-            truly_down.append(result_value)
+        log(f"{host} and router are offline. {code}")
+    truly_down.append(result_value)
 
 def _issue_ticket_url(issue_id):
     if not issue_id:
@@ -2963,6 +3124,9 @@ def fetch_fisheye_snapshot(unit):
 
 _camera_port_cache = {}
 _camera_port_lock = threading.Lock()
+_camera_login_cache = {}
+_camera_login_cache_lock = threading.Lock()
+_CAMERA_LOGIN_CACHE_TTL_SEC = 120
 
 
 def _camera_port_open(host, port, timeout=2.0):
@@ -3039,6 +3203,9 @@ def list_unit_cameras(unit):
             "host": host,
             "port": port,
         })
+    # Fisheye last so the grid puts it on the bottom row (bottom-right in a
+    # filled 2x2; alone on the bottom row when the count is odd).
+    cameras.sort(key=lambda item: 1 if item.get("target") == "fisheye" else 0)
     return cameras, None
 
 def camera_login_info(unit, target):
@@ -3051,6 +3218,13 @@ def camera_login_info(unit, target):
     target_key = str(target or "").strip().lower()
     if not target_key:
         return None, "Missing camera target"
+    unit_key = _normalize_netsheet_unit(unit) or str(unit).strip()
+    cache_key = f"{unit_key}|{target_key}|{fishuser}"
+    now = time.time()
+    with _camera_login_cache_lock:
+        cached = _camera_login_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return dict(cached[0]), None
     cameras, error = list_unit_cameras(unit)
     if error:
         return None, error
@@ -3060,13 +3234,12 @@ def camera_login_info(unit, target):
     )
     if not camera:
         return None, f"No {target_key} configured for {unit}"
-    unit_key = _normalize_netsheet_unit(unit) or str(unit).strip()
     proxy_path = (
         f"/issues/camera-proxy/"
         f"{quote(unit_key, safe='')}/"
         f"{quote(target_key, safe='')}/"
     )
-    return {
+    info = {
         "unit": unit_key,
         "target": target_key,
         "label": camera["label"],
@@ -3074,9 +3247,14 @@ def camera_login_info(unit, target):
         "port": camera["port"],
         "username": fishuser,
         "auth": "digest-or-basic",
+        # Reuse the cameras list so proxy hot paths don't list twice.
+        "vendor": "hikvision" if is_hikvision_unit(unit_key, cameras) else "dahua",
         "camera_url": f"http://{camera['host']}:{camera['port']}/",
         "url": proxy_path,
-    }, None
+    }
+    with _camera_login_cache_lock:
+        _camera_login_cache[cache_key] = (dict(info), now + _CAMERA_LOGIN_CACHE_TTL_SEC)
+    return info, None
 
 
 _camera_session_lock = threading.Lock()
@@ -3103,7 +3281,27 @@ _CAMERA_SKIP_RESP_HEADERS = {
 }
 
 
-_CAMERA_SHIM_VERSION = "19"
+_CAMERA_SHIM_VERSION = "39"
+
+# Injected as early as possible on Hikvision HTML so "download plugin/addon" never flashes.
+_HIKVISION_PLUGIN_HIDE_CSS = (
+    "<style id=\"worktool-hik-hide-plugin-early\">"
+    ".pluginLink,#main_plugin .txtTip,#main_plugin table.txtTip,#main_plugin .plugin,"
+    "#main_plugin .noPlugin,.download-plugin,.plugin-download,.noPlugin,.noPluginTip,"
+    ".downloadPlugin,[class*='downloadPlugin'],[class*='DownloadPlugin'],"
+    "[class*='plugin-tip'],[ng-bind*='downloadPlugin'],[ng-bind*='noPlugin'],"
+    "[ng-show*='bNoPlugin'],[ng-if*='bNoPlugin'],[ng-bind*='laPlugin'],"
+    "a[ng-click*='downloadPlugin'],label[ng-bind*='downloadPlugin'],"
+    "label[ng-bind*='noPlugin']{display:none!important;visibility:hidden!important}"
+    "#worktool-hik-jpeg{display:block;width:100%;height:100%;min-height:240px;"
+    "object-fit:contain;background:#000;position:relative;z-index:5}"
+    "#worktool-hik-analytics-banner{position:sticky;top:0;z-index:10050;display:flex;"
+    "flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;background:#1e3a5f;"
+    "color:#e2e8f0;border-bottom:1px solid #3b82f6;font:12px/1.35 Segoe UI,Arial,sans-serif}"
+    "#worktool-hik-analytics-banner button{background:#2563eb;color:#fff;border:0;"
+    "border-radius:4px;padding:6px 10px;cursor:pointer;font:12px Segoe UI,Arial,sans-serif}"
+    "</style>"
+)
 
 
 def _rewrite_camera_css(content, content_type, proxy_prefix):
@@ -3124,11 +3322,21 @@ def _rewrite_camera_css(content, content_type, proxy_prefix):
     return rewritten.encode("utf-8") if rewritten != text else raw
 
 
-def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, username, password):
+def _looks_like_html_document(raw):
+    """True only for real HTML pages — Hikvision serves JSON i18n as text/html."""
+    start = (raw or b"").lstrip()
+    if start.startswith(b"\xef\xbb\xbf"):
+        start = start[3:]
+    head = start[:64].lower()
+    return head.startswith((b"<!doctype", b"<html", b"<head", b"<body"))
+
+
+def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, username, password, vendor="dahua"):
     """Rewrite root-relative URLs and load the camera shim (storage split + auto-login)."""
     ctype = str(content_type or "").lower()
     raw = content or b""
-    if "html" not in ctype and not raw.lstrip()[:32].lower().startswith((b"<!doctype", b"<html")):
+    # Do not trust Content-Type alone: some cameras label JSON/CSS as text/html.
+    if not _looks_like_html_document(raw):
         return _rewrite_camera_css(raw, ctype, proxy_prefix)
     try:
         text = raw.decode("utf-8")
@@ -3146,14 +3354,18 @@ def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, user
         text,
     )
     origin = str(camera_origin or "")
+    vendor_key = str(vendor or "dahua").lower()
     config = json.dumps({
         "prefix": prefix,
         "origin": origin,
         "wsOrigin": re.sub(r"(?i)^https?://", "ws://", origin) if origin else "",
         "user": str(username or ""),
         "pass": str(password or ""),
+        "vendor": vendor_key,
     })
+    early_css = _HIKVISION_PLUGIN_HIDE_CSS if vendor_key == "hikvision" else ""
     snippet = (
+        f"{early_css}"
         f'<script id="work-tool-camera-shim">window.__workToolCamera = {config};</script>'
         f'<script src="/static/camera_shim.js?v={_CAMERA_SHIM_VERSION}"></script>'
     )
@@ -3194,7 +3406,7 @@ def _inject_camera_worker_prelude(content, content_type, path, proxy_prefix, cam
         "self.Module=self.Module||{};"
         "self.Module.locateFile=function(path){"
         "var name=String(path||'').split('/').pop();"
-        "return config.prefix+(name.indexOf('ffmpegasm')===0?'/module/':'/')+name;"
+        "return config.prefix+(name.indexOf('ffmpegasm')===0?'/module/Decode/':'/')+name;"
         "};"
         "if(self.importScripts){var ni=self.importScripts;"
         "self.importScripts=function(){return ni.apply(self,Array.prototype.map.call(arguments,rewrite));};}"
@@ -3253,6 +3465,7 @@ def cameras_launch_info(unit):
     if not cameras:
         return None, f"No cameras configured for {unit}"
     unit_key = _normalize_netsheet_unit(unit) or str(unit).strip()
+    vendor = "hikvision" if is_hikvision_unit(unit_key) else "dahua"
     rows = []
     for camera in cameras:
         info, info_error = camera_login_info(unit_key, camera["target"])
@@ -3265,8 +3478,69 @@ def cameras_launch_info(unit):
             "port": camera["port"],
             "url": info["url"],
             "direct_url": info["camera_url"],
+            "vendor": info.get("vendor") or vendor,
         })
-    return {"unit": unit_key, "cameras": rows, "count": len(rows)}, None
+    return {
+        "unit": unit_key,
+        "cameras": rows,
+        "count": len(rows),
+        "vendor": vendor,
+    }, None
+
+
+def open_camera_urls(urls, ie_mode=True):
+    """
+    Open camera web UIs on the Flask host.
+
+    IE mode uses iexplore.exe (Edge IE mode on modern Windows), which some Dahua
+    pages still expect for plug-in / AI menus. Non-IE mode leaves opening to the
+    caller's browser via window.open.
+    """
+    cleaned = []
+    for item in urls or []:
+        text = str(item or "").strip()
+        if text and text not in cleaned:
+            cleaned.append(text)
+    if not cleaned:
+        return None, "No camera URLs to open"
+    if not ie_mode:
+        return {
+            "ok": True,
+            "ie_mode": False,
+            "opened": 0,
+            "urls": cleaned,
+            "message": "Open in the browser client",
+        }, None
+    candidates = [
+        r"C:\Program Files\Internet Explorer\iexplore.exe",
+        r"C:\Program Files (x86)\Internet Explorer\iexplore.exe",
+    ]
+    exe = next((path for path in candidates if os.path.isfile(path)), None)
+    if not exe:
+        return None, "Internet Explorer not found on this machine (needed for IE mode)"
+    opened = []
+    errors = []
+    for url in cleaned:
+        try:
+            subprocess.Popen(
+                [exe, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            opened.append(url)
+        except OSError as exc:
+            errors.append(f"{url}: {exc}")
+    if not opened:
+        return None, "; ".join(errors) or "Failed to launch IE mode"
+    return {
+        "ok": True,
+        "ie_mode": True,
+        "opened": len(opened),
+        "urls": opened,
+        "errors": errors,
+        "message": f"Opened {len(opened)} camera tab(s) in IE mode on the server",
+    }, None
 
 
 def _camera_proxy_session(unit, target, host, port, username, password, force_auth=None):
@@ -3376,10 +3650,18 @@ def proxy_camera_http(
             response.status_code == 404
             and mem_name in {"ffmpegasm.js.mem", "ffmpegasm.wasm", "ffmpegasm.js"}
         ):
-            # Decoder workers ask next to /module/, but cameras serve these at site root.
-            for retry_name in (mem_name, f"module/{mem_name}"):
-                if retry_name == path:
+            # Decoder workers ask under /module/, but older 3k firmwares serve these
+            # under /module/Decode/ (and sometimes site root).
+            candidates = []
+            for retry_name in (
+                mem_name,
+                f"module/{mem_name}",
+                f"module/Decode/{mem_name}",
+            ):
+                if retry_name == path or retry_name in candidates:
                     continue
+                candidates.append(retry_name)
+            for retry_name in candidates:
                 retry_url = f"http://{host}:{port}/{retry_name}"
                 response = session.request(
                     method=str(method or "GET").upper(),
@@ -3435,6 +3717,7 @@ def proxy_camera_http(
             camera_origin,
             username,
             password,
+            vendor=info.get("vendor") or "dahua",
         )
         body = _inject_camera_worker_prelude(
             body,
@@ -3574,6 +3857,7 @@ def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
             "outage_type": meta.get("outage_type", ""),
             "issue_subtype": meta.get("issue_subtype", ""),
             "subject": meta.get("subject", ""),
+            "site": meta.get("site", ""),
             "undiagnosed": bool(meta.get("undiagnosed")),
             "switch_url": switch_url,
             "fisheye_ip": fisheye_ip,
@@ -3690,6 +3974,8 @@ def _normalize_erp_issue(issue):
         "issue_subtype": str(
             _erp_issue_value(issue, "issue_subtype", "issue subtype")
         ).strip(),
+        # Already on the Issue doc when set — lets Open Site/Shield skip ERP on click.
+        "site": str(_erp_issue_value(issue, "site")).strip(),
     }
 
 def _normalize_erp_project(project):
@@ -3750,7 +4036,10 @@ def _format_project_percent_complete(value):
 def _project_ticket_url(project_id):
     if not project_id:
         return ""
-    return f"{erp_base_url()}/app/project/{project_id}"
+    from urllib.parse import urlencode
+
+    query = urlencode({"project": project_id, "status": "Open"})
+    return f"{erp_base_url()}/app/task/view/List?{query}"
 
 def _project_subject_has_noc(subject):
     return PROJECT_NOC_SUBJECT_TOKEN.lower() in str(subject or "").lower()
@@ -5691,6 +5980,9 @@ def resolve_shield_site_id(unit, subject=""):
     if not unit_name:
         return "", "No unit found in ticket"
     subject_text = str(subject or "").strip()
+    cached, _ = _cached_site_id(unit_name, subject_text)
+    if cached is not None:
+        return cached, None
     parent_source = _parent_mu_from_subject(subject_text) if subject_text else ""
     cache = {}
     if not parent_source and not subject_text:
@@ -5714,6 +6006,7 @@ def resolve_shield_site_id(unit, subject=""):
     )
     if not site:
         return "", f"Component {found_name or site_source} has no Site"
+    _store_site_id_cache(unit_name, subject_text, site)
     return site, None
 
 
@@ -6178,7 +6471,14 @@ def add_missing_issue_components(tickets):
 
 def validate_issue_records(issue_records):
     """Validate normalized ERP issue records through the established pipeline."""
+    site_by_issue = {}
+    for issue in issue_records or []:
+        issue_id = str((issue or {}).get("issue_id") or "").strip()
+        site = str((issue or {}).get("site") or "").strip()
+        if issue_id and site:
+            site_by_issue[issue_id] = site
     temp_path = ""
+    result = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -6198,13 +6498,30 @@ def validate_issue_records(issue_records):
                     issue.get("issue_subtype", ""),
                     issue.get("status", ""),
                 ])
-        return validate_issues_report(temp_path)
+        result = validate_issues_report(temp_path)
     finally:
         if temp_path:
             try:
                 os.remove(temp_path)
             except OSError:
                 pass
+    if site_by_issue and isinstance(result, tuple):
+        for bucket in result:
+            if not isinstance(bucket, list):
+                continue
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                issue_id = str(item.get("issue_id") or "").strip()
+                site = site_by_issue.get(issue_id) or ""
+                if not site:
+                    continue
+                item["site"] = site
+                unit = str(item.get("unit") or "").strip()
+                subject = str(item.get("subject") or "").strip()
+                if unit:
+                    _store_site_id_cache(unit, subject, site)
+    return result
 
 def validate_issues_report(issue_path=None):
     if issue_path is None:
@@ -6879,7 +7196,10 @@ def validate_issues_report(issue_path=None):
 
     false_positives = _move_on_hold("false_positives", false_positives)
     nuc_down = _move_on_hold("nuc_down", nuc_down)
-    stale_vpn = _move_on_hold("stale_vpn", stale_vpn)
+    # Former "potentially stale VPN" units are Down Full.
+    if stale_vpn:
+        truly_down.extend(stale_vpn)
+        stale_vpn = []
     truly_down = _move_on_hold("truly_down", truly_down)
     scrypted_outage = _move_on_hold("scrypted_outage", scrypted_outage)
     speaker_outage = _move_on_hold("speaker_outage", speaker_outage)
@@ -6891,7 +7211,7 @@ def validate_issues_report(issue_path=None):
         _with_ticket_links(false_positives, unit_issue_map, unit_meta_map)
     )
     nuc_down = _with_ticket_links(nuc_down, unit_issue_map, unit_meta_map)
-    stale_vpn = _with_ticket_links(stale_vpn, unit_issue_map, unit_meta_map)
+    stale_vpn = []
     truly_down = _with_ticket_links(truly_down, unit_issue_map, unit_meta_map)
     scrypted_outage = _with_ticket_links(scrypted_outage, unit_issue_map, unit_meta_map)
     speaker_outage = _with_ticket_links(speaker_outage, unit_issue_map, unit_meta_map)
@@ -6902,7 +7222,6 @@ def validate_issues_report(issue_path=None):
 
     _print_linked_units("Up Steady:", false_positives)
     _print_linked_units("Offline compute (router up):", nuc_down)
-    _print_linked_units("Potentially stale VPN (3000-3199 only):", stale_vpn)
     _print_linked_units("Down Full:", truly_down)
     _print_linked_units("Scrypted outage (router+PVE up, Scrypted down):", scrypted_outage)
     _print_linked_units("Speaker outage:", speaker_outage)
@@ -7293,14 +7612,16 @@ def revalidate_list_entry(list_id, item):
     if not unit:
         return None, {}, "", "Missing unit"
 
-    if list_id in ("false_positives", "truly_down"):
+    if list_id in ("false_positives", "truly_down", "stale_vpn"):
         category, output, error = validate_unit_status(unit)
         if error:
             return None, {}, output, error
+        if category == "stale_vpn":
+            category = "truly_down"
         fields = {}
         if category == "false_positives":
             fields["led_status"] = "green"
-        elif category in ("truly_down", "stale_vpn"):
+        elif category == "truly_down":
             fields["led_status"] = "red"
         elif category in ("nuc_down", "scrypted_outage"):
             fields["led_status"] = "yellow"
@@ -7341,27 +7662,6 @@ def revalidate_list_entry(list_id, item):
         category = "false_positives" if scrypted_up else "scrypted_outage"
         if category == "false_positives":
             fields["led_status"] = "green"
-        return category, fields, output, None
-
-    if list_id == "stale_vpn":
-        result, error = validate_stale_vpn_status(unit)
-        if error:
-            return None, {}, "", error
-        fields = {
-            "led_status": result.get("status"),
-            "compute_label": result.get("compute_label"),
-        }
-        output = "\n".join(
-            part for part in (result.get("router_output"), result.get("compute_output"))
-            if part
-        )
-        if result.get("status") == "green":
-            category = "false_positives"
-            fields["led_status"] = "green"
-        elif result.get("router_up") and not result.get("compute_up"):
-            category = "nuc_down"
-        else:
-            category = "stale_vpn"
         return category, fields, output, None
 
     if list_id == "speaker_outage":
@@ -7693,9 +7993,9 @@ def validate_reports_mesh():
     print("Offline NUCs")
     for line in nuc_down:
         print(line)
-    print("Potentially stale VPNs (3000-3199)")
-    for line in stale_vpn:
-        print(line)
+    if stale_vpn:
+        missing2.extend(stale_vpn)
+        stale_vpn = []
     print("Scrypted outages")
     for line in scrypted_outage:
         print(line)
