@@ -191,7 +191,7 @@ These open browser tabs / redirects. They do **not** write ERP fields by themsel
 - **NUC:** reboot, uptime, chkdsk (read-only), Check Patch Version  
 - **Linux → Scrypted:** Set No Audio, Reboot Scrypted / Reboot PVE (destructive — use carefully; not ERP writes, but they reboot gear)
 
-### Disabled ERP write functions
+### Disabled ERP Write Functions
 
 With `DISABLE_ERP_WRITES=1` (default), these stay **visible but disabled** in the UI, and matching POST routes return 403:
 
@@ -205,6 +205,7 @@ With `DISABLE_ERP_WRITES=1` (default), these stay **visible but disabled** in th
 **Resolve (R)** is local-only and is **not** blocked by this flag. Set `DISABLE_ERP_WRITES=0` in `.env` to re-enable the write actions above.
 
 **Note:** **Update Patch Version** is separate from this gate (not an ERP ticket write); treat it carefully when enabled.
+
 ---
 
 ## 3. Camera launch grid
