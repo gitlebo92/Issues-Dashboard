@@ -730,38 +730,11 @@ def _sse_stream(job_id):
         },
     )
 
-@app.route("/", methods=["GET"])
-def home():
-    return render_template("index.html")
-@app.route("/victron", methods=["GET"])
-def victron_form():
-    return render_template("vrm.html")
-@app.route("/outage_filter", methods=["GET"])
-def outage_form():
-    return render_template("outage.html")
-@app.route("/issues", methods=["GET"])
-def issues_form():
-    return render_template("issues.html")
-@app.route("/issues/results", methods=["POST"])
-def issues_results():
-    _ensure_shared_issue_job()
-    return redirect(url_for("issues_watch_shared"))
-
-@app.route("/issues/watch", methods=["GET"])
-def issues_watch_shared():
-    job_id = _ensure_shared_issue_job()
-    return render_template(
-        "issues_results.html",
-        job_id=job_id,
-        work_tld=work_tool.work_tld(),
-        mesh_base_url=work_tool.meshcentral_base_url(),
-        raindance_base_url=work_tool.raindance_base_url(),
-        automation_paused=automated_tasks_paused(),
-    )
-
-@app.route("/issues/watch/<job_id>", methods=["GET"])
-def issues_watch(job_id):
-    if job_id not in stream_jobs:
+def _render_issues_dashboard(job_id=None):
+    """Shared Issues Dashboard UI (home page)."""
+    if job_id is None:
+        job_id = _ensure_shared_issue_job()
+    elif job_id not in stream_jobs:
         return "Unknown job", 404
     return render_template(
         "issues_results.html",
@@ -771,6 +744,65 @@ def issues_watch(job_id):
         raindance_base_url=work_tool.raindance_base_url(),
         automation_paused=automated_tasks_paused(),
     )
+
+
+def _page_moved(old_name, new_url="/", new_name="Issues Dashboard"):
+    return render_template(
+        "page_moved.html",
+        old_name=old_name,
+        new_url=new_url,
+        new_name=new_name,
+    )
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return _render_issues_dashboard()
+
+
+@app.route("/victron", methods=["GET"])
+@app.route("/victron/results", methods=["GET", "POST"])
+def victron_form():
+    return _page_moved("Victron VRM Checker")
+
+
+@app.route("/outage_filter", methods=["GET"])
+@app.route("/outage_filter/results", methods=["GET", "POST"])
+def outage_form():
+    return _page_moved("Outage Filter")
+
+
+@app.route("/linux", methods=["GET"])
+@app.route("/linux/results", methods=["GET", "POST"])
+@app.route("/linux/watch/<job_id>", methods=["GET"])
+def linux_form(job_id=None):
+    return _page_moved("Linux Diagnostic Tool")
+
+
+@app.route("/zabbix", methods=["GET"])
+def zabbix_form():
+    return _page_moved("Zabbix Monitor")
+
+
+@app.route("/issues", methods=["GET"])
+def issues_form():
+    return _page_moved("Unit Outage Verification Tool (/issues)")
+
+
+@app.route("/issues/results", methods=["POST"])
+def issues_results():
+    _ensure_shared_issue_job()
+    return redirect(url_for("home"))
+
+
+@app.route("/issues/watch", methods=["GET"])
+def issues_watch_shared():
+    return _page_moved("Issues watch (/issues/watch)")
+
+
+@app.route("/issues/watch/<job_id>", methods=["GET"])
+def issues_watch(job_id):
+    return _render_issues_dashboard(job_id=job_id)
 
 @app.route("/issues/stream/<job_id>", methods=["GET"])
 def issues_stream(job_id):
@@ -2270,231 +2302,9 @@ def recovery_email_watch(job_id):
 def recovery_email_stream(job_id):
     return _sse_stream(job_id)
 
-def _run_linux_diagnostic(job_id, unit):
-    import sys
-    job = stream_jobs[job_id]
-    original_stdout = sys.stdout
-    sys.stdout = JobStdout(job_id, original_stdout)
-    try:
-        work_tool.generate_false_mu()
-        work_tool.generate_net_array()
-        result = work_tool.run_linux_diagnostic(unit)
-        job["results"] = result
-        job["queue"].put({"type": "done", "results": result})
-    except Exception as e:
-        job["queue"].put({"type": "log", "line": f"ERROR: {e}"})
-        job["queue"].put({"type": "done", "results": {
-            "unit": unit or "",
-            "hostname": "",
-            "connected": False,
-            "output": "",
-            "error": str(e),
-        }})
-    finally:
-        sys.stdout = original_stdout
-        job["done"] = True
-
-@app.route("/zabbix", methods=["GET"])
-def zabbix_form():
-    return render_template("zabbix.html")
-@app.route("/linux", methods=["GET"])
-def linux_form():
-    return render_template("linux.html")
-@app.route("/linux/results", methods=["POST"])
-def linux_results():
-    unit = (request.form.get("unit") or "").strip()
-    if not unit:
-        return "No unit provided", 400
-    for row in work_tool.net_array:
-        if row[0] == unit:
-            hostname = row[12]
-            port = 22
-            user = os.getenv("scryptuserssh")
-            password = os.getenv("scryptpass")
-            sshclient = paramiko.SSHClient
-            sshclient.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-            sshclient.connect(hostname, port, user, password)
-            stdin, stdout, stderr = sshclient.exec_command("")
-
-@app.route("/linux/watch/<job_id>", methods=["GET"])
-def linux_watch(job_id):
-    if job_id not in stream_jobs:
-        return "Unknown job", 404
-    return render_template("linux_results.html", job_id=job_id)
-
 @app.route("/linux/stream/<job_id>", methods=["GET"])
 def linux_stream(job_id):
-    return _sse_stream(job_id)
-@app.route("/victron/results", methods=["POST"])
-def install_checker():
-    idUser = (os.getenv("idUser") or "").strip()
-    api_token = (os.getenv("victron_token") or "").strip()
-    if not idUser or not api_token:
-        return (
-            "VRM credentials missing: set idUser and victron_token in work_tool/.env",
-            500,
-        )
-    url = f"https://vrmapi.victronenergy.com/v2/users/{idUser}/installations"
-    headers = {
-        "idUser": f"{idUser}",
-        "X-Authorization": f"Token {api_token}"
-    }
-    unit = request.form.get("unit")
-    if not unit:
-        return "No unit provided"
-    response = requests.get(url, headers=headers)
-
-    if response.status_code != 200:
-        return f"VRM request failed: {response.status_code}" 
-    data = response.json()
-    battery_instance = None
-    solar_instance = None
-    voltage = None
-    current = None
-    amps = None
-    temp = None
-    ftemp = None
-    high_volt_alarm = None
-    low_volt_alarm = None
-    today_yield = None
-    yesterday_yield = None
-    soc=None
-
-    for record in data.get("records", []):
-        if (record.get("name") or "")[-4:] == unit[-4:]:
-            print('Unit is added to VRM')
-            print(f"Site ID for {unit} is {record.get('idSite')}")
-            siteId = record.get('idSite')
-            url2 = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/system-overview"
-            response2 = requests.get(url2, headers=headers)
-            data2 = response2.json()
-            for device in data2.get("records", {}).get("devices", []):
-                if device["name"] == "Gateway":
-                    lastseen = device.get("lastConnection")
-                    if isinstance(lastseen, (int, float)):
-                        lastseen = datetime.fromtimestamp(lastseen).strftime("%H:%M:%S on %m/%d/%Y") 
-
-                elif "battery" in device.get("name").lower():
-                    battery_instance = device.get("instance")
-                    print("battery instance: " + str(battery_instance))
-                elif "solar charger" in device.get("name").lower():
-                    solar_instance = device.get("instance")
-                    print("solar instance: " + str(solar_instance))
-
-            if battery_instance is not None:
-                url_battery = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/BatterySummary?instance={battery_instance}"
-                battery_response = requests.get(url_battery, headers=headers)
-                battery_data = battery_response.json()
-                print("--- BATTERY DATA (SOC, Voltage, etc.) ---")
-                # print(json.dumps(battery_data, indent=2))
-                for instance in battery_data.get("records", {}).get("data", {}).values():
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Voltage":
-                        voltage = instance["valueFormattedWithUnit"]
-                            
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Current":
-                        print('hit')
-                        current = instance["valueFormattedWithUnit"]
-                        print(f'amps: {current}')
-
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Dc/0/Temperature":
-                        print('hit')
-                        temp = float(instance["valueFormattedValueOnly"])
-                        ftemp = temp * 1.8 + 32
-                        ftemp = round(ftemp, 2)
-                        ftemp = str(ftemp) + " \u00b0F"
-                        print(f'temp: {ftemp}')
-
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Alarms/LowVoltage":
-                        print('hit')
-                        low_volt_alarm = instance["valueFormattedWithUnit"]
-                        print(f'Low voltage alarm status: {low_volt_alarm}')
-
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Alarms/HighVoltage":
-                        print('hit')
-                        high_volt_alarm = instance["valueFormattedWithUnit"]
-                        print(f'High voltage alarm status: {high_volt_alarm}')
-
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/Soc":
-                        print('hit')
-                        soc = instance["valueFormattedWithUnit"]
-                        print(f'State of Charge: {soc}')
-
-            if solar_instance is not None:
-                url_solar = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/widgets/SolarChargerSummary?instance={solar_instance}"
-                solar_response = requests.get(url_solar, headers=headers)
-                solar_data = solar_response.json()
-                #print(json.dumps(solar_data, indent=2))
-                for instance in solar_data.get("records", {}).get("data", {}).values():
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/History/Daily/0/Yield":
-                        today_yield = instance.get("valueFormattedWithUnit")
-                        print(today_yield)
-
-                    if isinstance(instance, dict) and instance.get("dbusPath") == "/History/Daily/1/Yield":
-                        yesterday_yield = instance.get("valueFormattedWithUnit")
-                        print('hit yesterday')
-                        print(yesterday_yield)
-
-                    if isinstance(instance, dict) and instance.get("dataAttributeName") == "Battery watts":
-                        print('hit watts')
-                        watts = instance.get("valueFormattedWithUnit")
-                        print(watts)
-
-                return render_template("result.html",
-                unit=unit,
-                siteId=siteId,
-                lastseen=lastseen,
-                soc=soc,
-                watts=watts,
-                voltage=voltage,
-                current=current,
-                ftemp=ftemp,
-                high_volt_alarm=high_volt_alarm,
-                low_volt_alarm=low_volt_alarm,
-                today_yield=today_yield,
-                yesterday_yield=yesterday_yield
-                )
-
-            else:
-                print("No Solar Charger instance found in system overview.")
-
-            return "Gateway not found"                
-    return "Unit not found in VRM"
-@app.route("/outage_filter/results", methods=["POST"])
-def outage_filter():
-    work_tool.generate_false_mu()
-    work_tool.generate_net_array()
-    print("Generated")
-    mesh_outage = request.files.get("mesh_file")
-    issues = request.files.get("issue_file")
-
-    if not mesh_outage or not issues:
-        return "Missing Files", 400
-    mesh_path = os.path.join(UPLOAD_FOLDER, mesh_outage.filename)
-    issue_path = os.path.join(UPLOAD_FOLDER, issues.filename)
-    downloads = os.path.join(work_tool.pc_user_home(), "Downloads")
-    local_mesh = os.path.join(downloads, "filtered_mesh_vpn.csv")
-    local_issue = os.path.join(downloads, "Issue.csv")
-    mesh_outage.save(mesh_path)
-    issues.save(issue_path)
-    mesh_outage.close()
-    issues.close()
-    work_tool.compare_reports(issue_path, mesh_path)
-    work_tool.clear_old_reports(mesh_path, issue_path)
-
-    missing2, nuc_down, stale_vpn, scrypted_outage = work_tool.validate_reports_mesh()
-    try:
-        os.remove(local_issue)
-        os.remove(local_mesh)
-        print("removed local files")
-    except Exception as e:
-        print(f"{e}: Failed, continuing with validation")
-    return jsonify({
-    "message": "Filtered outage report",
-    "missing": missing2,
-    "nuc_down": nuc_down,
-    "stale_vpn": stale_vpn,
-    "scrypted_outage": scrypted_outage,
-}), 200
+    return _page_moved("Linux Diagnostic Tool")
 
 def _arizona_now():
     return datetime.now(ARIZONA_TZ)

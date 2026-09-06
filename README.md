@@ -32,27 +32,28 @@ With `PAUSE_AUTOMATED_TASKS=1` (default on both bats), scheduled 4:00/4:05/4:10 
 
 ---
 
-## 1. System Dashboard (hub)
+## 1. Issues Dashboard (home)
 
-![System Dashboard](docs/screenshots/01-dashboard-hub.png)
-
-Landing page at `/`. Links into the main tools:
-
-| Link | Route | What it does |
-|------|-------|----------------|
-| **Unit Outage Verification Tool** | `/issues` → `/issues/watch` | Primary NOC report (lists, LEDs, command menus) |
-| **Victron VRM Checker** | `/victron` | Look up a MU/unit on Victron VRM |
-| **Outage Filter** | `/outage_filter` | Compare Mesh CSV vs Issue CSV for false positives |
-| **Recovery Email Check** | `/recovery_email` | Classify Shield NOC spreadsheet rows for outage/recovery email state |
-| **Linux Diagnostic Tool** | `/linux` | SSH diagnostic stream for a unit |
-
----
-
-## 2. Unit Outage Verification Report
-
-Start from **Unit Outage Verification Tool** → **Start ERP Issue Verification**, or open `/issues/watch` if a shared job is already running.
+Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navbar + ticket lists + stdout).
 
 ![Issues report (blurred)](docs/screenshots/02-issues-report.png)
+
+**Navbar:** **Issues Dashboard** (home) · **Recovery Email Check** (`/recovery_email`)
+
+### Moved URLs
+
+These old entry points show a short “page moved” screen and auto-redirect to `/`:
+
+| Old URL | Former tool |
+|---------|-------------|
+| `/issues` | Unit Outage Verification landing |
+| `/issues/watch` | Issues watch report |
+| `/victron` | Victron VRM Checker |
+| `/outage_filter` | Outage Filter |
+| `/linux` | Linux Diagnostic Tool |
+| `/zabbix` | Zabbix Monitor |
+
+API-style routes under `/issues/...` (validate, cameras, ping, etc.) are unchanged.
 
 ### Layout
 
@@ -97,7 +98,7 @@ Type a unit into the list filter even if it is not on the current report. Matchi
 
 ---
 
-## 3. Per-unit command menu
+## 2. Per-unit command menu
 
 Click the unit button (left of the LED) to open **Commands**.
 
@@ -190,7 +191,7 @@ These open browser tabs / redirects. They do **not** write ERP fields by themsel
 
 ---
 
-## 4. Camera launch grid
+## 3. Camera launch grid
 
 From **Cameras → Open All Cameras** (or `/issues/cameras-launch/<UNIT>`).
 
@@ -204,27 +205,9 @@ From **Cameras → Open All Cameras** (or `/issues/cameras-launch/<UNIT>`).
 
 ---
 
-## 5. Other hub tools
+## 4. Recovery Email Check
 
-### Linux Diagnostic Tool
-
-![Linux tool](docs/screenshots/07-linux-tool.png)
-
-Enter a unit → **Check** → streamed SSH diagnostic stdout.
-
-### Victron VRM Checker
-
-![Victron tool](docs/screenshots/08-victron-tool.png)
-
-Enter MU/unit → **Check** against Victron VRM APIs (`idUser` + `victron_token`).
-
-### Outage Filter
-
-![Outage Filter](docs/screenshots/09-outage-filter.png)
-
-Upload Mesh CSV + Issue CSV → **Run Filter** to classify false positives vs real outages (can take 1–3 minutes).
-
-### Recovery Email Check
+From the Issues Dashboard navbar → **Recovery Email Check** (`/recovery_email`).
 
 ![Recovery Email](docs/screenshots/10-recovery-email.png)
 

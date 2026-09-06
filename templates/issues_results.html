@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Unit Outage Verification Results</title>
+    <title>Issues Dashboard</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -9,6 +9,33 @@
             background: #0f172a;
             color: #e2e8f0;
         }
+        .app-nav {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: -8px 0 16px;
+            padding: 10px 14px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 10px;
+        }
+        .app-nav .nav-brand {
+            color: #f8fafc;
+            font-weight: 700;
+            text-decoration: none;
+            margin-right: auto;
+        }
+        .app-nav .nav-brand:hover { color: #93c5fd; }
+        .app-nav a.nav-link {
+            color: #e2e8f0;
+            text-decoration: none;
+            background: #2563eb;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .app-nav a.nav-link:hover { background: #1d4ed8; }
         [hidden] { display: none !important; }
         h1, h2 { margin-bottom: 8px; }
         .progress-wrap {
@@ -831,8 +858,13 @@
 </head>
 <body>
 
+    <nav class="app-nav" aria-label="Primary">
+        <a class="nav-brand" href="/">Issues Dashboard{% if is_sandbox %} <span style="font-weight:500;color:#93c5fd;">(Sandbox)</span>{% endif %}</a>
+        <a class="nav-link" href="/recovery_email">Recovery Email Check</a>
+    </nav>
+
     <div class="layout header-row">
-        <h1>Unit Outage Verification Report{% if is_sandbox %} <span style="font-size:16px;color:#93c5fd;">(Sandbox)</span>{% endif %}</h1>
+        <h1>Issues Dashboard{% if is_sandbox %} <span style="font-size:16px;color:#93c5fd;">(Sandbox)</span>{% endif %}</h1>
         <div class="ticket-counters">
             <div class="resolved-counter" id="tickets_resolved">Tickets resolved today: 0</div>
             <div class="worked-counter" id="tickets_worked">Tickets worked: 0</div>
@@ -844,7 +876,7 @@
     <p class="sandbox-banner" id="sandbox_banner">
         Sandbox on port {{ work_tool_port }} — same ERP credentials, separate resolved/upload data,
         no 4:00 AM jobs, and no automatic ERP polling. Use Pull Issues to refresh manually.
-        Live: <a href="http://127.0.0.1:5000/issues" style="color:#bfdbfe;">http://127.0.0.1:5000/issues</a>
+        Live: <a href="http://127.0.0.1:5000/" style="color:#bfdbfe;">http://127.0.0.1:5000/</a>
     </p>
     {% elif automation_paused %}
     <p class="automation-paused-banner" id="automation_paused_banner">
@@ -869,8 +901,7 @@
             </div>
             <div class="console" id="console"></div>
             <div class="nav-links">
-                <a href="/issues">Run again</a> |
-                <a href="/">Home</a>
+                <a href="/">Refresh dashboard</a>
             </div>
         </div>
 
@@ -3643,6 +3674,9 @@
                             if (isFull) {
                                 entry.ledStatus = data.led_status || entry.ledStatus;
                                 entry.computeLabel = data.compute_label || entry.computeLabel;
+                                if (data.speaker_up === true || data.speaker_up === false) {
+                                    entry.speakerUp = data.speaker_up;
+                                }
                                 consoleLines.push(
                                     "Full validate "
                                         + entry.unit
@@ -3651,6 +3685,18 @@
                                         + (data.multi_down ? " (multi-down)" : "")
                                 );
                             } else {
+                                const category = data.category === "stale_vpn"
+                                    ? "truly_down"
+                                    : (data.category || "");
+                                const connectivityLed = {
+                                    false_positives: "green",
+                                    nuc_down: "yellow",
+                                    scrypted_outage: "yellow",
+                                    truly_down: "red",
+                                };
+                                if (connectivityLed[category]) {
+                                    entry.ledStatus = connectivityLed[category];
+                                }
                                 consoleLines.push(
                                     "Revalidated "
                                         + entry.unit
@@ -3660,6 +3706,7 @@
                             }
                             renderConsole(true);
                             statusEl.textContent = label + " complete for " + entry.unit;
+                            propagateLedFromEntry(entry);
                         })
                         .catch(function (error) {
                             window.alert(label + " failed: " + (error.message || error));
@@ -5337,6 +5384,82 @@
             return entry;
         }
 
+        function normalizeUnitKey(unit) {
+            return String(unit || "").trim().toUpperCase();
+        }
+
+        function eachMatchingUnitEntry(unit, fn) {
+            const key = normalizeUnitKey(unit);
+            const affected = [];
+            if (!key) {
+                return affected;
+            }
+            listIds.forEach(function (listId) {
+                (listState[listId] || []).forEach(function (entry) {
+                    if (normalizeUnitKey(entry.unit) !== key) {
+                        return;
+                    }
+                    fn(entry, listId);
+                    if (affected.indexOf(listId) === -1) {
+                        affected.push(listId);
+                    }
+                });
+            });
+            return affected;
+        }
+
+        // Same unit can appear on multiple tickets/lists; keep compute LED (and
+        // other unit-level lights) in sync when one occurrence is validated.
+        function propagateUnitLedFields(unit, fields, options) {
+            const patch = fields || {};
+            const skipRender = !!(options && options.skipRender);
+            const affected = eachMatchingUnitEntry(unit, function (entry) {
+                if (patch.ledStatus) {
+                    entry.ledStatus = patch.ledStatus;
+                }
+                if (patch.computeLabel) {
+                    entry.computeLabel = patch.computeLabel;
+                }
+                if (patch.speakerUp === true || patch.speakerUp === false) {
+                    entry.speakerUp = patch.speakerUp;
+                }
+                if (patch.panelFisheyeUp === true || patch.panelFisheyeUp === false) {
+                    entry.panelFisheyeUp = patch.panelFisheyeUp;
+                }
+                if (patch.cameraViewStatus) {
+                    entry.cameraViewStatus = patch.cameraViewStatus;
+                }
+                if (patch.connectivityKind) {
+                    entry.connectivityKind = patch.connectivityKind;
+                }
+                if (patch.fullValidatePriority != null) {
+                    entry.fullValidatePriority = patch.fullValidatePriority;
+                }
+                saveEntryState(entry);
+            });
+            if (!skipRender) {
+                affected.forEach(function (listId) {
+                    renderList(listId);
+                });
+            }
+            return affected;
+        }
+
+        function propagateLedFromEntry(entry, options) {
+            if (!entry || !entry.unit) {
+                return [];
+            }
+            return propagateUnitLedFields(entry.unit, {
+                ledStatus: entry.ledStatus,
+                computeLabel: entry.computeLabel,
+                speakerUp: entry.speakerUp,
+                panelFisheyeUp: entry.panelFisheyeUp,
+                cameraViewStatus: entry.cameraViewStatus,
+                connectivityKind: entry.connectivityKind,
+                fullValidatePriority: entry.fullValidatePriority,
+            }, options);
+        }
+
         function collectLiveLedState() {
             const live = {};
             listIds.forEach(function (id) {
@@ -5695,6 +5818,10 @@
             };
             if (moveLed[toId]) {
                 entry.ledStatus = moveLed[toId];
+            }
+            if (entry.ledStatus) {
+                propagateLedFromEntry(entry, { skipRender: true });
+            } else {
                 saveEntryState(entry);
             }
             if (fromId !== toId) {
@@ -5704,9 +5831,16 @@
                 }
                 listState[toId].push(entry);
                 sortListEntries(listState[toId], toId);
-                renderList(fromId);
             }
-            renderList(toId);
+            const affectedLists = {};
+            affectedLists[fromId] = true;
+            affectedLists[toId] = true;
+            eachMatchingUnitEntry(entry.unit, function (_other, listId) {
+                affectedLists[listId] = true;
+            });
+            Object.keys(affectedLists).forEach(function (listId) {
+                renderList(listId);
+            });
             updateTicketCounts();
         }
 
@@ -5735,7 +5869,7 @@
             if (fields.compute_label) {
                 entry.computeLabel = fields.compute_label;
             }
-            saveEntryState(entry);
+            propagateLedFromEntry(entry, { skipRender: true });
         }
 
         function findListEntry(listId, move) {
@@ -5756,7 +5890,7 @@
                 applyRevalidateFields(entry, move.fields);
                 if (move.to === "false_positives") {
                     entry.ledStatus = "green";
-                    saveEntryState(entry);
+                    propagateLedFromEntry(entry, { skipRender: true });
                 }
                 if (move.to && move.to !== fromId && listState[move.to]) {
                     const sourceIndex = listState[fromId].indexOf(entry);
@@ -5766,6 +5900,9 @@
                     listState[move.to].push(entry);
                     affected.add(move.to);
                 }
+                eachMatchingUnitEntry(entry.unit, function (_other, listId) {
+                    affected.add(listId);
+                });
             });
             affected.forEach(function (id) {
                 sortListEntries(listState[id], id);
@@ -6304,21 +6441,6 @@
                                             data.label || entry.computeLabel;
                                         entry.ledStatus =
                                             data.compute_up === true ? "green" : "yellow";
-                                        if (computeLed) {
-                                            computeLed.classList.toggle(
-                                                "is-up",
-                                                data.compute_up === true
-                                            );
-                                            computeLed.classList.toggle(
-                                                "is-warning",
-                                                data.compute_up !== true
-                                            );
-                                            computeLed.title = data.compute_up === true
-                                                ? entry.computeLabel + " is up"
-                                                : entry.computeLabel
-                                                    + " is still unreachable";
-                                        }
-                                        saveEntryState(entry);
                                         consoleLines.push(
                                             "Validate (Quick) "
                                                 + entry.unit
@@ -6345,6 +6467,7 @@
                                                 + entry.unit
                                         );
                                         renderConsole(true);
+                                        propagateLedFromEntry(entry);
                                         return;
                                     }
                                     if (data.output) {
@@ -6390,8 +6513,7 @@
                                                     + (data.multi_down ? " (multi-down)" : "")
                                             );
                                             renderConsole(true);
-                                            saveEntryState(entry);
-                                            renderList(id);
+                                            propagateLedFromEntry(entry);
                                             return;
                                         }
                                         if (entry.isNucDown && (
@@ -6406,8 +6528,7 @@
                                                     + " (Nuc Down — staying in offline compute)"
                                             );
                                             renderConsole(true);
-                                            saveEntryState(entry);
-                                            renderList(id);
+                                            propagateLedFromEntry(entry);
                                             return;
                                         }
                                         const moveTo = data.move_to
@@ -6424,7 +6545,6 @@
                                                     + (listHeadingLabels[moveTo] || moveTo)
                                             );
                                             renderConsole(true);
-                                            saveEntryState(entry);
                                             moveEntryToList(entry, id, moveTo);
                                             return;
                                         }
@@ -6437,8 +6557,7 @@
                                                 + " (staying in list)"
                                         );
                                         renderConsole(true);
-                                        saveEntryState(entry);
-                                        renderList(id);
+                                        propagateLedFromEntry(entry);
                                         return;
                                     }
 
@@ -6463,8 +6582,7 @@
                                                 + category.replace(/_/g, " ")
                                         );
                                         renderConsole(true);
-                                        saveEntryState(entry);
-                                        renderList(id);
+                                        propagateLedFromEntry(entry);
                                         return;
                                     }
                                     if (id === "on_hold") {
@@ -6479,8 +6597,7 @@
                                                 + category.replace(/_/g, " ")
                                         );
                                         renderConsole(true);
-                                        saveEntryState(entry);
-                                        renderList(id);
+                                        propagateLedFromEntry(entry);
                                         return;
                                     }
                                     if (connectivityLed[category]) {
@@ -6493,7 +6610,6 @@
                                             + category.replace(/_/g, " ")
                                     );
                                     renderConsole(true);
-                                    saveEntryState(entry);
                                     moveEntryToList(entry, id, category);
                                 })
                                 .catch(function (error) {
@@ -7434,17 +7550,7 @@
                             .then(function (data) {
                                 entry.cameraViewStatus = data.status;
                                 entry.computeLabel = data.compute_label || entry.computeLabel;
-                                if (computeLed) {
-                                    computeLed.classList.toggle("is-up", data.status === "green");
-                                    computeLed.classList.toggle("is-warning", data.status === "yellow");
-                                    computeLed.classList.toggle("is-down", data.status === "red");
-                                    computeLed.title = data.status === "green"
-                                        ? "Router and " + data.compute_label + " are reachable"
-                                        : (data.status === "yellow"
-                                            ? "Router is up and " + data.compute_label + " is down"
-                                            : "Unit is down");
-                                }
-                                saveEntryState(entry);
+                                entry.ledStatus = data.status;
                                 consoleLines.push("Checking " + entry.unit + "'s router...");
                                 if (data.router_output) {
                                     data.router_output.split(/\r?\n/).forEach(function (line) {
@@ -7470,6 +7576,7 @@
                                         + data.status
                                 );
                                 renderConsole(true);
+                                propagateLedFromEntry(entry);
                             })
                             .catch(function (error) {
                                 window.alert("Camera View validation failed: " + (error.message || error));
