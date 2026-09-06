@@ -1200,6 +1200,8 @@
     <script>
         const jobId = {{ job_id|tojson }};
         const workTLD = {{ work_tld|tojson }};
+        const meshBaseUrl = {{ mesh_base_url|default("https://meshcentral.sentracam.com/login?filter=")|tojson }};
+        const raindanceBaseUrl = {{ raindance_base_url|default("https://raindance.sentracam.net/unit/")|tojson }};
         const automationPaused = {{ automation_paused|default(false)|tojson }};
         const consoleEl = document.getElementById("console");
         const consoleSearchEl = document.getElementById("console_search");
@@ -3682,7 +3684,7 @@
 
             const meshBtn = document.createElement("a");
             meshBtn.className = "action-btn";
-            meshBtn.href = "https://meshcentral.sentracam.com/login?filter="
+            meshBtn.href = meshBaseUrl
                 + encodeURIComponent(entry.unit);
             meshBtn.target = "_blank";
             meshBtn.rel = "noopener noreferrer";
@@ -3691,7 +3693,7 @@
 
             const raindanceBtn = document.createElement("a");
             raindanceBtn.className = "action-btn";
-            raindanceBtn.href = "https://raindance.sentracam.net/unit/"
+            raindanceBtn.href = raindanceBaseUrl
                 + encodeURIComponent(entry.unit);
             raindanceBtn.target = "_blank";
             raindanceBtn.rel = "noopener noreferrer";
@@ -6175,7 +6177,7 @@
                     if (entry.unit) {
                         const raindanceBtn = document.createElement("a");
                         raindanceBtn.className = "action-btn";
-                        raindanceBtn.href = "https://raindance.sentracam.net/unit/"
+                        raindanceBtn.href = raindanceBaseUrl
                             + encodeURIComponent(entry.unit);
                         raindanceBtn.target = "_blank";
                         raindanceBtn.rel = "noopener noreferrer";
@@ -6184,7 +6186,7 @@
 
                         const meshBtn = document.createElement("a");
                         meshBtn.className = "action-btn";
-                        meshBtn.href = "https://meshcentral.sentracam.com/login?filter="
+                        meshBtn.href = meshBaseUrl
                             + encodeURIComponent(entry.unit);
                         meshBtn.target = "_blank";
                         meshBtn.rel = "noopener noreferrer";
@@ -6529,7 +6531,7 @@
                 if (entry.unit) {
                     const meshBtn = document.createElement("a");
                     meshBtn.className = "action-btn";
-                    meshBtn.href = "https://meshcentral.sentracam.com/login?filter="
+                    meshBtn.href = meshBaseUrl
                         + encodeURIComponent(entry.unit);
                     meshBtn.target = "_blank";
                     meshBtn.rel = "noopener noreferrer";
@@ -6549,7 +6551,7 @@
                     if (entry.unit) {
                         const raindanceBtn = document.createElement("a");
                         raindanceBtn.className = "action-btn";
-                        raindanceBtn.href = "https://raindance.sentracam.net/unit/"
+                        raindanceBtn.href = raindanceBaseUrl
                             + encodeURIComponent(entry.unit);
                         raindanceBtn.target = "_blank";
                         raindanceBtn.rel = "noopener noreferrer";

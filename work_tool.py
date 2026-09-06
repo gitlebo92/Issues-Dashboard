@@ -68,6 +68,28 @@ def work_tld():
     tld = tld.replace("https://", "").replace("http://", "").strip()
     return tld.split("/")[0].lstrip(".")
 
+def _env_url(name, default=""):
+    """Return a configured absolute URL (no trailing slash), or default."""
+    raw = (os.getenv(name) or "").strip().strip('"').strip("'")
+    if not raw:
+        raw = default
+    return str(raw).rstrip("/")
+
+def meshcentral_base_url():
+    """MeshCentral login base, e.g. https://meshcentral.example.com/login?filter="""
+    return _env_url("MESH_BASE_URL", "https://meshcentral.sentracam.com/login?filter=")
+
+def raindance_base_url():
+    """Raindance unit page base, e.g. https://raindance.example.net/unit/"""
+    return _env_url("RAINDANCE_BASE_URL", "https://raindance.sentracam.net/unit/")
+
+def art_base_url():
+    """ART report endpoint (see art_get.py)."""
+    return _env_url(
+        "ART_DATA_URL",
+        "https://art.sentracam.com/art/selectReportParameters?reportId=152",
+    )
+
 def erp_base_url():
     """ERP host at https://erp.{workTLD}."""
     tld = work_tld()

@@ -1,11 +1,18 @@
 import os
+
 import requests
+from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
+
+load_dotenv()
 
 username = os.getenv("myemail")
 password = os.getenv("mypass")
 
-ART_DATA_URL = "https://art.sentracam.com/art/selectReportParameters?reportId=152"
+ART_DATA_URL = (
+    (os.getenv("ART_DATA_URL") or "").strip().strip('"').strip("'")
+    or "https://art.sentracam.com/art/selectReportParameters?reportId=152"
+)
 
 payload = {
     "reportFormat": "csv"

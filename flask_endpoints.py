@@ -754,6 +754,8 @@ def issues_watch_shared():
         "issues_results.html",
         job_id=job_id,
         work_tld=work_tool.work_tld(),
+        mesh_base_url=work_tool.meshcentral_base_url(),
+        raindance_base_url=work_tool.raindance_base_url(),
         automation_paused=automated_tasks_paused(),
     )
 
@@ -765,6 +767,8 @@ def issues_watch(job_id):
         "issues_results.html",
         job_id=job_id,
         work_tld=work_tool.work_tld(),
+        mesh_base_url=work_tool.meshcentral_base_url(),
+        raindance_base_url=work_tool.raindance_base_url(),
         automation_paused=automated_tasks_paused(),
     )
 

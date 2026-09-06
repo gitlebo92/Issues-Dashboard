@@ -2,14 +2,21 @@
 
 Flask dashboard for NOC outage verification: ERP issue validation, unit health checks, command menus (Open, Linux, Switch), and stdout streaming.
 
+## Setup (coworkers)
+
+1. Get access to the **private** GitHub repo from the owner.
+2. Clone the repo.
+3. Copy `.env.example` → `.env` and fill in credentials (ERP, Victron, cameras, SSH, etc.).
+4. **Never commit `.env`** or netsheet/upload CSVs.
+5. Install Python deps if needed (`pip install -r requirements.txt` when present, or the packages imported by `flask_endpoints.py` / `work_tool.py`).
+6. Place local data files as needed (`net_sheet.csv` is gitignored — copy from your existing install).
+
 Start from the project directory:
 
 ```bat
 run_live.bat      rem http://127.0.0.1:5000 — daily use
 run_sandbox.bat   rem http://127.0.0.1:5001 — dev/test (auto-reload)
 ```
-
-Copy `.env.example` to `.env` and fill in credentials before first run.
 
 ## Live vs sandbox
 
@@ -35,7 +42,7 @@ Manual actions (Pull Issues, validate, Open menus, reboot NUC/SNUC, etc.) still 
 
 ### Environment variables
 
-Set in `.bat` files or `.env`:
+Set in `.bat` files or `.env` — see `.env.example` for the full list.
 
 | Variable | Description |
 |----------|-------------|
@@ -44,8 +51,18 @@ Set in `.bat` files or `.env`:
 | `WORK_TOOL_DATA_DIR` | Optional; sandbox defaults to `data/sandbox` |
 | `WORK_TOOL_URL` | Optional; camera launch base URL |
 | `PAUSE_AUTOMATED_TASKS` | `1` to disable scheduled jobs and auto ERP poll |
+| `workTLD` | Company domain used for ERP/Shield/Scrypted URLs |
+| `MESH_BASE_URL` | Optional MeshCentral filter URL prefix |
+| `RAINDANCE_BASE_URL` | Optional Raindance unit URL prefix |
+| `SENTRA_NETWORK_TOOL_V19_DIR` | Optional path to `Sentra_Network_toolv19` |
 
 **PVE / NUC reboot credentials:**
 - SNUC (PVE host SSH): `pvesshuser` + `pvepass` — Linux user only (`root`), not `root@pam`
 - NUC SSH: `nucuser` + `nucpass`
 - PVE web UI: `pveuser=root@pam` + `pvepass`
+
+## Secrets policy
+
+- Commit `.env.example` only.
+- Do not commit `.env`, `net_sheet.csv`, `uploads/`, or exported CSVs.
+- Rotate any token that was ever committed to an older clone of this project.

@@ -9,10 +9,20 @@ build/
 
 # Sensitive / generated
 .env
+.env.local
+*.pem
+*.key
 map_sheet.csv
 net_sheet.csv
 resolved_today.json
 data/sandbox/
+uploads/
+# Local operational exports (do not publish)
+false_mu.csv
+filtered_mesh_vpn_test.csv
+filtered_mesh_vpn.csv
+nuc_memory.csv
+*.xlsx
 
 # OS junk
 Thumbs.db
