@@ -55,6 +55,25 @@ def automated_tasks_paused():
     value = str(os.getenv("PAUSE_AUTOMATED_TASKS") or "").strip().lower()
     return value in ("1", "true", "yes", "on")
 
+
+def erp_writes_disabled():
+    """
+    When True, ERP-mutating dashboard actions stay visible but disabled,
+    and matching POST routes return 403.
+    Controlled by DISABLE_ERP_WRITES in .env (default: disabled / "1").
+    Set DISABLE_ERP_WRITES=0 to allow writes.
+    """
+    load_dotenv(ENV_PATH, override=True)
+    value = str(os.getenv("DISABLE_ERP_WRITES", "1")).strip().lower()
+    return value in ("1", "true", "yes", "on", "")
+
+
+def _erp_writes_blocked_response():
+    return jsonify({
+        "ok": False,
+        "error": "ERP writes are disabled (set DISABLE_ERP_WRITES=0 in .env to enable).",
+    }), 403
+
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -743,6 +762,7 @@ def _render_issues_dashboard(job_id=None):
         mesh_base_url=work_tool.meshcentral_base_url(),
         raindance_base_url=work_tool.raindance_base_url(),
         automation_paused=automated_tasks_paused(),
+        erp_writes_disabled=erp_writes_disabled(),
     )
 
 
@@ -1483,6 +1503,8 @@ def issues_ping_pve(unit):
 
 @app.route("/issues/set-fields/<preset_id>/<issue_id>", methods=["POST"])
 def issues_set_fields(preset_id, issue_id):
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     unit = str(payload.get("unit") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -1614,6 +1636,12 @@ def _add_missing_components_log_lines(result, scheduled=False):
 
 
 def _run_add_missing_components(job, scheduled=False):
+    if erp_writes_disabled():
+        print(
+            "Add Missing Components/Sites skipped — "
+            "DISABLE_ERP_WRITES is enabled"
+        )
+        return {"checked": 0, "updated": [], "skipped": [], "errors": []}
     if scheduled and automated_tasks_paused():
         print(
             "Scheduled Add Missing Components/Sites skipped — "
@@ -1644,6 +1672,8 @@ def _run_add_missing_components(job, scheduled=False):
 
 @app.route("/issues/add-missing-components", methods=["POST"])
 def issues_add_missing_components():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job is None or not job.get("done") or job.get("results") is None:
         return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
@@ -1836,6 +1866,8 @@ def issues_update_patch(unit):
 
 @app.route("/issues/create-deployment-project", methods=["POST"])
 def issues_create_deployment_project():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     project_id = str(payload.get("project_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -1849,6 +1881,8 @@ def issues_create_deployment_project():
 
 @app.route("/issues/create-termination-project", methods=["POST"])
 def issues_create_termination_project():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     issue_id = str(payload.get("issue_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -1862,6 +1896,8 @@ def issues_create_termination_project():
 
 @app.route("/issues/create-relocation-project", methods=["POST"])
 def issues_create_relocation_project():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     issue_id = str(payload.get("issue_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -1887,6 +1923,8 @@ def issues_lookup_site():
 
 @app.route("/issues/terminate-site", methods=["POST"])
 def issues_terminate_site():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     site_id = str(payload.get("site_id") or "").strip()
@@ -1900,6 +1938,8 @@ def issues_terminate_site():
 
 @app.route("/issues/activate-site", methods=["POST"])
 def issues_activate_site():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     site_id = str(payload.get("site_id") or "").strip()
@@ -1913,6 +1953,8 @@ def issues_activate_site():
 
 @app.route("/issues/clear-mu-coordinates", methods=["POST"])
 def issues_clear_mu_coordinates():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     unit = str(payload.get("unit") or "").strip()
@@ -1927,6 +1969,8 @@ def issues_clear_mu_coordinates():
 
 @app.route("/issues/clear-mu-site", methods=["POST"])
 def issues_clear_mu_site():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     unit = str(payload.get("unit") or "").strip()
@@ -1941,6 +1985,8 @@ def issues_clear_mu_site():
 
 @app.route("/issues/refurbish-projects/preview", methods=["POST"])
 def issues_refurbish_projects_preview():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     unit = str(payload.get("unit") or "").strip()
@@ -1954,6 +2000,8 @@ def issues_refurbish_projects_preview():
 
 @app.route("/issues/refurbish-projects", methods=["POST"])
 def issues_refurbish_projects():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     subject = str(payload.get("subject") or "").strip()
     unit = str(payload.get("unit") or "").strip()
@@ -1967,6 +2015,8 @@ def issues_refurbish_projects():
 
 @app.route("/issues/tech-checks/preview", methods=["POST"])
 def issues_tech_checks_preview():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     project_id = str(payload.get("project_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -1984,6 +2034,8 @@ def issues_tech_checks_preview():
 
 @app.route("/issues/tech-checks", methods=["POST"])
 def issues_tech_checks():
+    if erp_writes_disabled():
+        return _erp_writes_blocked_response()
     payload = request.get_json(silent=True) or {}
     project_id = str(payload.get("project_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
@@ -2296,7 +2348,13 @@ def recovery_email_results():
 def recovery_email_watch(job_id):
     if job_id not in stream_jobs:
         return "Unknown job", 404
-    return render_template("recovery_email_results.html", job_id=job_id)
+    return render_template(
+        "recovery_email_results.html",
+        job_id=job_id,
+        work_tld=work_tool.work_tld(),
+        mesh_base_url=work_tool.meshcentral_base_url(),
+        raindance_base_url=work_tool.raindance_base_url(),
+    )
 
 @app.route("/recovery_email/stream/<job_id>", methods=["GET"])
 def recovery_email_stream(job_id):

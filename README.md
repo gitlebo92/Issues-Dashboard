@@ -4,7 +4,7 @@ Internal Flask dashboard for NOC / field ops: ERP outage verification, unit heal
 
 Screenshots below were taken from a live local instance. **Sensitive ticket text, unit IDs, customer/site names, and stdout are blurred.** Menu labels and chrome are left readable on purpose.
 
-> **Do not click ERP write actions** while exploring (Create Deployment, Terminate/Activate Site, Clear MU*, Tech Checks commit, Update Patch Version, Set Fields writes, Resolve→ERP). Everything documented as “Open / Validate / Ping / Snapshot” is read-oriented.
+> **ERP writes are disabled by default** (`DISABLE_ERP_WRITES=1`). Mutating actions stay visible but inactive (Set Fields, Create Project, Terminate/Activate Site, Clear MU, Tech Checks, Add Missing Components). **Resolve (R)** is local-only and stays enabled. Set `DISABLE_ERP_WRITES=0` only when you intentionally need writes. Open / Validate / Ping / Snapshot / cameras remain read-oriented.
 
 ---
 
@@ -29,6 +29,8 @@ run_sandbox.bat   rem http://127.0.0.1:5001 — dev/test (auto-reload)
 | `run_sandbox.bat` | http://127.0.0.1:5001 | Dev/test (own `data/sandbox/`) |
 
 With `PAUSE_AUTOMATED_TASKS=1` (default on both bats), scheduled 4:00/4:05/4:10 jobs and 30‑minute ERP polling stay off. Manual **Pull Issues**, validate, Open menus, etc. still work.
+
+With `DISABLE_ERP_WRITES=1` (default when unset), ERP-mutating actions (Set Fields, Create Project, Terminate/Activate Site, Clear MU, Tech Checks, Add Missing Components) stay visible but disabled; matching POST routes return 403. **Resolve (R)** is local-only and stays enabled. Set `DISABLE_ERP_WRITES=0` to allow writes.
 
 ---
 
@@ -61,7 +63,7 @@ API-style routes under `/issues/...` (validate, cameras, ping, etc.) are unchang
 - **Right — Lists:** Tickets grouped by category. Filter search, **All lists / One list**, **Pull Issues**, **Clear checkboxes**.
 - **Header counters:** Resolved today / Worked / Skipped (local workflow tracking).
 - **Per-row LEDs:** Green / yellow / orange / red compute (and speaker/camera LEDs where relevant).
-- **R / W / S:** Resolved / Worked / Skipped checkboxes (local UI state; Resolve can also hit ERP — treat **R** carefully).
+- **R / W / S:** Resolved / Worked / Skipped checkboxes (local UI state only; Resolve does not post to ERP).
 
 ### Issue list categories
 
@@ -86,7 +88,7 @@ Switch the toolbar dropdown from **Issues** → **Projects**.
 
 ![Projects panel (blurred)](docs/screenshots/06-projects-panel.png)
 
-Shows ERP-ish project buckets such as **Open**, **In Progress**, and **Deployment Prep**, with the same unit command menus and connectivity LEDs. **Pull Projects** refreshes project data (read). Avoid Task Controls that write (Terminate / Activate / Clear MU / Tech Checks commit).
+Shows ERP-ish project buckets such as **Open**, **In Progress**, and **Deployment Prep**, with the same unit command menus and connectivity LEDs. **Pull Projects** refreshes project data (read). Task Controls that write stay visible but disabled when `DISABLE_ERP_WRITES=1` (default).
 
 ### Same unit on multiple tickets
 
@@ -229,6 +231,18 @@ Lists use **status lights** (same LED language as Issues) next to each list name
 
 Example run (ART spreadsheet): recovery (1), initial (0), false positive (1), pending (12), up to date (7).
 
+### Per-unit command menus
+
+Each unit row has the same style of **unit command button** as the Issues Dashboard:
+
+| Menu | Actions |
+|------|---------|
+| **Validate** | Quick / Full (writes to stdout on this page) |
+| **Cameras** | Fisheye snapshot, Open All, individual cameras |
+| **Open** | Shield, ERP, Mesh, Raindance, Switch, PVE / Relay / Platform / Scrypted when available, VRM for RD units |
+
+Ticket subject from the spreadsheet is carried into the menu so Shield/ERP/VRM resolve more accurately. ERP write actions are not offered on this page.
+
 ---
 
 ## Environment variables (summary)
@@ -248,6 +262,7 @@ See `.env.example` for the full list. Common ones:
 | `MESH_BASE_URL` / `RAINDANCE_BASE_URL` | Optional Open menu bases |
 | `SENTRA_NETWORK_TOOL_V19_DIR` | Path to `Sentra_Network_toolv19` |
 | `PAUSE_AUTOMATED_TASKS` | `1` pauses schedulers / auto poll |
+| `DISABLE_ERP_WRITES` | `1` (default) leaves ERP write buttons visible but disabled; POST routes return 403. Set `0` to allow writes. Resolve (R) is local-only and stays enabled. |
 | `WORK_TOOL_ENV` / `WORK_TOOL_PORT` | live vs sandbox |
 
 ---

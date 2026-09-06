@@ -7851,6 +7851,7 @@ def check_missing_recovery_emails(report_path=None):
         )
     units_to_check = []
     unit_issue_map = {}
+    unit_meta_map = {}
     unit_email_state = {}
     back_up = []
     nuc_down = []
@@ -7892,6 +7893,15 @@ def check_missing_recovery_emails(report_path=None):
             units.append(unit)
         return units
 
+    def _remember_unit(unit, issue_id, subject):
+        if unit not in unit_issue_map:
+            unit_issue_map[unit] = issue_id
+        if unit not in unit_meta_map:
+            unit_meta_map[unit] = {
+                "unit": unit,
+                "subject": subject or "",
+            }
+
     for row in rows[header_idx + 1:]:
         if len(row) < 7:
             continue
@@ -7907,7 +7917,7 @@ def check_missing_recovery_emails(report_path=None):
             for unit in matched_units:
                 if unit not in email_status_up_to_date:
                     email_status_up_to_date.append(unit)
-                    unit_issue_map[unit] = issue_id
+                    _remember_unit(unit, issue_id, subject)
                     print(f'Email status up to date for {unit} ({issue_id}): {subject}')
             continue
 
@@ -7918,7 +7928,7 @@ def check_missing_recovery_emails(report_path=None):
         for unit in matched_units:
             if unit not in units_to_check:
                 units_to_check.append(unit)
-                unit_issue_map[unit] = issue_id
+                _remember_unit(unit, issue_id, subject)
                 unit_email_state[unit] = {
                     "has_outage_email": bool(outage_email),
                     "has_recovery_email": bool(recovery_email),
@@ -7953,11 +7963,11 @@ def check_missing_recovery_emails(report_path=None):
         if unit not in categorized:
             pending_recovery.append(unit)
 
-    needs_recovery_email = _with_ticket_links(needs_recovery_email, unit_issue_map)
-    needs_initial_email = _with_ticket_links(needs_initial_email, unit_issue_map)
-    potential_false_positive = _with_ticket_links(potential_false_positive, unit_issue_map)
-    pending_recovery = _with_ticket_links(pending_recovery, unit_issue_map)
-    email_status_up_to_date = _with_ticket_links(email_status_up_to_date, unit_issue_map)
+    needs_recovery_email = _with_ticket_links(needs_recovery_email, unit_issue_map, unit_meta_map)
+    needs_initial_email = _with_ticket_links(needs_initial_email, unit_issue_map, unit_meta_map)
+    potential_false_positive = _with_ticket_links(potential_false_positive, unit_issue_map, unit_meta_map)
+    pending_recovery = _with_ticket_links(pending_recovery, unit_issue_map, unit_meta_map)
+    email_status_up_to_date = _with_ticket_links(email_status_up_to_date, unit_issue_map, unit_meta_map)
 
     _print_linked_units(
         "Needs recovery email (outage email sent, unit back up):",

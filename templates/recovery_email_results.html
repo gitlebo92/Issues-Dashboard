@@ -64,13 +64,15 @@
             background: #1e293b;
             border-radius: 8px;
             padding: 16px;
+            overflow: visible;
         }
         .panel ul {
             margin: 8px 0 0;
             padding-left: 0;
             list-style: none;
+            overflow: visible;
         }
-        .list-block { margin-top: 18px; }
+        .list-block { margin-top: 18px; overflow: visible; }
         .list-block:first-child { margin-top: 0; }
         .list-heading {
             display: flex;
@@ -99,18 +101,33 @@
         .highlight-pending .title { color: #38bdf8; }
         .highlight-uptodate .title { color: #4ade80; }
         .ticket-row {
-            display: flex;
-            align-items: center;
+            display: grid;
+            grid-template-columns: auto auto minmax(0, 1fr);
             gap: 8px;
+            align-items: start;
             padding: 4px 0;
             border-bottom: 1px solid #334155;
+            position: relative;
+            z-index: 0;
+            overflow: visible;
         }
         .ticket-row:last-child { border-bottom: none; }
+        .ticket-row.menu-open { z-index: 50; }
         .ticket-row .status-led {
             width: 10px;
             height: 10px;
+            margin-top: 8px;
         }
-        .ticket-label { color: #e2e8f0; }
+        .ticket-label {
+            color: #e2e8f0;
+            min-width: 0;
+            padding-top: 4px;
+        }
+        .ticket-row-actions {
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+        }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
         .count-badge {
@@ -119,6 +136,124 @@
             font-weight: 600;
         }
         .footer-links { margin-top: 16px; }
+        .action-btn {
+            display: inline-block;
+            background: #334155;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .action-btn:hover { background: #475569; color: #f8fafc; }
+        .action-btn:disabled,
+        .action-btn.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .command-menu {
+            position: relative;
+            flex-shrink: 0;
+            z-index: 1;
+        }
+        .command-menu[open] { z-index: 400; }
+        .command-menu summary {
+            list-style: none;
+            background: #334155;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .command-menu summary::-webkit-details-marker { display: none; }
+        .command-menu summary::after {
+            content: " ▾";
+            font-size: 10px;
+        }
+        .command-menu[open] summary { background: #475569; }
+        .command-menu-items {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 4px);
+            z-index: 2000;
+            min-width: 180px;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px;
+            background: #0f172a;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            box-shadow: 0 8px 24px rgba(2, 6, 23, 0.65);
+        }
+        .command-menu-items .action-btn {
+            display: block;
+            width: 100%;
+            text-align: left;
+            box-sizing: border-box;
+        }
+        .command-menu-context {
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid #334155;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .command-menu-context strong {
+            color: #e2e8f0;
+            display: block;
+        }
+        .command-menu-context span {
+            color: #94a3b8;
+            display: block;
+            margin-top: 2px;
+        }
+        .command-submenu { position: relative; }
+        .command-submenu > summary {
+            list-style: none;
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+            text-align: left;
+        }
+        .command-submenu > summary::-webkit-details-marker { display: none; }
+        .command-submenu > summary::after {
+            content: " ▸";
+            font-size: 10px;
+            float: right;
+        }
+        .command-submenu[open] > summary { background: #334155; }
+        .command-submenu-items {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin-top: 4px;
+            padding: 4px;
+            background: #020617;
+            border: 1px solid #334155;
+            border-radius: 4px;
+        }
+        .camera-launch-list {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
     </style>
 </head>
 <body>
@@ -197,9 +332,785 @@
 
     <script>
         const jobId = {{ job_id|tojson }};
+        const workTLD = {{ work_tld|default("")|tojson }};
+        const meshBaseUrl = {{ mesh_base_url|default("https://meshcentral.sentracam.com/login?filter=")|tojson }};
+        const raindanceBaseUrl = {{ raindance_base_url|default("https://raindance.sentracam.net/unit/")|tojson }};
         const consoleEl = document.getElementById("console");
         const statusEl = document.getElementById("status");
         const source = new EventSource("/recovery_email/stream/" + jobId);
+
+        function logLine(line) {
+            if (!line) {
+                return;
+            }
+            consoleEl.textContent += line + "\n";
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        function makeEntry(item) {
+            const isObject = typeof item === "object" && item !== null;
+            return {
+                unit: isObject ? (item.unit || "") : String(item || ""),
+                issueId: isObject ? (item.issue_id || "") : "",
+                url: isObject ? (item.url || "") : "",
+                ticketSubject: isObject ? (item.subject || "") : "",
+                siteId: isObject ? (item.site || item.site_id || "") : "",
+                switchUrl: isObject ? (item.switch_url || "") : "",
+                fisheyeIp: isObject ? (item.fisheye_ip || "") : "",
+                hasPve: isObject ? !!item.has_pve : false,
+                hasRelay: isObject ? !!item.has_relay : false,
+                hasPlatform: isObject ? !!item.has_platform : false,
+                platformUrl: isObject ? (item.platform_url || "") : "",
+                hasScrypted: isObject ? !!item.has_scrypted : false,
+                scryptedUrl: isObject ? (item.scrypted_url || "") : "",
+                vrmMu: isObject ? (item.vrm_mu || "") : "",
+                vrmUrl: isObject ? (item.vrm_url || "") : "",
+            };
+        }
+
+        function appendCommandSubmenu(parent, label) {
+            const submenu = document.createElement("details");
+            submenu.className = "command-submenu";
+            const summary = document.createElement("summary");
+            summary.textContent = label;
+            submenu.appendChild(summary);
+            const items = document.createElement("div");
+            items.className = "command-submenu-items";
+            submenu.appendChild(items);
+            parent.appendChild(submenu);
+            return items;
+        }
+
+        function unitKindFromEntry(entry) {
+            const unit = String((entry && entry.unit) || "").trim().toUpperCase();
+            if (/^MU\d+/.test(unit)) {
+                return "MU";
+            }
+            if (/^FD\d+/.test(unit)) {
+                return "FD";
+            }
+            if (/^RD\d+/.test(unit)) {
+                return "RD";
+            }
+            return "";
+        }
+
+        function attachedMuFromEntry(entry) {
+            const subject = String((entry && entry.ticketSubject) || "");
+            const kind = unitKindFromEntry(entry);
+            const paren = subject.match(/\(\s*(MU\s*\d+)\s*\)/i);
+            if (paren) {
+                return paren[1].replace(/\s+/g, "").toUpperCase();
+            }
+            const bare = subject.match(/\bMU\s*(\d{3,6})\b/i);
+            if (bare && (kind === "RD" || kind === "FD")) {
+                return "MU" + bare[1];
+            }
+            return "";
+        }
+
+        function shieldSiteHref(siteId) {
+            const site = String(siteId || "").trim();
+            if (!site || !workTLD) {
+                return "";
+            }
+            return "https://shield." + workTLD + "/site/" + encodeURIComponent(site);
+        }
+
+        function shieldComponentHref(code) {
+            const raw = String(code || "").trim();
+            if (!raw || !workTLD) {
+                return "";
+            }
+            const body = raw.toUpperCase().indexOf("SC-") === 0 ? raw.slice(3) : raw;
+            if (!body) {
+                return "";
+            }
+            return "https://shield." + workTLD + "/component/SC-"
+                + encodeURIComponent(body.replace(/\s+/g, "").toUpperCase());
+        }
+
+        function erpComponentHref(code) {
+            const raw = String(code || "").trim();
+            if (!raw || !workTLD) {
+                return "";
+            }
+            const body = raw.toUpperCase().indexOf("SC-") === 0 ? raw.slice(3) : raw;
+            if (!body) {
+                return "";
+            }
+            return "https://erp." + workTLD + "/app/component/SC-"
+                + encodeURIComponent(body.replace(/\s+/g, "").toUpperCase());
+        }
+
+        function erpSiteHref(siteId) {
+            const site = String(siteId || "").trim();
+            if (!site || !workTLD) {
+                return "";
+            }
+            return "https://erp." + workTLD + "/app/site/" + encodeURIComponent(site);
+        }
+
+        function eventRecordsHref(unit) {
+            const code = String(unit || "").trim().replace(/^SC-/i, "");
+            if (!code) {
+                return "";
+            }
+            if (!workTLD) {
+                return "/issues/event-records/" + encodeURIComponent(code);
+            }
+            const params = new URLSearchParams({
+                component: '["like","SC-' + code + '%"]',
+                creation: '["Timespan","last 7 days"]',
+            });
+            return "https://erp." + workTLD + "/app/event-record?" + params.toString();
+        }
+
+        function openSitePageHref(entry) {
+            const direct = erpSiteHref(entry && entry.siteId);
+            if (direct) {
+                return direct;
+            }
+            const unit = (entry && entry.unit) || "-";
+            let href = "/issues/site-page/" + encodeURIComponent(unit);
+            if (entry && entry.ticketSubject) {
+                href += "?subject=" + encodeURIComponent(entry.ticketSubject);
+            }
+            return href;
+        }
+
+        function appendOpenSitePageButton(openMenu, entry) {
+            const hasLookup = !!(entry && (entry.unit || entry.ticketSubject));
+            if (!hasLookup) {
+                const siteBtn = document.createElement("button");
+                siteBtn.type = "button";
+                siteBtn.className = "action-btn";
+                siteBtn.textContent = "Open Site Page";
+                siteBtn.disabled = true;
+                siteBtn.title = "No unit or project subject to resolve Site ID";
+                openMenu.appendChild(siteBtn);
+                return;
+            }
+            const siteBtn = document.createElement("a");
+            siteBtn.className = "action-btn";
+            siteBtn.href = openSitePageHref(entry);
+            siteBtn.target = "_blank";
+            siteBtn.rel = "noopener noreferrer";
+            siteBtn.textContent = "Open Site Page";
+            siteBtn.title = "Open ERP Site page";
+            openMenu.appendChild(siteBtn);
+        }
+
+        function appendOpenEventRecordsButton(openMenu, entry) {
+            if (!entry || !entry.unit) {
+                const eventsBtn = document.createElement("button");
+                eventsBtn.type = "button";
+                eventsBtn.className = "action-btn";
+                eventsBtn.textContent = "Open Event Records";
+                eventsBtn.disabled = true;
+                eventsBtn.title = "No unit on this ticket";
+                openMenu.appendChild(eventsBtn);
+                return;
+            }
+            const eventsBtn = document.createElement("a");
+            eventsBtn.className = "action-btn";
+            eventsBtn.href = eventRecordsHref(entry.unit);
+            eventsBtn.target = "_blank";
+            eventsBtn.rel = "noopener noreferrer";
+            eventsBtn.textContent = "Open Event Records";
+            eventsBtn.title = "Open ERP Event Records for SC-" + entry.unit + "% (last 7 days)";
+            openMenu.appendChild(eventsBtn);
+        }
+
+        function appendTrailerLookup(btn, entry, hrefFn) {
+            const unit = entry && entry.unit ? String(entry.unit).trim() : "";
+            const kind = unitKindFromEntry(entry);
+            if (!unit || (kind !== "RD" && kind !== "FD")) {
+                return;
+            }
+            let lookupUrl = "/issues/attached-mu/" + encodeURIComponent(unit);
+            if (entry.ticketSubject) {
+                lookupUrl += "?subject=" + encodeURIComponent(entry.ticketSubject);
+            }
+            fetch(lookupUrl)
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    return response.json();
+                })
+                .then(function (data) {
+                    const mu = data && data.mu ? String(data.mu) : "";
+                    const url = hrefFn(mu);
+                    if (!mu || !url || !btn.parentNode) {
+                        return;
+                    }
+                    const link = document.createElement("a");
+                    link.className = "action-btn";
+                    link.href = url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    link.textContent = "Open Trailer Component";
+                    link.title = url;
+                    btn.parentNode.replaceChild(link, btn);
+                })
+                .catch(function () {
+                    // Keep disabled "No trailer attached".
+                });
+        }
+
+        function appendShieldMenu(openMenu, entry) {
+            const shieldMenu = appendCommandSubmenu(openMenu, "Shield");
+            const unit = entry && entry.unit ? String(entry.unit).trim() : "";
+            const kind = unitKindFromEntry(entry);
+
+            if (unit) {
+                const siteBtn = document.createElement("a");
+                siteBtn.className = "action-btn";
+                const directShield = shieldSiteHref(entry.siteId);
+                siteBtn.href = directShield || (
+                    "/issues/shield/" + encodeURIComponent(unit)
+                    + (entry.ticketSubject
+                        ? ("?subject=" + encodeURIComponent(entry.ticketSubject))
+                        : "")
+                );
+                siteBtn.target = "_blank";
+                siteBtn.rel = "noopener noreferrer";
+                siteBtn.textContent = "Open Site";
+                siteBtn.title = directShield
+                    ? ("Open Shield site " + entry.siteId)
+                    : ("Open Shield site for " + unit);
+                shieldMenu.appendChild(siteBtn);
+            } else {
+                const siteBtn = document.createElement("button");
+                siteBtn.type = "button";
+                siteBtn.className = "action-btn";
+                siteBtn.textContent = "Open Site";
+                siteBtn.disabled = true;
+                siteBtn.title = "No unit to resolve Shield site";
+                shieldMenu.appendChild(siteBtn);
+            }
+
+            if (kind === "RD" || kind === "FD" || kind === "MU") {
+                const headHref = shieldComponentHref(unit);
+                const headLabel = kind === "MU"
+                    ? "Open MU Component"
+                    : (kind === "FD" ? "Open FD Component" : "Open RD Component");
+                if (headHref) {
+                    const headBtn = document.createElement("a");
+                    headBtn.className = "action-btn";
+                    headBtn.href = headHref;
+                    headBtn.target = "_blank";
+                    headBtn.rel = "noopener noreferrer";
+                    headBtn.textContent = headLabel;
+                    headBtn.title = headHref;
+                    shieldMenu.appendChild(headBtn);
+                } else {
+                    const headBtn = document.createElement("button");
+                    headBtn.type = "button";
+                    headBtn.className = "action-btn";
+                    headBtn.textContent = headLabel;
+                    headBtn.disabled = true;
+                    headBtn.title = "workTLD is not set";
+                    shieldMenu.appendChild(headBtn);
+                }
+            }
+
+            if (kind === "MU") {
+                return;
+            }
+
+            const trailerMu = attachedMuFromEntry(entry);
+            const trailerHref = trailerMu ? shieldComponentHref(trailerMu) : "";
+            if (trailerHref) {
+                const trailerBtn = document.createElement("a");
+                trailerBtn.className = "action-btn";
+                trailerBtn.href = trailerHref;
+                trailerBtn.target = "_blank";
+                trailerBtn.rel = "noopener noreferrer";
+                trailerBtn.textContent = "Open Trailer Component";
+                trailerBtn.title = trailerHref;
+                shieldMenu.appendChild(trailerBtn);
+                return;
+            }
+
+            const trailerBtn = document.createElement("button");
+            trailerBtn.type = "button";
+            trailerBtn.className = "action-btn";
+            trailerBtn.textContent = "Open Trailer Component";
+            trailerBtn.disabled = true;
+            trailerBtn.title = "No trailer attached";
+            shieldMenu.appendChild(trailerBtn);
+            appendTrailerLookup(trailerBtn, entry, shieldComponentHref);
+        }
+
+        function appendErpMenu(openMenu, entry) {
+            const erpMenu = appendCommandSubmenu(openMenu, "ERP");
+            const unit = entry && entry.unit ? String(entry.unit).trim() : "";
+            const kind = unitKindFromEntry(entry);
+
+            appendOpenEventRecordsButton(erpMenu, entry);
+            appendOpenSitePageButton(erpMenu, entry);
+
+            if (kind === "RD" || kind === "FD" || kind === "MU") {
+                const headHref = erpComponentHref(unit);
+                const headLabel = kind === "MU"
+                    ? "Open MU Component"
+                    : (kind === "FD" ? "Open FD Component" : "Open RD Component");
+                if (headHref) {
+                    const headBtn = document.createElement("a");
+                    headBtn.className = "action-btn";
+                    headBtn.href = headHref;
+                    headBtn.target = "_blank";
+                    headBtn.rel = "noopener noreferrer";
+                    headBtn.textContent = headLabel;
+                    headBtn.title = headHref;
+                    erpMenu.appendChild(headBtn);
+                } else {
+                    const headBtn = document.createElement("button");
+                    headBtn.type = "button";
+                    headBtn.className = "action-btn";
+                    headBtn.textContent = headLabel;
+                    headBtn.disabled = true;
+                    headBtn.title = "workTLD is not set";
+                    erpMenu.appendChild(headBtn);
+                }
+            }
+
+            if (kind === "MU") {
+                return;
+            }
+
+            const trailerMu = attachedMuFromEntry(entry);
+            const trailerHref = trailerMu ? erpComponentHref(trailerMu) : "";
+            if (trailerHref) {
+                const trailerBtn = document.createElement("a");
+                trailerBtn.className = "action-btn";
+                trailerBtn.href = trailerHref;
+                trailerBtn.target = "_blank";
+                trailerBtn.rel = "noopener noreferrer";
+                trailerBtn.textContent = "Open Trailer Component";
+                trailerBtn.title = trailerHref;
+                erpMenu.appendChild(trailerBtn);
+                return;
+            }
+
+            const trailerBtn = document.createElement("button");
+            trailerBtn.type = "button";
+            trailerBtn.className = "action-btn";
+            trailerBtn.textContent = "Open Trailer Component";
+            trailerBtn.disabled = true;
+            trailerBtn.title = "No trailer attached";
+            erpMenu.appendChild(trailerBtn);
+            appendTrailerLookup(trailerBtn, entry, erpComponentHref);
+        }
+
+        function entryHasRdInSubject(entry) {
+            const subject = String((entry && entry.ticketSubject) || "");
+            const unit = String((entry && entry.unit) || "");
+            if (/\bRD\s*\d+/i.test(subject)) {
+                return true;
+            }
+            return /^RD\d+/i.test(unit);
+        }
+
+        function appendOpenVrmButton(openMenu, entry) {
+            if (!entry || !entryHasRdInSubject(entry)) {
+                return;
+            }
+            let url = entry.vrmUrl || "";
+            let searchLabel = entry.vrmMu || "";
+            if (!url) {
+                const subject = String(entry.ticketSubject || "");
+                const muMatch = subject.match(/\bMU\s*(\d{4})\b/i);
+                if (muMatch) {
+                    searchLabel = muMatch[1];
+                    url = "https://vrm.victronenergy.com/installation-overview?search="
+                        + encodeURIComponent(searchLabel);
+                } else if (entry.unit) {
+                    searchLabel = entry.unit;
+                    url = "https://vrm.victronenergy.com/installation-overview?search="
+                        + encodeURIComponent(entry.unit);
+                }
+            }
+            if (!url) {
+                return;
+            }
+            const vrmBtn = document.createElement("a");
+            vrmBtn.className = "action-btn";
+            vrmBtn.href = url;
+            vrmBtn.target = "_blank";
+            vrmBtn.rel = "noopener noreferrer";
+            vrmBtn.textContent = "Open VRM";
+            vrmBtn.title = searchLabel
+                ? ("Open VRM search for " + searchLabel)
+                : "Open VRM";
+            openMenu.appendChild(vrmBtn);
+        }
+
+        function openBlankTab(url) {
+            const win = window.open(url, "_blank");
+            if (win) {
+                try {
+                    win.opener = null;
+                } catch (err) {
+                    /* ignore */
+                }
+            }
+            return win;
+        }
+
+        function launchUnitCameras(unit, target, allTargets) {
+            if (!unit) {
+                window.alert("Open cameras failed: No unit");
+                return;
+            }
+            if (target === "all") {
+                const launchUrl = "/issues/cameras-launch/" + encodeURIComponent(unit);
+                const win = openBlankTab(launchUrl);
+                if (!win) {
+                    window.alert(
+                        "Pop-up blocked. Allow pop-ups for this site to open cameras."
+                    );
+                    return;
+                }
+                const count = (allTargets || []).length;
+                logLine(
+                    "Opened camera launcher for " + unit
+                    + (count ? (" (" + count + " cameras)") : "")
+                );
+                statusEl.textContent = "Opened cameras for " + unit;
+                return;
+            }
+            const url = "/issues/camera/"
+                + encodeURIComponent(unit)
+                + "/"
+                + encodeURIComponent(target);
+            const win = openBlankTab(url);
+            if (!win) {
+                window.alert(
+                    "Pop-up blocked. Allow pop-ups for this site to open cameras."
+                );
+                return;
+            }
+            logLine("Opened camera " + target + " for " + unit);
+            statusEl.textContent = "Opened camera " + target + " for " + unit;
+        }
+
+        function appendCamerasCommandMenu(commandItems, entry) {
+            if (!entry || !entry.unit) {
+                return;
+            }
+            const camerasMenu = appendCommandSubmenu(commandItems, "Cameras");
+            const submenu = camerasMenu.parentElement;
+            if (submenu) {
+                submenu.addEventListener("click", function (event) {
+                    event.stopPropagation();
+                });
+            }
+
+            const fishBtn = document.createElement("a");
+            fishBtn.className = "action-btn";
+            if (!entry.fisheyeIp) {
+                const disabledFish = document.createElement("button");
+                disabledFish.type = "button";
+                disabledFish.className = "action-btn";
+                disabledFish.textContent = "Fisheye Snapshot";
+                disabledFish.disabled = true;
+                disabledFish.title = "No fisheye IP in net sheet";
+                camerasMenu.appendChild(disabledFish);
+            } else {
+                fishBtn.href = "/issues/fisheye/" + encodeURIComponent(entry.unit);
+                fishBtn.target = "_blank";
+                fishBtn.rel = "noopener noreferrer";
+                fishBtn.textContent = "Fisheye Snapshot";
+                camerasMenu.appendChild(fishBtn);
+            }
+
+            let availableCameraTargets = [];
+            const allBtn = document.createElement("button");
+            allBtn.type = "button";
+            allBtn.className = "action-btn";
+            allBtn.textContent = "Open All Cameras";
+            allBtn.disabled = true;
+            allBtn.title = "Loading camera list...";
+            allBtn.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                launchUnitCameras(entry.unit, "all", availableCameraTargets);
+            });
+            camerasMenu.appendChild(allBtn);
+
+            const individualWrap = document.createElement("div");
+            individualWrap.className = "camera-launch-list";
+            camerasMenu.appendChild(individualWrap);
+
+            if (!submenu) {
+                return;
+            }
+            submenu.addEventListener("toggle", function () {
+                if (!submenu.open || individualWrap.dataset.loaded === "1") {
+                    return;
+                }
+                individualWrap.textContent = "Loading cameras...";
+                fetch("/issues/cameras/" + encodeURIComponent(entry.unit))
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        individualWrap.innerHTML = "";
+                        const cameras = data.cameras || [];
+                        if (!cameras.length) {
+                            const emptyBtn = document.createElement("button");
+                            emptyBtn.type = "button";
+                            emptyBtn.className = "action-btn";
+                            emptyBtn.textContent = "No cameras in net sheet";
+                            emptyBtn.disabled = true;
+                            individualWrap.appendChild(emptyBtn);
+                            allBtn.title = "No camera IPs configured for this unit";
+                            return;
+                        }
+                        individualWrap.dataset.loaded = "1";
+                        availableCameraTargets = cameras.map(function (camera) {
+                            return camera.target;
+                        });
+                        allBtn.disabled = false;
+                        allBtn.title = "Open all configured cameras in this browser";
+                        cameras.forEach(function (camera) {
+                            const cameraBtn = document.createElement("button");
+                            cameraBtn.type = "button";
+                            cameraBtn.className = "action-btn";
+                            cameraBtn.textContent = "Open " + camera.label;
+                            cameraBtn.title = camera.host
+                                + (camera.port ? (":" + camera.port) : "");
+                            cameraBtn.addEventListener("click", function (event) {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                launchUnitCameras(entry.unit, camera.target);
+                            });
+                            individualWrap.appendChild(cameraBtn);
+                        });
+                    })
+                    .catch(function (error) {
+                        individualWrap.innerHTML = "";
+                        const errorBtn = document.createElement("button");
+                        errorBtn.type = "button";
+                        errorBtn.className = "action-btn";
+                        errorBtn.textContent = "Could not load cameras";
+                        errorBtn.disabled = true;
+                        errorBtn.title = error.message || String(error);
+                        individualWrap.appendChild(errorBtn);
+                    });
+            });
+        }
+
+        function appendValidateMenu(commandItems, entry) {
+            const cliMenu = appendCommandSubmenu(commandItems, "Validate");
+
+            function appendValidateButton(label, endpoint, isFull) {
+                const validateBtn = document.createElement("button");
+                validateBtn.type = "button";
+                validateBtn.className = "action-btn";
+                validateBtn.textContent = label;
+                validateBtn.addEventListener("click", function () {
+                    validateBtn.disabled = true;
+                    validateBtn.textContent = "Validating...";
+                    fetch(endpoint + encodeURIComponent(entry.unit), { method: "POST" })
+                        .then(function (response) {
+                            return response.json().then(function (data) {
+                                if (!response.ok || !data.ok) {
+                                    throw new Error(data.error || ("HTTP " + response.status));
+                                }
+                                return data;
+                            });
+                        })
+                        .then(function (data) {
+                            if (data.output) {
+                                data.output.split(/\r?\n/).forEach(logLine);
+                            }
+                            if (isFull) {
+                                logLine(
+                                    "Full validate "
+                                        + entry.unit
+                                        + " — "
+                                        + (data.led_status || "unknown")
+                                        + (data.multi_down ? " (multi-down)" : "")
+                                );
+                            } else {
+                                logLine(
+                                    "Revalidated "
+                                        + entry.unit
+                                        + " — "
+                                        + (data.category || "unknown").replace(/_/g, " ")
+                                );
+                            }
+                            statusEl.textContent = label + " complete for " + entry.unit;
+                        })
+                        .catch(function (error) {
+                            window.alert(label + " failed: " + (error.message || error));
+                        })
+                        .finally(function () {
+                            validateBtn.disabled = false;
+                            validateBtn.textContent = label;
+                        });
+                });
+                cliMenu.appendChild(validateBtn);
+            }
+
+            appendValidateButton("Validate (Quick)", "/issues/validate-unit/", false);
+            appendValidateButton("Validate (Full)", "/issues/validate-unit-full/", true);
+        }
+
+        function populateUnitCommandMenu(commandItems, entry) {
+            appendValidateMenu(commandItems, entry);
+            appendCamerasCommandMenu(commandItems, entry);
+
+            const openMenu = appendCommandSubmenu(commandItems, "Open");
+            appendShieldMenu(openMenu, entry);
+            appendErpMenu(openMenu, entry);
+
+            const meshBtn = document.createElement("a");
+            meshBtn.className = "action-btn";
+            meshBtn.href = meshBaseUrl + encodeURIComponent(entry.unit);
+            meshBtn.target = "_blank";
+            meshBtn.rel = "noopener noreferrer";
+            meshBtn.textContent = "Open Mesh";
+            openMenu.appendChild(meshBtn);
+
+            const raindanceBtn = document.createElement("a");
+            raindanceBtn.className = "action-btn";
+            raindanceBtn.href = raindanceBaseUrl + encodeURIComponent(entry.unit);
+            raindanceBtn.target = "_blank";
+            raindanceBtn.rel = "noopener noreferrer";
+            raindanceBtn.textContent = "Open Raindance";
+            openMenu.appendChild(raindanceBtn);
+
+            if (entry.switchUrl) {
+                const switchBtn = document.createElement("a");
+                switchBtn.className = "action-btn";
+                switchBtn.href = "/issues/switch/" + encodeURIComponent(entry.unit);
+                switchBtn.target = "_blank";
+                switchBtn.rel = "noopener noreferrer";
+                switchBtn.textContent = "Open Switch";
+                openMenu.appendChild(switchBtn);
+            } else {
+                const switchBtn = document.createElement("button");
+                switchBtn.type = "button";
+                switchBtn.className = "action-btn";
+                switchBtn.textContent = "Open Switch";
+                switchBtn.disabled = true;
+                switchBtn.title = "No switch IP in net sheet";
+                openMenu.appendChild(switchBtn);
+            }
+
+            if (entry.hasPve) {
+                const pveBtn = document.createElement("a");
+                pveBtn.className = "action-btn";
+                pveBtn.href = "/issues/pve/" + encodeURIComponent(entry.unit);
+                pveBtn.target = "_blank";
+                pveBtn.rel = "noopener noreferrer";
+                pveBtn.textContent = "Open PVE";
+                openMenu.appendChild(pveBtn);
+            }
+
+            if (entry.hasPlatform) {
+                if (entry.platformUrl) {
+                    const platformBtn = document.createElement("a");
+                    platformBtn.className = "action-btn";
+                    platformBtn.href = entry.platformUrl;
+                    platformBtn.target = "_blank";
+                    platformBtn.rel = "noopener noreferrer";
+                    platformBtn.textContent = "Open Platform";
+                    openMenu.appendChild(platformBtn);
+                } else {
+                    const platformBtn = document.createElement("button");
+                    platformBtn.type = "button";
+                    platformBtn.className = "action-btn";
+                    platformBtn.textContent = "Open Platform";
+                    platformBtn.disabled = true;
+                    platformBtn.title = "No Scrypted IP in net sheet";
+                    openMenu.appendChild(platformBtn);
+                }
+            }
+
+            if (entry.hasRelay) {
+                const relayBtn = document.createElement("a");
+                relayBtn.className = "action-btn";
+                relayBtn.href = "/issues/relay/" + encodeURIComponent(entry.unit);
+                relayBtn.target = "_blank";
+                relayBtn.rel = "noopener noreferrer";
+                relayBtn.textContent = "Open Relay";
+                openMenu.appendChild(relayBtn);
+            }
+
+            if (entry.hasScrypted) {
+                if (entry.scryptedUrl) {
+                    const scryptedBtn = document.createElement("a");
+                    scryptedBtn.className = "action-btn";
+                    scryptedBtn.href = entry.scryptedUrl;
+                    scryptedBtn.target = "_blank";
+                    scryptedBtn.rel = "noopener noreferrer";
+                    scryptedBtn.textContent = "Open Scrypted";
+                    openMenu.appendChild(scryptedBtn);
+                } else {
+                    const scryptedBtn = document.createElement("button");
+                    scryptedBtn.type = "button";
+                    scryptedBtn.className = "action-btn";
+                    scryptedBtn.textContent = "Open Scrypted";
+                    scryptedBtn.disabled = true;
+                    scryptedBtn.title = "No Scrypted URL available for this unit";
+                    openMenu.appendChild(scryptedBtn);
+                }
+            }
+
+            appendOpenVrmButton(openMenu, entry);
+        }
+
+        function createCommandMenu(entry, rowEl) {
+            const commandMenu = document.createElement("details");
+            commandMenu.className = "command-menu";
+            const unitLabel = entry.unit || "Menu";
+            const commandSummary = document.createElement("summary");
+            commandSummary.textContent = unitLabel;
+            commandSummary.setAttribute("aria-label", "Commands for " + unitLabel);
+            commandMenu.appendChild(commandSummary);
+            const commandItems = document.createElement("div");
+            commandItems.className = "command-menu-items";
+            commandMenu.appendChild(commandItems);
+
+            const contextEl = document.createElement("div");
+            contextEl.className = "command-menu-context";
+            const strong = document.createElement("strong");
+            strong.textContent = entry.unit || "Unit tools";
+            contextEl.appendChild(strong);
+            if (entry.ticketSubject) {
+                const sub = document.createElement("span");
+                sub.textContent = entry.ticketSubject.length > 72
+                    ? entry.ticketSubject.slice(0, 69) + "..."
+                    : entry.ticketSubject;
+                contextEl.appendChild(sub);
+            }
+            commandItems.appendChild(contextEl);
+
+            commandMenu.addEventListener("toggle", function () {
+                rowEl.classList.toggle("menu-open", commandMenu.open);
+                if (commandMenu.open) {
+                    document.querySelectorAll("details.command-menu").forEach(function (menu) {
+                        if (menu !== commandMenu) {
+                            menu.open = false;
+                        }
+                    });
+                }
+            });
+
+            populateUnitCommandMenu(commandItems, entry);
+            return commandMenu;
+        }
 
         function fillList(id, items, ledClass) {
             const el = document.getElementById(id);
@@ -217,25 +1128,32 @@
                 return;
             }
             list.forEach(function (item) {
+                const entry = makeEntry(item);
                 const li = document.createElement("li");
                 li.className = "ticket-row";
+
                 const led = document.createElement("span");
                 led.className = "status-led " + (ledClass || "");
                 led.title = "Status";
                 li.appendChild(led);
+
+                const actions = document.createElement("div");
+                actions.className = "ticket-row-actions";
+                if (entry.unit) {
+                    actions.appendChild(createCommandMenu(entry, li));
+                }
+                li.appendChild(actions);
+
                 const label = document.createElement("span");
                 label.className = "ticket-label";
-                const unit = typeof item === "string" ? item : (item.unit || "");
-                const issueId = typeof item === "object" ? (item.issue_id || "") : "";
-                const url = typeof item === "object" ? (item.url || "") : "";
-                label.appendChild(document.createTextNode(unit || "(unknown)"));
-                if (issueId && url) {
+                label.appendChild(document.createTextNode(entry.unit || "(unknown)"));
+                if (entry.issueId && entry.url) {
                     label.appendChild(document.createTextNode(" — "));
                     const link = document.createElement("a");
-                    link.href = url;
+                    link.href = entry.url;
                     link.target = "_blank";
                     link.rel = "noopener noreferrer";
-                    link.textContent = issueId;
+                    link.textContent = entry.issueId;
                     label.appendChild(link);
                 }
                 li.appendChild(label);
@@ -246,8 +1164,7 @@
         source.onmessage = function (event) {
             const data = JSON.parse(event.data);
             if (data.type === "log") {
-                consoleEl.textContent += data.line + "\n";
-                consoleEl.scrollTop = consoleEl.scrollHeight;
+                logLine(data.line);
             } else if (data.type === "done") {
                 const r = data.results || {};
                 fillList("needs_recovery_email", r.needs_recovery_email, "is-warning");

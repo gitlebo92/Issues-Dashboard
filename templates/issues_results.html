@@ -407,6 +407,11 @@
             color: #ffffff;
             border: 1px solid #2563eb;
         }
+        .confirm-ok:disabled,
+        .confirm-ok.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
         .panel li {
             display: flex;
             align-items: center;
@@ -884,6 +889,13 @@
         30-minute ERP polling are off. Manual refresh and toolbar actions still work.
     </p>
     {% endif %}
+    {% if erp_writes_disabled %}
+    <p class="automation-paused-banner" id="erp_writes_disabled_banner">
+        ERP write actions are disabled (DISABLE_ERP_WRITES). Buttons stay visible but
+        inactive. Validate, Open, Ping, cameras, Resolve (R), and Recovery Email still work.
+        Set DISABLE_ERP_WRITES=0 in .env to re-enable writes.
+    </p>
+    {% endif %}
     <div class="progress-wrap">
         <div class="progress-label" id="progress_label">Waiting to start...</div>
         <div class="progress-track">
@@ -1234,6 +1246,19 @@
         const meshBaseUrl = {{ mesh_base_url|default("https://meshcentral.sentracam.com/login?filter=")|tojson }};
         const raindanceBaseUrl = {{ raindance_base_url|default("https://raindance.sentracam.net/unit/")|tojson }};
         const automationPaused = {{ automation_paused|default(false)|tojson }};
+        const erpWritesDisabled = {{ erp_writes_disabled|default(true)|tojson }};
+        const ERP_WRITES_DISABLED_TITLE =
+            "ERP writes disabled (set DISABLE_ERP_WRITES=0 in .env to enable)";
+        function disableErpWriteControl(el) {
+            if (!erpWritesDisabled || !el) {
+                return el;
+            }
+            el.disabled = true;
+            el.classList.add("is-disabled");
+            el.setAttribute("aria-disabled", "true");
+            el.title = ERP_WRITES_DISABLED_TITLE;
+            return el;
+        }
         const consoleEl = document.getElementById("console");
         const consoleSearchEl = document.getElementById("console_search");
         const consoleClearBtn = document.getElementById("console_clear");
@@ -1322,6 +1347,16 @@
         const techChecksTaskList = document.getElementById("tech_checks_task_list");
         const techChecksCancel = document.getElementById("tech_checks_cancel");
         const techChecksConfirm = document.getElementById("tech_checks_confirm");
+        [
+            createDeploymentConfirm,
+            createTerminationConfirm,
+            createRelocationConfirm,
+            siteActionConfirm,
+            clearMuCoordinatesConfirm,
+            clearMuSiteConfirm,
+            createRefurbishConfirm,
+            techChecksConfirm,
+        ].forEach(disableErpWriteControl);
         let techChecksProjectId = "";
         let techChecksSubject = "";
         let techChecksButton = null;
@@ -6306,6 +6341,7 @@
                             );
                         });
                     }
+                    disableErpWriteControl(createBtn);
                     commandItems.appendChild(createBtn);
                     appendCamerasCommandMenu(commandItems, entry);
                     const openMenu = appendCommandSubmenu(commandItems, "Open");
@@ -6366,6 +6402,7 @@
                             );
                         });
                     }
+                    disableErpWriteControl(createTermBtn);
                     commandItems.appendChild(createTermBtn);
                 }
                 if (id === "relocation") {
@@ -6385,6 +6422,7 @@
                             );
                         });
                     }
+                    disableErpWriteControl(createRelocBtn);
                     commandItems.appendChild(createRelocBtn);
                 }
                 const cliActionId = isNocProjectsList(id)
@@ -6699,6 +6737,7 @@
                                     terminateBtn
                                 );
                             });
+                            disableErpWriteControl(terminateBtn);
                             taskMenu.appendChild(terminateBtn);
 
                             const clearMuBtn = document.createElement("button");
@@ -6722,6 +6761,7 @@
                                     );
                                 });
                             }
+                            disableErpWriteControl(clearMuBtn);
                             taskMenu.appendChild(clearMuBtn);
 
                             const clearMuSiteBtn = document.createElement("button");
@@ -6745,6 +6785,7 @@
                                     );
                                 });
                             }
+                            disableErpWriteControl(clearMuSiteBtn);
                             taskMenu.appendChild(clearMuSiteBtn);
 
                             const refurbBtn = document.createElement("button");
@@ -6758,6 +6799,7 @@
                                     refurbBtn
                                 );
                             });
+                            disableErpWriteControl(refurbBtn);
                             taskMenu.appendChild(refurbBtn);
                         }
                         if (showActivate) {
@@ -6772,6 +6814,7 @@
                                     activateBtn
                                 );
                             });
+                            disableErpWriteControl(activateBtn);
                             taskMenu.appendChild(activateBtn);
 
                             const techChecksBtn = document.createElement("button");
@@ -6785,6 +6828,7 @@
                                     techChecksBtn
                                 );
                             });
+                            disableErpWriteControl(techChecksBtn);
                             taskMenu.appendChild(techChecksBtn);
                         }
                     }
@@ -7104,7 +7148,7 @@
                         setFieldsBtn.title = "No ERP issue id";
                     }
                     setFieldsBtn.addEventListener("click", function () {
-                        if (!entry.issueId) {
+                        if (!entry.issueId || erpWritesDisabled) {
                             return;
                         }
                         setFieldsBtn.disabled = true;
@@ -7199,10 +7243,20 @@
                                 window.alert(label + " failed: " + (error.message || error));
                             })
                             .finally(function () {
-                                setFieldsBtn.disabled = !entry.issueId;
                                 setFieldsBtn.textContent = label;
+                                if (erpWritesDisabled) {
+                                    disableErpWriteControl(setFieldsBtn);
+                                } else {
+                                    setFieldsBtn.disabled = !entry.issueId;
+                                    if (!entry.issueId) {
+                                        setFieldsBtn.title = "No ERP issue id";
+                                    } else {
+                                        setFieldsBtn.removeAttribute("title");
+                                    }
+                                }
                             });
                     });
+                    disableErpWriteControl(setFieldsBtn);
                     commandItems.appendChild(setFieldsBtn);
                 }
 
