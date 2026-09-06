@@ -11,9 +11,36 @@
         }
         h1, h2 { margin-bottom: 8px; }
         .status { color: #94a3b8; margin-bottom: 12px; }
+        .app-nav {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: -8px 0 16px;
+            padding: 10px 14px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 10px;
+        }
+        .app-nav .nav-brand {
+            color: #f8fafc;
+            font-weight: 700;
+            text-decoration: none;
+            margin-right: auto;
+        }
+        .app-nav .nav-brand:hover { color: #93c5fd; }
+        .app-nav a.nav-link {
+            color: #e2e8f0;
+            text-decoration: none;
+            background: #2563eb;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .app-nav a.nav-link:hover { background: #1d4ed8; }
         .layout {
             display: grid;
-            grid-template-columns: 1.4fr 1fr;
+            grid-template-columns: 1.2fr 1fr;
             gap: 20px;
             align-items: start;
         }
@@ -38,21 +65,70 @@
             border-radius: 8px;
             padding: 16px;
         }
-        .panel ul { margin-top: 4px; }
-        .panel h2 { font-size: 16px; margin-top: 16px; }
-        .panel h2:first-child { margin-top: 0; }
-        .highlight-recovery h2 { color: #fbbf24; }
-        .highlight-initial h2 { color: #f87171; }
-        .highlight-false h2 { color: #a78bfa; }
-        .highlight-pending h2 { color: #38bdf8; }
-        .highlight-uptodate h2 { color: #4ade80; }
+        .panel ul {
+            margin: 8px 0 0;
+            padding-left: 0;
+            list-style: none;
+        }
+        .list-block { margin-top: 18px; }
+        .list-block:first-child { margin-top: 0; }
+        .list-heading {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 0 0 4px;
+            font-size: 16px;
+        }
+        .list-heading .title { margin: 0; font-size: 16px; }
+        .list-desc { color: #94a3b8; font-size: 12px; margin: 0 0 6px; }
+        .status-led {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex: 0 0 auto;
+            box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.8);
+        }
+        .status-led.is-warning { background: #fbbf24; }
+        .status-led.is-down { background: #f87171; }
+        .status-led.is-multi { background: #a78bfa; }
+        .status-led.is-info { background: #38bdf8; }
+        .status-led.is-up { background: #4ade80; }
+        .highlight-recovery .title { color: #fbbf24; }
+        .highlight-initial .title { color: #f87171; }
+        .highlight-false .title { color: #a78bfa; }
+        .highlight-pending .title { color: #38bdf8; }
+        .highlight-uptodate .title { color: #4ade80; }
+        .ticket-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            border-bottom: 1px solid #334155;
+        }
+        .ticket-row:last-child { border-bottom: none; }
+        .ticket-row .status-led {
+            width: 10px;
+            height: 10px;
+        }
+        .ticket-label { color: #e2e8f0; }
         a { color: #93c5fd; }
         .empty { color: #94a3b8; }
+        .count-badge {
+            color: #94a3b8;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .footer-links { margin-top: 16px; }
     </style>
 </head>
 <body>
 
-    <h1>Outage / Recovery Email Check</h1>
+    <nav class="app-nav" aria-label="Primary">
+        <a class="nav-brand" href="/">Issues Dashboard</a>
+        <a class="nav-link" href="/recovery_email">Recovery Email Check</a>
+    </nav>
+
+    <h1>Recovery Email Check</h1>
     <p class="status" id="status">Running validation... live stdout below.</p>
 
     <div class="layout">
@@ -61,42 +137,63 @@
             <div class="console" id="console"></div>
         </div>
 
-        <div class="panel">
-            <div class="highlight-recovery">
-                <h2>Needs recovery email</h2>
-                <p class="empty">Outage email sent, recovery empty, unit back up</p>
+        <div class="panel" id="results_panel">
+            <div class="list-block highlight-recovery" data-led="is-warning">
+                <div class="list-heading">
+                    <span class="status-led is-warning" title="Needs recovery email"></span>
+                    <h2 class="title">Needs recovery email</h2>
+                    <span class="count-badge" id="needs_recovery_email_count"></span>
+                </div>
+                <p class="list-desc">Outage email sent, recovery empty, unit back up</p>
                 <ul id="needs_recovery_email"><li class="empty">Waiting...</li></ul>
             </div>
 
-            <div class="highlight-initial">
-                <h2>Needs initial outage email</h2>
-                <p class="empty">No outage/recovery email, unit fully down</p>
+            <div class="list-block highlight-initial" data-led="is-down">
+                <div class="list-heading">
+                    <span class="status-led is-down" title="Needs initial outage email"></span>
+                    <h2 class="title">Needs initial outage email</h2>
+                    <span class="count-badge" id="needs_initial_email_count"></span>
+                </div>
+                <p class="list-desc">No outage/recovery email, unit fully down</p>
                 <ul id="needs_initial_email"><li class="empty">Waiting...</li></ul>
             </div>
 
-            <div class="highlight-false">
-                <h2>Potential false positive</h2>
-                <p class="empty">No outage/recovery email, unit back up</p>
+            <div class="list-block highlight-false" data-led="is-multi">
+                <div class="list-heading">
+                    <span class="status-led is-multi" title="Potential false positive"></span>
+                    <h2 class="title">Potential false positive</h2>
+                    <span class="count-badge" id="potential_false_positive_count"></span>
+                </div>
+                <p class="list-desc">No outage/recovery email, unit back up</p>
                 <ul id="potential_false_positive"><li class="empty">Waiting...</li></ul>
             </div>
 
-            <div class="highlight-pending">
-                <h2>Pending recovery</h2>
-                <p class="empty">Checked units not in the lists above</p>
+            <div class="list-block highlight-pending" data-led="is-info">
+                <div class="list-heading">
+                    <span class="status-led is-info" title="Pending recovery"></span>
+                    <h2 class="title">Pending recovery</h2>
+                    <span class="count-badge" id="pending_recovery_count"></span>
+                </div>
+                <p class="list-desc">Checked units not in the lists above</p>
                 <ul id="pending_recovery"><li class="empty">Waiting...</li></ul>
             </div>
 
-            <div class="highlight-uptodate">
-                <h2>Email status up to date</h2>
-                <p class="empty">Outage and recovery emails both sent</p>
+            <div class="list-block highlight-uptodate" data-led="is-up">
+                <div class="list-heading">
+                    <span class="status-led is-up" title="Email status up to date"></span>
+                    <h2 class="title">Email status up to date</h2>
+                    <span class="count-badge" id="email_status_up_to_date_count"></span>
+                </div>
+                <p class="list-desc">Outage and recovery emails both sent</p>
                 <ul id="email_status_up_to_date"><li class="empty">Waiting...</li></ul>
             </div>
         </div>
     </div>
 
-    <br>
-    <a href="/recovery_email">Run again</a> |
-    <a href="/">Issues Dashboard</a>
+    <div class="footer-links">
+        <a href="/recovery_email">Run again</a> |
+        <a href="/">Issues Dashboard</a>
+    </div>
 
     <script>
         const jobId = {{ job_id|tojson }};
@@ -104,31 +201,44 @@
         const statusEl = document.getElementById("status");
         const source = new EventSource("/recovery_email/stream/" + jobId);
 
-        function fillList(id, items) {
+        function fillList(id, items, ledClass) {
             const el = document.getElementById(id);
+            const countEl = document.getElementById(id + "_count");
             el.innerHTML = "";
-            if (!items || items.length === 0) {
+            const list = items || [];
+            if (countEl) {
+                countEl.textContent = "(" + list.length + ")";
+            }
+            if (list.length === 0) {
                 const li = document.createElement("li");
                 li.className = "empty";
                 li.textContent = "None";
                 el.appendChild(li);
                 return;
             }
-            items.forEach(function (item) {
+            list.forEach(function (item) {
                 const li = document.createElement("li");
+                li.className = "ticket-row";
+                const led = document.createElement("span");
+                led.className = "status-led " + (ledClass || "");
+                led.title = "Status";
+                li.appendChild(led);
+                const label = document.createElement("span");
+                label.className = "ticket-label";
                 const unit = typeof item === "string" ? item : (item.unit || "");
                 const issueId = typeof item === "object" ? (item.issue_id || "") : "";
                 const url = typeof item === "object" ? (item.url || "") : "";
-                li.appendChild(document.createTextNode(unit));
+                label.appendChild(document.createTextNode(unit || "(unknown)"));
                 if (issueId && url) {
-                    li.appendChild(document.createTextNode(" — "));
+                    label.appendChild(document.createTextNode(" — "));
                     const link = document.createElement("a");
                     link.href = url;
                     link.target = "_blank";
                     link.rel = "noopener noreferrer";
                     link.textContent = issueId;
-                    li.appendChild(link);
+                    label.appendChild(link);
                 }
+                li.appendChild(label);
                 el.appendChild(li);
             });
         }
@@ -140,11 +250,11 @@
                 consoleEl.scrollTop = consoleEl.scrollHeight;
             } else if (data.type === "done") {
                 const r = data.results || {};
-                fillList("needs_recovery_email", r.needs_recovery_email);
-                fillList("needs_initial_email", r.needs_initial_email);
-                fillList("potential_false_positive", r.potential_false_positive);
-                fillList("pending_recovery", r.pending_recovery);
-                fillList("email_status_up_to_date", r.email_status_up_to_date);
+                fillList("needs_recovery_email", r.needs_recovery_email, "is-warning");
+                fillList("needs_initial_email", r.needs_initial_email, "is-down");
+                fillList("potential_false_positive", r.potential_false_positive, "is-multi");
+                fillList("pending_recovery", r.pending_recovery, "is-info");
+                fillList("email_status_up_to_date", r.email_status_up_to_date, "is-up");
                 statusEl.textContent = "Validation complete.";
                 source.close();
             }

@@ -209,9 +209,25 @@ From **Cameras → Open All Cameras** (or `/issues/cameras-launch/<UNIT>`).
 
 From the Issues Dashboard navbar → **Recovery Email Check** (`/recovery_email`).
 
-![Recovery Email](docs/screenshots/10-recovery-email.png)
+Upload the latest Shield NOC outage spreadsheet (`.xlsx` / `.csv`) → **Check Recovery Emails**.
 
-Upload Shield NOC outage spreadsheet → classify rows that need initial outage email, recovery email, false positive, pending, or already up to date.
+### Results dashboard
+
+Lists use **status lights** (same LED language as Issues) next to each list name and ticket row. Ticket units/IDs are blurred in docs screenshots; **list names and LEDs stay visible**.
+
+![Recovery Email results](docs/screenshots/14-recovery-email-results.png)
+
+![Recovery lists with status lights](docs/screenshots/15-recovery-email-lists.png)
+
+| List | LED | Meaning |
+|------|-----|---------|
+| **Needs recovery email** | Yellow | Outage email sent, recovery empty, unit back up |
+| **Needs initial outage email** | Red | No outage/recovery email, unit fully down |
+| **Potential false positive** | Purple | No outage/recovery email, unit back up |
+| **Pending recovery** | Blue | Checked units not in the lists above |
+| **Email status up to date** | Green | Outage and recovery emails both sent |
+
+Example run (ART spreadsheet): recovery (1), initial (0), false positive (1), pending (12), up to date (7).
 
 ---
 

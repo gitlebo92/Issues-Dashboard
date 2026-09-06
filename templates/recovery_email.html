@@ -2,11 +2,99 @@
 <html>
 <head>
     <title>Recovery Email Check</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #0f172a;
+            color: #e2e8f0;
+            max-width: 720px;
+        }
+        .app-nav {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: -8px 0 16px;
+            padding: 10px 14px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 10px;
+        }
+        .app-nav .nav-brand {
+            color: #f8fafc;
+            font-weight: 700;
+            text-decoration: none;
+            margin-right: auto;
+        }
+        .app-nav a.nav-link {
+            color: #e2e8f0;
+            text-decoration: none;
+            background: #2563eb;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        h1 { margin-bottom: 8px; }
+        h2 { color: #94a3b8; font-size: 15px; font-weight: 500; }
+        ul { line-height: 1.55; color: #cbd5e1; }
+        label { display: block; margin-bottom: 6px; }
+        button {
+            background: #2563eb;
+            color: #fff;
+            border: 0;
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        button:hover { background: #1d4ed8; }
+        a { color: #93c5fd; }
+        .led-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px 18px;
+            margin: 16px 0;
+            padding: 12px;
+            background: #1e293b;
+            border-radius: 8px;
+        }
+        .led-legend span {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+        .status-led {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .is-warning { background: #fbbf24; }
+        .is-down { background: #f87171; }
+        .is-multi { background: #a78bfa; }
+        .is-info { background: #38bdf8; }
+        .is-up { background: #4ade80; }
+    </style>
 </head>
 <body>
 
-    <h1>Outage / Recovery Email Check</h1>
+    <nav class="app-nav" aria-label="Primary">
+        <a class="nav-brand" href="/">Issues Dashboard</a>
+        <a class="nav-link" href="/recovery_email">Recovery Email Check</a>
+    </nav>
+
+    <h1>Recovery Email Check</h1>
     <h2>Upload the Shield NOC outage spreadsheet (.xlsx or .csv).</h2>
+
+    <div class="led-legend" aria-label="Result list legend">
+        <span><i class="status-led is-warning"></i> Needs recovery email</span>
+        <span><i class="status-led is-down"></i> Needs initial outage email</span>
+        <span><i class="status-led is-multi"></i> Potential false positive</span>
+        <span><i class="status-led is-info"></i> Pending recovery</span>
+        <span><i class="status-led is-up"></i> Email status up to date</span>
+    </div>
+
     <ul>
         <li>row[5] and row[6] empty + fully down → needs initial outage email</li>
         <li>row[5] filled, row[6] empty + back up → needs recovery email</li>
@@ -16,14 +104,10 @@
     </ul>
 
     <form method="POST" action="/recovery_email/results" enctype="multipart/form-data">
-        <label>Outage report:</label>
-        <input type="file" name="report_file" accept=".xlsx,.csv" required>
-
+        <label for="report_file">Outage report:</label>
+        <input id="report_file" type="file" name="report_file" accept=".xlsx,.csv" required>
         <br><br>
-
-        <button type="submit">
-            Check Recovery Emails
-        </button>
+        <button type="submit">Check Recovery Emails</button>
     </form>
 
     <br>
