@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Opening {{ label }} for {{ unit }}</title>
+</head>
+<body>
+    <p>Opening {{ label }} for {{ unit }} via Digest auth proxy...</p>
+    <p><a id="camera_link" href="#">Continue</a></p>
+    <script>
+        const cameraUrl = {{ url|tojson }};
+        document.getElementById("camera_link").href = cameraUrl;
+        window.location.replace(cameraUrl);
+    </script>
+</body>
+</html>

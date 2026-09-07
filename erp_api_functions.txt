@@ -1,0 +1,2763 @@
+ERP API / Database Call Reference (with source code)
+==========================================================
+Work Tool project — all functions that read or write ERP (Frappe) via REST API,
+including full Python source from work_tool.py and selected flask_endpoints.py routes.
+
+Source: work_tool.py, flask_endpoints.py
+Generated: 2026-08-28
+
+BASE URL: https://erp.{workTLD}  (erp_base_url / workTLD in .env)
+AUTH:     Authorization: token {erp_token}
+
+ERP REST paths:
+  Issue, Project, Site, Component, Task, Comment, User Group Member
+  Method: /api/method/frappe.desk.form.assign_to.add
+
+NOT included as ERP REST (see end of file):
+  fetch_unit_inventory / sync_netsheet_from_erp — use v19 exe, not Frappe API
+  _mark_issue_resolved — local JSON file only
+
+
+
+TABLE OF CONTENTS
+-----------------
+INFRASTRUCTURE          erp_base_url, _erp_headers, _erp_field_empty, _erp_response_error, ...
+COMPONENT / MU          clear_mu_*, _get_erp_component_doc, resolve_shield_site_id, ...
+ISSUE                   fetch_erp_issues, set_issue_preset_fields, add_missing_issue_components, ...
+PROJECT                 fetch_erp_projects, create_noc_*_project, create_refurbish_*, ...
+SITE                    find_erp_site_by_project_subject, terminate/activate_erp_site_*, ...
+TASK / TECH CHECKS      get_project_task, add_task_comment, complete_project_tech_checks, ...
+LEGACY CLI              rd_battery_map, low_battery_rd_fisheye_tool
+FLASK ROUTES            HTTP handlers that call the above
+FLASK POLL / SCHEDULER  issues_poll, _run_issues_validation, scheduled jobs
+ERP URL CONSTANTS       module-level ERP_*_URL variables
+V19 INVENTORY (not REST) fetch_unit_inventory, sync_netsheet_from_erp
+WORK_TOOL_REFACTORED    duplicate Component GET helpers
+
+==============================================================================
+SECTION: INFRASTRUCTURE
+==============================================================================
+
+--- erp_base_url ---  (work_tool.py)
+
+def erp_base_url():
+    """ERP host at https://erp.{workTLD}."""
+    tld = work_tld()
+    if not tld:
+        return ""
+    return f"https://erp.{tld}"
+
+--- _erp_headers ---  (work_tool.py)
+
+def _erp_headers():
+    load_dotenv(env_path)
+    erp_token = (os.getenv("erp_token") or "").strip().strip('"').strip("'")
+    if not erp_token:
+        raise RuntimeError("erp_token is not set in .env")
+    return {"Authorization": f"token {erp_token}"}
+
+--- _erp_field_empty ---  (work_tool.py)
+
+def _erp_field_empty(value):
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+--- _erp_response_error ---  (work_tool.py)
+
+def _erp_response_error(response):
+    try:
+        payload = response.json()
+    except ValueError:
+        return (response.text or f"HTTP {response.status_code}")[:400]
+    messages = payload.get("_server_messages")
+    if messages:
+        try:
+            parsed = json.loads(messages) if isinstance(messages, str) else messages
+            if isinstance(parsed, list) and parsed:
+                first = parsed[0]
+                if isinstance(first, str):
+                    first = json.loads(first)
+                if isinstance(first, dict) and first.get("message"):
+                    return str(first["message"])
+        except (TypeError, ValueError):
+            pass
+    return str(
+        payload.get("exception")
+        or payload.get("exc_type")
+        or (response.text or f"HTTP {response.status_code}")[:400]
+    )
+
+--- _erp_issue_value ---  (work_tool.py)
+
+def _erp_issue_value(issue, *field_names):
+    """Return the first populated ERP field, allowing custom field prefixes."""
+    for field_name in field_names:
+        value = issue.get(field_name)
+        if value not in (None, ""):
+            return value
+    normalized_names = {
+        re.sub(r"[^a-z0-9]", "", field_name.lower())
+        for field_name in field_names
+    }
+    for key, value in issue.items():
+        normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        if value not in (None, "") and any(
+            normalized_key == name or normalized_key.endswith(name)
+            for name in normalized_names
+        ):
+            return value
+    return ""
+
+--- _sc_component_name ---  (work_tool.py)
+
+def _sc_component_name(unit):
+    raw = str(unit or "").strip()
+    if not raw:
+        return ""
+    if raw.upper().startswith("SC-"):
+        raw = raw[3:]
+    return f"SC-{raw}"
+
+==============================================================================
+SECTION: COMPONENT / MU
+==============================================================================
+
+--- _get_erp_component_doc ---  (work_tool.py)
+
+def _get_erp_component_doc(component_name):
+    """Load Component by name. Returns (doc, error)."""
+    name = str(component_name or "").strip()
+    if not name:
+        return None, "Missing Component name"
+
+    url = f"{erp_base_url()}/api/resource/Component/{quote(name, safe='')}"
+    headers = _erp_headers()
+
+    try:
+        get_resp = requests.get(url, headers=headers, timeout=30)
+    except requests.exceptions.RequestException as exc:
+        return None, f"ERP request failed: {exc}"
+
+    if get_resp.status_code == 404:
+        return None, f"Component {name} was not found in ERP"
+    if not get_resp.ok:
+        return None, _erp_response_error(get_resp)
+
+    payload = get_resp.json() or {}
+    doc = payload.get("data")
+    if not isinstance(doc, dict):
+        return None, f"ERP did not return Component {name}"
+    return doc, None
+
+--- _fetch_mu_component_doc ---  (work_tool.py)
+
+def _fetch_mu_component_doc(mu):
+    """Load and validate SC-{MU} Component. Returns (doc, component_name, error)."""
+    mu_code = _normalize_mu_code(mu)
+    if not mu_code:
+        return None, "", f"Invalid MU code: {mu}"
+
+    component_name = _sc_component_name(mu_code)
+    doc, error = _get_erp_component_doc(component_name)
+    if error:
+        return None, "", error
+
+    comp_type = str(doc.get("type") or "").strip().upper()
+    if comp_type and comp_type != "MU":
+        return None, "", f"{component_name} is type {comp_type}, not MU"
+
+    return doc, component_name, None
+
+--- _patch_mu_component ---  (work_tool.py)
+
+def _patch_mu_component(component_name, update_payload):
+    """PATCH Component fields. Returns (patched_doc, error)."""
+    name = str(component_name or "").strip()
+    if not name:
+        return None, "Missing Component name"
+    if not isinstance(update_payload, dict) or not update_payload:
+        return None, "Missing Component update payload"
+
+    url = f"{erp_base_url()}/api/resource/Component/{quote(name, safe='')}"
+    headers = {
+        **_erp_headers(),
+        "Content-Type": "application/json",
+    }
+    try:
+        patch_resp = requests.patch(
+            url,
+            headers=headers,
+            json=update_payload,
+            timeout=30,
+        )
+    except requests.exceptions.RequestException as exc:
+        return None, f"ERP update failed: {exc}"
+
+    if not patch_resp.ok:
+        return None, _erp_response_error(patch_resp)
+
+    patch_doc = (patch_resp.json() or {}).get("data") or {}
+    return patch_doc, None
+
+--- clear_mu_coordinates ---  (work_tool.py)
+
+def clear_mu_coordinates(mu):
+    """
+    Clear latitude/longitude on SC-{MU} Component in ERP.
+    Returns (result_dict, error).
+    """
+    doc, component_name, error = _fetch_mu_component_doc(mu)
+    if error:
+        return None, error
+
+    old_lat = doc.get("latitude")
+    old_lon = doc.get("longitude")
+
+    update_payload = {"latitude": 0, "longitude": 0}
+    patch_doc, error = _patch_mu_component(component_name, update_payload)
+    if error:
+        return None, error
+
+    return {
+        "component": component_name,
+        "mu": _normalize_mu_code(mu),
+        "old_latitude": old_lat,
+        "old_longitude": old_lon,
+        "latitude": patch_doc.get("latitude", 0),
+        "longitude": patch_doc.get("longitude", 0),
+    }, None
+
+--- clear_mu_coordinates_from_subject ---  (work_tool.py)
+
+def clear_mu_coordinates_from_subject(subject, unit=None):
+    """Resolve MU from subject/unit and clear its ERP coordinates."""
+    mu_code = mu_trailer_from_subject(subject, unit=unit)
+    if not mu_code:
+        return None, "Could not determine MU trailer from subject"
+    return clear_mu_coordinates(mu_code)
+
+--- clear_mu_site ---  (work_tool.py)
+
+def clear_mu_site(mu):
+    """
+    Clear Site link on SC-{MU} Component in ERP.
+    Returns (result_dict, error).
+    """
+    mu_code = _normalize_mu_code(mu)
+    if not mu_code:
+        return None, f"Invalid MU code: {mu}"
+
+    doc, component_name, error = _fetch_mu_component_doc(mu_code)
+    if error:
+        return None, error
+
+    expected_name = _sc_component_name(mu_code)
+    if component_name != expected_name:
+        return None, (
+            f"Safety check failed: expected {expected_name}, got {component_name}"
+        )
+
+    old_site = str(doc.get("site") or "").strip()
+    if _erp_field_empty(doc.get("site")):
+        return {
+            "component": component_name,
+            "mu": mu_code,
+            "old_site": "",
+            "site": "",
+            "unchanged": True,
+        }, None
+
+    patch_doc, error = _patch_mu_component(component_name, {"site": ""})
+    if error:
+        return None, error
+
+    new_site = str(patch_doc.get("site") or "").strip()
+    if not _erp_field_empty(patch_doc.get("site")):
+        verify_doc, verify_error = _get_erp_component_doc(component_name)
+        if verify_error:
+            return None, (
+                f"Site clear may have failed; re-check failed: {verify_error}"
+            )
+        new_site = str(verify_doc.get("site") or "").strip()
+        if not _erp_field_empty(verify_doc.get("site")):
+            return None, (
+                f"Site link still set on {component_name}: {new_site}"
+            )
+
+    return {
+        "component": component_name,
+        "mu": mu_code,
+        "old_site": old_site,
+        "site": new_site,
+        "unchanged": False,
+    }, None
+
+--- clear_mu_site_from_subject ---  (work_tool.py)
+
+def clear_mu_site_from_subject(subject, unit=None):
+    """Resolve MU from subject/unit and clear its ERP Site link."""
+    mu_code = mu_trailer_from_subject(subject, unit=unit)
+    if not mu_code:
+        return None, "Could not determine MU trailer from subject"
+    return clear_mu_site(mu_code)
+
+--- _fetch_erp_component_doc ---  (work_tool.py)
+
+def _fetch_erp_component_doc(name, cache):
+    key = str(name or "").strip()
+    if not key:
+        return None, "missing Component name"
+    if key in cache:
+        return cache[key], None
+    response = requests.get(
+        f"{erp_base_url()}/api/resource/Component/{quote(key, safe='')}",
+        headers=_erp_headers(),
+        timeout=30,
+    )
+    if response.status_code == 404:
+        cache[key] = None
+        return None, None
+    if not response.ok:
+        return None, _erp_response_error(response)
+    doc = (response.json() or {}).get("data")
+    if not isinstance(doc, dict):
+        return None, f"ERP did not return Component {key}"
+    cache[key] = doc
+    return doc, None
+
+--- _lookup_component_doc ---  (work_tool.py)
+
+def _lookup_component_doc(name, cache, try_bare=False):
+    sc_name = _sc_component_name(name)
+    candidates = []
+    if sc_name:
+        candidates.append(sc_name)
+    raw = str(name or "").strip()
+    if try_bare and raw and sc_name.upper() != raw.upper():
+        candidates.append(raw)
+    last_error = None
+    for candidate in candidates:
+        doc, error = _fetch_erp_component_doc(candidate, cache)
+        if error:
+            last_error = f"{candidate}: {error}"
+            continue
+        if doc:
+            return doc, candidate, None
+    return None, (candidates[0] if candidates else raw), last_error
+
+--- _component_exists ---  (work_tool.py)
+
+def _component_exists(component):
+    response = requests.get(
+        f"{erp_base_url()}/api/resource/Component/{component}",
+        headers=_erp_headers(),
+        timeout=30,
+    )
+    return response.ok
+
+--- _component_lookup_names ---  (work_tool.py)
+
+def _component_lookup_names(name, try_bare=False):
+    candidates = []
+    sc_name = _sc_component_name(name)
+    if sc_name:
+        candidates.append(sc_name)
+    raw = str(name or "").strip()
+    if try_bare and raw and sc_name.upper() != raw.upper():
+        candidates.append(raw)
+    return candidates
+
+--- _fetch_erp_component_site_map ---  (work_tool.py)
+
+def _fetch_erp_component_site_map(names, cache, headers=None, quiet=False):
+    """Batch-load Component name/site into cache. Missing names are cached as None."""
+    headers = headers or _erp_headers()
+    to_fetch = []
+    seen = set()
+    for name in names or []:
+        key = str(name or "").strip()
+        if not key or key in seen or key in cache:
+            continue
+        seen.add(key)
+        to_fetch.append(key)
+    if not to_fetch:
+        return
+    if not quiet:
+        print(
+            f"Add Missing Components/Sites: prefetching {len(to_fetch)} "
+            "Component records from ERP"
+        )
+    for start in range(0, len(to_fetch), ADD_MISSING_ERP_CHUNK):
+        chunk = to_fetch[start:start + ADD_MISSING_ERP_CHUNK]
+        response = requests.get(
+            f"{erp_base_url()}/api/resource/Component",
+            headers=headers,
+            params={
+                "fields": json.dumps(["name", "site"]),
+                "filters": json.dumps([["name", "in", chunk]]),
+                "limit_page_length": len(chunk),
+            },
+            timeout=60,
+        )
+        if not response.ok:
+            raise RuntimeError(_erp_response_error(response))
+        found_in_chunk = set()
+        for row in (response.json() or {}).get("data") or []:
+            name = str((row or {}).get("name") or "").strip()
+            if name:
+                cache[name] = row
+                found_in_chunk.add(name)
+        for name in chunk:
+            if name not in found_in_chunk:
+                cache[name] = None
+
+--- _site_from_prefetched_component ---  (work_tool.py)
+
+def _site_from_prefetched_component(name, cache, try_bare=False):
+    candidates = _component_lookup_names(name, try_bare=try_bare)
+    for candidate in candidates:
+        doc = cache.get(candidate)
+        if doc:
+            site = str(doc.get("site") or "").strip()
+            if site:
+                return site, candidate
+            return "", candidate
+    return "", (candidates[0] if candidates else str(name or "").strip())
+
+--- _parent_component_from_erp ---  (work_tool.py)
+
+def _parent_component_from_erp(unit, cache):
+    """Return ERP parent Component link (e.g. SC-MU7027) for unit, or '' if none."""
+    doc, _found_name, error = _lookup_component_doc(unit, cache)
+    if error:
+        return "", error
+    if not doc:
+        return "", None
+    return str(doc.get("parent_component") or "").strip(), None
+
+--- resolve_shield_site_id ---  (work_tool.py)
+
+def resolve_shield_site_id(unit, subject=""):
+    """Resolve Shield site ID from the unit's Component, or parent MU for RD(MU) subjects.
+
+    When there is no ticket subject (ad-hoc unit commands), parent MU is read from
+    ERP Component.parent_component instead of the subject line. If the unit has no
+    parent component, the site on the unit's own Component record is used.
+    """
+    unit_name = str(unit or "").strip() or _head_unit_from_subject(subject)
+    if not unit_name:
+        return "", "No unit found in ticket"
+    subject_text = str(subject or "").strip()
+    parent_source = _parent_mu_from_subject(subject_text) if subject_text else ""
+    cache = {}
+    if not parent_source and not subject_text:
+        parent_component, lookup_error = _parent_component_from_erp(unit_name, cache)
+        if lookup_error:
+            return "", lookup_error
+        parent_source = parent_component
+    site_source = parent_source or unit_name
+    try:
+        _fetch_erp_component_site_map(
+            _component_lookup_names(site_source, try_bare=bool(parent_source)),
+            cache,
+            quiet=True,
+        )
+    except Exception as exc:
+        return "", str(exc)
+    site, found_name = _site_from_prefetched_component(
+        site_source,
+        cache,
+        try_bare=bool(parent_source),
+    )
+    if not site:
+        return "", f"Component {found_name or site_source} has no Site"
+    return site, None
+
+==============================================================================
+SECTION: ISSUE
+==============================================================================
+
+--- _normalize_erp_issue ---  (work_tool.py)
+
+def _normalize_erp_issue(issue):
+    return {
+        "issue_id": str(_erp_issue_value(issue, "name", "id")).strip(),
+        "subject": str(_erp_issue_value(issue, "subject", "title")).strip(),
+        "status": str(_erp_issue_value(issue, "status")).strip(),
+        "issue_type": str(
+            _erp_issue_value(issue, "issue_type", "issue type")
+        ).strip(),
+        "issue_subtype": str(
+            _erp_issue_value(issue, "issue_subtype", "issue subtype")
+        ).strip(),
+    }
+
+--- fetch_erp_issues ---  (work_tool.py)
+
+def fetch_erp_issues(statuses=None, page_size=200):
+    """Fetch and normalize active ERP Issues using the configured token."""
+    load_dotenv(env_path)
+    erp_token = (os.getenv("erp_token") or "").strip().strip('"').strip("'")
+    if not erp_token:
+        raise RuntimeError("erp_token is not set in .env")
+
+    if statuses is None:
+        statuses = ERP_ACTIVE_ISSUE_STATUSES
+    requested_statuses = [str(status).strip() for status in statuses if str(status).strip()]
+    active_statuses = {status.lower() for status in requested_statuses}
+    headers = {"Authorization": f"token {erp_token}"}
+    raw_issues = []
+    start = 0
+
+    while True:
+        response = requests.get(
+            ERP_ISSUES_URL,
+            headers=headers,
+            params={
+                "fields": json.dumps(["*"]),
+                "filters": json.dumps([["status", "in", requested_statuses]]),
+                "limit_start": start,
+                "limit_page_length": page_size,
+                "order_by": "creation asc",
+            },
+            timeout=30,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"ERP Issue request failed ({response.status_code})"
+            ) from exc
+        payload = response.json()
+        page = payload.get("data", [])
+        if not isinstance(page, list):
+            raise RuntimeError("ERP Issue response did not contain a data list")
+        raw_issues.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+
+    normalized = []
+    seen_ids = set()
+    for raw_issue in raw_issues:
+        issue = _normalize_erp_issue(raw_issue)
+        if (
+            issue["issue_id"]
+            and issue["subject"]
+            and issue["status"].lower() in active_statuses
+            and issue["issue_id"] not in seen_ids
+        ):
+            normalized.append(issue)
+            seen_ids.add(issue["issue_id"])
+    return normalized
+
+--- _fetch_erp_issue_doc ---  (work_tool.py)
+
+def _fetch_erp_issue_doc(issue_id):
+    response = requests.get(
+        f"{erp_base_url()}/api/resource/Issue/{issue_id}",
+        headers=_erp_headers(),
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return None, f"{issue_id} was not found in ERP"
+    if not response.ok:
+        return None, _erp_response_error(response)
+    doc = (response.json() or {}).get("data")
+    if not isinstance(doc, dict):
+        return None, f"ERP did not return Issue {issue_id}"
+    return doc, None
+
+--- _fetch_erp_issue_component_site_map ---  (work_tool.py)
+
+def _fetch_erp_issue_component_site_map(issue_ids):
+    ids = []
+    seen = set()
+    for issue_id in issue_ids or []:
+        name = str(issue_id or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ids.append(name)
+    found = {}
+    headers = _erp_headers()
+    for start in range(0, len(ids), 200):
+        chunk = ids[start:start + 200]
+        print(
+            f"Add Missing Components/Sites: loading {len(chunk)} Issue records "
+            f"from ERP ({start + 1}-{start + len(chunk)} of {len(ids)})"
+        )
+        response = requests.get(
+            f"{erp_base_url()}/api/resource/Issue",
+            headers=headers,
+            params={
+                "fields": json.dumps(["name", "component", "site"]),
+                "filters": json.dumps([["name", "in", chunk]]),
+                "limit_page_length": len(chunk),
+            },
+            timeout=60,
+        )
+        if not response.ok:
+            raise RuntimeError(_erp_response_error(response))
+        for row in (response.json() or {}).get("data") or []:
+            name = str((row or {}).get("name") or "").strip()
+            if name:
+                found[name] = row
+    return found
+
+--- _put_issue_component_site ---  (work_tool.py)
+
+def _put_issue_component_site(issue_id, payload, headers):
+    response = requests.put(
+        f"{erp_base_url()}/api/resource/Issue/{issue_id}",
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+    if not response.ok:
+        return issue_id, None, _erp_response_error(response)
+    return issue_id, payload, None
+
+--- find_open_raindance_issue ---  (work_tool.py)
+
+def find_open_raindance_issue(unit):
+    """Find exactly one Open Issue whose subject looks like sc-{unit}-Raindance..."""
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit for Raindance lookup"
+    compact_unit = re.sub(r"\s+", "", unit.lower())
+    target = f"sc-{compact_unit}-raindance"
+
+    def matches_subject(subject):
+        compact = re.sub(r"\s+", "", str(subject or "").lower())
+        return target in compact
+
+    response = requests.get(
+        ERP_ISSUES_URL,
+        headers=_erp_headers(),
+        params={
+            "fields": json.dumps(["name", "subject", "status", "modified"]),
+            "filters": json.dumps([
+                ["subject", "like", f"%{target}%"],
+                ["status", "=", "Open"],
+            ]),
+            "limit_page_length": 50,
+            "order_by": "modified desc",
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    rows = (response.json() or {}).get("data")
+    if not isinstance(rows, list):
+        return None, "ERP Issue response did not contain a data list"
+
+    unique = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        subject = str(row.get("subject") or "")
+        if not matches_subject(subject):
+            continue
+        issue_id = str(row.get("name") or "").strip()
+        if not issue_id or issue_id in seen:
+            continue
+        seen.add(issue_id)
+        unique.append({
+            "issue_id": issue_id,
+            "subject": subject,
+            "status": str(row.get("status") or "").strip(),
+            "url": _issue_ticket_url(issue_id),
+        })
+
+    if not unique:
+        # Case-sensitive ERP "like" fallback: scan recent Open issues locally.
+        response = requests.get(
+            ERP_ISSUES_URL,
+            headers=_erp_headers(),
+            params={
+                "fields": json.dumps(["name", "subject", "status", "modified"]),
+                "filters": json.dumps([["status", "=", "Open"]]),
+                "limit_page_length": 500,
+                "order_by": "modified desc",
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            return None, _erp_response_error(response)
+        for row in (response.json() or {}).get("data") or []:
+            if not isinstance(row, dict):
+                continue
+            subject = str(row.get("subject") or "")
+            if not matches_subject(subject):
+                continue
+            issue_id = str(row.get("name") or "").strip()
+            if not issue_id or issue_id in seen:
+                continue
+            seen.add(issue_id)
+            unique.append({
+                "issue_id": issue_id,
+                "subject": subject,
+                "status": str(row.get("status") or "").strip(),
+                "url": _issue_ticket_url(issue_id),
+            })
+
+    if not unique:
+        return None, f"No Open Raindance issue found for unit {unit}"
+    if len(unique) > 1:
+        labels = ", ".join(
+            f"{item['issue_id']} ({item['subject']})" for item in unique[:5]
+        )
+        return None, f"Multiple Open Raindance issues for {unit}: {labels}"
+    return unique[0], None
+
+--- _issue_already_assigned ---  (work_tool.py)
+
+def _issue_already_assigned(doc):
+    raw = (doc or {}).get("_assign")
+    if not raw:
+        return False
+    if isinstance(raw, list):
+        return any(str(item).strip() for item in raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text in ("[]", "null"):
+            return False
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return True
+        if isinstance(parsed, list):
+            return any(str(item).strip() for item in parsed)
+        return bool(parsed)
+    return True
+
+--- _user_group_member_names ---  (work_tool.py)
+
+def _user_group_member_names(group_name):
+    response = requests.get(
+        f"{erp_base_url()}/api/resource/User Group Member",
+        headers=_erp_headers(),
+        params={
+            "fields": json.dumps(["user"]),
+            "filters": json.dumps([["parent", "=", group_name]]),
+            "limit_page_length": 500,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return [], _erp_response_error(response)
+    users = []
+    for row in (response.json() or {}).get("data") or []:
+        user = str((row or {}).get("user") or "").strip()
+        if user and user not in users:
+            users.append(user)
+    return users, None
+
+--- _assign_issue_to_user_group ---  (work_tool.py)
+
+def _assign_issue_to_user_group(issue_id, users):
+    response = requests.post(
+        f"{erp_base_url()}/api/method/frappe.desk.form.assign_to.add",
+        headers=_erp_headers(),
+        json={
+            "assign_to": users,
+            "doctype": "Issue",
+            "name": issue_id,
+            "notify": 0,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return _erp_response_error(response)
+    return None
+
+--- set_issue_preset_fields ---  (work_tool.py)
+
+def set_issue_preset_fields(preset_id, issue_id, unit, subject=""):
+    """Fill empty ERP Issue fields from a named preset. Never overwrites set values."""
+    preset = ISSUE_FIELD_PRESETS.get(str(preset_id or "").strip())
+    if not preset:
+        return None, f"Unknown field preset: {preset_id}"
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return None, "Missing issue_id"
+    doc, error = _fetch_erp_issue_doc(issue_id)
+    if error:
+        return None, error
+
+    now = _arizona_now()
+    desired = {}
+    if preset.get("issue_type"):
+        desired["issue_type"] = preset["issue_type"]
+    if preset.get("issue_subtype"):
+        desired["issue_subtype"] = preset["issue_subtype"]
+    if preset.get("set_incident_now"):
+        desired["incident_date"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    if preset.get("set_followup_today"):
+        desired["next_followup"] = now.strftime("%Y-%m-%d")
+    if preset.get("working_team"):
+        desired["working_team"] = preset["working_team"]
+    if preset.get("owner_team"):
+        desired["owner_team"] = preset["owner_team"]
+    if preset.get("progress"):
+        desired["progress"] = preset["progress"]
+
+    env_name = str(preset.get("who_is_working_env") or "").strip()
+    who = (os.getenv(env_name) or "").strip().strip('"').strip("'") if env_name else ""
+    unit = str(unit or "").strip()
+    subject = str(subject or "").strip()
+    component = _sc_component_name(unit) if preset.get("set_component") else ""
+    set_fields = []
+    skipped = []
+    errors = []
+    payload = {}
+
+    for field_name, value in desired.items():
+        if _erp_field_empty(doc.get(field_name)):
+            payload[field_name] = value
+        else:
+            skipped.append({"field": field_name, "reason": "already set"})
+
+    if env_name:
+        if who:
+            if _erp_field_empty(doc.get("who_is_working")):
+                payload["who_is_working"] = who
+            else:
+                skipped.append({"field": "who_is_working", "reason": "already set"})
+        else:
+            skipped.append({
+                "field": "who_is_working",
+                "reason": f"{env_name} is not set in .env",
+            })
+
+    if preset.get("set_component"):
+        if component:
+            if _erp_field_empty(doc.get("component")):
+                if _component_exists(component):
+                    payload["component"] = component
+                else:
+                    errors.append(f"Component {component} was not found in ERP")
+                    skipped.append({"field": "component", "reason": "not found in ERP"})
+            else:
+                skipped.append({"field": "component", "reason": "already set"})
+        else:
+            skipped.append({"field": "component", "reason": "missing unit"})
+
+    if preset.get("set_site"):
+        if _erp_field_empty(doc.get("site")):
+            if not unit:
+                skipped.append({"field": "site", "reason": "missing unit"})
+            else:
+                site_id, site_error = resolve_shield_site_id(unit, subject)
+                if site_error:
+                    errors.append(site_error)
+                    skipped.append({"field": "site", "reason": site_error})
+                elif site_id:
+                    payload["site"] = site_id
+                else:
+                    skipped.append({"field": "site", "reason": "no site found"})
+        else:
+            skipped.append({"field": "site", "reason": "already set"})
+
+    if payload:
+        response = requests.put(
+            f"{erp_base_url()}/api/resource/Issue/{issue_id}",
+            headers=_erp_headers(),
+            json=payload,
+            timeout=30,
+        )
+        if not response.ok:
+            return None, _erp_response_error(response)
+        set_fields.extend(payload.keys())
+
+    user_group = str(preset.get("user_group") or "").strip()
+    if preset.get("assign_user_group") and user_group:
+        if _issue_already_assigned(doc):
+            skipped.append({"field": "assigned_user_group", "reason": "already assigned"})
+        else:
+            users, group_error = _user_group_member_names(user_group)
+            if group_error:
+                errors.append(group_error)
+                skipped.append({"field": "assigned_user_group", "reason": group_error})
+            elif not users:
+                skipped.append({
+                    "field": "assigned_user_group",
+                    "reason": f"User Group {user_group} has no members",
+                })
+            else:
+                assign_error = _assign_issue_to_user_group(issue_id, users)
+                if assign_error:
+                    errors.append(assign_error)
+                    skipped.append({"field": "assigned_user_group", "reason": assign_error})
+                else:
+                    set_fields.append("assigned_user_group")
+
+    current_type = str(payload.get("issue_type") or doc.get("issue_type") or "").strip()
+    current_subtype = str(
+        payload.get("issue_subtype") or doc.get("issue_subtype") or ""
+    ).strip()
+    return {
+        "preset_id": str(preset_id).strip(),
+        "preset_label": preset["label"],
+        "list_id": preset.get("list_id") or "",
+        "issue_id": issue_id,
+        "component": component,
+        "set_fields": set_fields,
+        "skipped": skipped,
+        "errors": errors,
+        "issue_type": current_type,
+        "issue_subtype": current_subtype,
+        "outage_type": _parse_outage_kind(current_type),
+        "undiagnosed": not bool(current_subtype),
+    }, None
+
+--- add_missing_issue_components ---  (work_tool.py)
+
+def add_missing_issue_components(tickets):
+    """Fill empty Issue.component and/or Issue.site. Never overwrite existing values."""
+    updated = []
+    skipped = []
+    errors = []
+    component_cache = {}
+    pending = []
+    seen = set()
+    erp_headers = _erp_headers()
+    for ticket in tickets or []:
+        issue_id = str((ticket or {}).get("issue_id") or "").strip()
+        unit = str((ticket or {}).get("unit") or "").strip()
+        subject = str((ticket or {}).get("subject") or "").strip()
+        if not unit:
+            unit = _head_unit_from_subject(subject)
+        if not issue_id or not unit or issue_id in seen:
+            continue
+        seen.add(issue_id)
+        unit_component = _sc_component_name(unit)
+        if not unit_component:
+            skipped.append({
+                "issue_id": issue_id,
+                "reason": "missing unit",
+            })
+            continue
+        pending.append({
+            "issue_id": issue_id,
+            "unit": unit,
+            "subject": subject,
+            "unit_component": unit_component,
+        })
+    print(
+        f"Add Missing Components/Sites: checking {len(pending)} tickets"
+    )
+    try:
+        issue_docs = _fetch_erp_issue_component_site_map(
+            [item["issue_id"] for item in pending]
+        )
+    except Exception as exc:
+        return {
+            "checked": len(seen),
+            "updated": [],
+            "component_set": 0,
+            "site_set": 0,
+            "skipped": skipped,
+            "errors": [f"Failed to load Issues from ERP: {exc}"],
+        }
+
+    work_items = []
+    component_names = set()
+    for item in pending:
+        issue_id = item["issue_id"]
+        doc = issue_docs.get(issue_id)
+        if not isinstance(doc, dict):
+            errors.append(f"{issue_id}: was not found in ERP")
+            continue
+        need_component = _erp_field_empty(doc.get("component"))
+        need_site = _erp_field_empty(doc.get("site"))
+        if not need_component and not need_site:
+            skipped.append({
+                "issue_id": issue_id,
+                "reason": "already set",
+                "component": str(doc.get("component") or "").strip(),
+                "site": str(doc.get("site") or "").strip(),
+            })
+            continue
+        if need_component:
+            component_names.add(item["unit_component"])
+        if need_site:
+            parent_mu = _parent_mu_from_subject(item["subject"])
+            site_source = parent_mu or item["unit"]
+            for name in _component_lookup_names(
+                site_source,
+                try_bare=bool(parent_mu),
+            ):
+                component_names.add(name)
+        work_items.append({
+            **item,
+            "need_component": need_component,
+            "need_site": need_site,
+        })
+
+    try:
+        _fetch_erp_component_site_map(
+            component_names,
+            component_cache,
+            headers=erp_headers,
+        )
+    except Exception as exc:
+        return {
+            "checked": len(seen),
+            "updated": [],
+            "component_set": 0,
+            "site_set": 0,
+            "skipped": skipped,
+            "errors": [f"Failed to load Components from ERP: {exc}"],
+        }
+
+    puts = []
+    total = len(work_items)
+    for index, item in enumerate(work_items, 1):
+        issue_id = item["issue_id"]
+        unit = item["unit"]
+        subject = item["subject"]
+        unit_component = item["unit_component"]
+        need_component = item["need_component"]
+        need_site = item["need_site"]
+        print(
+            f"Add Missing Components/Sites: {index}/{total} {issue_id} "
+            f"needs "
+            + " and ".join(
+                part for part, needed in (
+                    ("component", need_component),
+                    ("site", need_site),
+                ) if needed
+            )
+        )
+        payload = {}
+        if need_component:
+            component_doc = component_cache.get(unit_component)
+            if not component_doc:
+                errors.append(
+                    f"{issue_id}: Component {unit_component} was not found in ERP"
+                )
+            else:
+                payload["component"] = unit_component
+        if need_site:
+            parent_mu = _parent_mu_from_subject(subject)
+            site_source = parent_mu or unit
+            site, found_name = _site_from_prefetched_component(
+                site_source,
+                component_cache,
+                try_bare=bool(parent_mu),
+            )
+            site_doc = component_cache.get(found_name)
+            if not site_doc:
+                errors.append(
+                    f"{issue_id}: Component {found_name or site_source} was not found in ERP"
+                )
+            elif not site:
+                errors.append(
+                    f"{issue_id}: Component {found_name} has no Site"
+                )
+            else:
+                payload["site"] = site
+        if payload:
+            puts.append({
+                "issue_id": issue_id,
+                "unit": unit,
+                "payload": payload,
+            })
+
+    if puts:
+        print(
+            f"Add Missing Components/Sites: updating {len(puts)} tickets "
+            f"({ADD_MISSING_PUT_WORKERS} workers)"
+        )
+        with ThreadPoolExecutor(max_workers=ADD_MISSING_PUT_WORKERS) as pool:
+            futures = {
+                pool.submit(
+                    _put_issue_component_site,
+                    put["issue_id"],
+                    put["payload"],
+                    erp_headers,
+                ): put
+                for put in puts
+            }
+            for future in as_completed(futures):
+                put = futures[future]
+                try:
+                    issue_id, payload, error = future.result()
+                except Exception as exc:
+                    errors.append(f"{put['issue_id']}: {exc}")
+                    continue
+                if error:
+                    errors.append(f"{issue_id}: {error}")
+                    continue
+                updated.append({
+                    "issue_id": issue_id,
+                    "unit": put["unit"],
+                    **payload,
+                })
+
+    return {
+        "checked": len(seen),
+        "updated": updated,
+        "component_set": sum(1 for item in updated if item.get("component")),
+        "site_set": sum(1 for item in updated if item.get("site")),
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+==============================================================================
+SECTION: PROJECT
+==============================================================================
+
+--- _normalize_erp_project ---  (work_tool.py)
+
+def _normalize_erp_project(project):
+    subject = str(
+        _erp_issue_value(project, "subject", "project_name", "title", "name")
+    ).strip()
+    project_id = str(_erp_issue_value(project, "name", "id")).strip()
+    # Prefer a human subject when name was used as the only fallback.
+    project_name = str(_erp_issue_value(project, "project_name", "subject", "title")).strip()
+    if project_name and subject == project_id:
+        subject = project_name
+    elif project_name and not subject:
+        subject = project_name
+    return {
+        "project_id": project_id,
+        "subject": subject,
+        "status": str(_erp_issue_value(project, "status")).strip(),
+        "percent_complete": _parse_project_percent_complete(
+            _erp_issue_value(
+                project,
+                "percent_complete",
+                "percent complete",
+                "percentage_complete",
+                "completion",
+            )
+        ),
+        "modified": str(_erp_issue_value(project, "modified")).strip(),
+    }
+
+--- _fetch_erp_project_pages ---  (work_tool.py)
+
+def _fetch_erp_project_pages(statuses=None, page_size=200, order_by="creation asc"):
+    load_dotenv(env_path)
+    erp_token = (os.getenv("erp_token") or "").strip().strip('"').strip("'")
+    if not erp_token:
+        raise RuntimeError("erp_token is not set in .env")
+
+    if statuses is None:
+        statuses = ERP_ACTIVE_PROJECT_STATUSES
+    requested_statuses = [str(status).strip() for status in statuses if str(status).strip()]
+    headers = {"Authorization": f"token {erp_token}"}
+    raw_projects = []
+    start = 0
+
+    while True:
+        response = requests.get(
+            ERP_PROJECTS_URL,
+            headers=headers,
+            params={
+                "fields": json.dumps(["*"]),
+                "filters": json.dumps([["status", "in", requested_statuses]]),
+                "limit_start": start,
+                "limit_page_length": page_size,
+                "order_by": order_by,
+            },
+            timeout=30,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"ERP Project request failed ({response.status_code}): "
+                f"{_erp_response_error(response)}"
+            ) from exc
+        payload = response.json()
+        page = payload.get("data", [])
+        if not isinstance(page, list):
+            raise RuntimeError("ERP Project response did not contain a data list")
+        raw_projects.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+    return raw_projects, requested_statuses
+
+--- fetch_erp_projects ---  (work_tool.py)
+
+def fetch_erp_projects(statuses=None, page_size=200):
+    """Fetch Open/In Progress ERP Projects whose subject contains NOC."""
+    raw_projects, requested_statuses = _fetch_erp_project_pages(
+        statuses=statuses,
+        page_size=page_size,
+        order_by="modified desc",
+    )
+    active_statuses = {status.lower() for status in requested_statuses}
+    normalized = []
+    seen_ids = set()
+    for raw_project in raw_projects:
+        project = _normalize_erp_project(raw_project)
+        if (
+            project["project_id"]
+            and project["subject"]
+            and project["status"].lower() in active_statuses
+            and _project_subject_has_noc(project["subject"])
+            and project["project_id"] not in seen_ids
+        ):
+            normalized.append(project)
+            seen_ids.add(project["project_id"])
+    return normalized
+
+--- fetch_erp_prep_projects ---  (work_tool.py)
+
+def fetch_erp_prep_projects(statuses=None, page_size=200):
+    """Fetch Open/In Progress ERP Projects whose name/subject contains Prep."""
+    raw_projects, requested_statuses = _fetch_erp_project_pages(
+        statuses=statuses,
+        page_size=page_size,
+        order_by="modified desc",
+    )
+    active_statuses = {status.lower() for status in requested_statuses}
+    normalized = []
+    seen_ids = set()
+    for raw_project in raw_projects:
+        project = _normalize_erp_project(raw_project)
+        if (
+            project["project_id"]
+            and project["subject"]
+            and project["status"].lower() in active_statuses
+            and _project_subject_has_prep(project["subject"])
+            and project["project_id"] not in seen_ids
+        ):
+            normalized.append(project)
+            seen_ids.add(project["project_id"])
+    return normalized
+
+--- create_noc_deployment_project ---  (work_tool.py)
+
+def create_noc_deployment_project(prep_project_id, prep_subject=None):
+    """Create an NOC Deployment project from a Prep project name + template."""
+    prep_project_id = str(prep_project_id or "").strip()
+    if not prep_project_id:
+        return None, "Missing prep project id"
+    subject = str(prep_subject or "").strip()
+    if not subject:
+        response = requests.get(
+            f"{ERP_PROJECTS_URL}/{prep_project_id}",
+            headers=_erp_headers(),
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return None, f"{prep_project_id} was not found in ERP"
+        if not response.ok:
+            return None, _erp_response_error(response)
+        doc = (response.json() or {}).get("data")
+        if not isinstance(doc, dict):
+            return None, f"ERP did not return Project {prep_project_id}"
+        subject = _normalize_erp_project(doc).get("subject") or ""
+    if not subject:
+        return None, "Prep project has no subject/name"
+    if not _project_subject_has_prep(subject):
+        return None, "Selected project does not look like a Prep project"
+    deployment_name = _noc_deployment_name_from_prep(subject)
+    if deployment_name == subject:
+        return None, (
+            "Could not derive NOC Deployment name from Prep subject. "
+            "Expected a leading 'Region: Deployment Prep' prefix."
+        )
+    payload = {
+        "project_name": deployment_name,
+        "project_template": NOC_DEPLOYMENT_PROJECT_TEMPLATE,
+        "status": "Open",
+    }
+    response = requests.post(
+        ERP_PROJECTS_URL,
+        headers={**_erp_headers(), "Content-Type": "application/json"},
+        json=payload,
+        timeout=60,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    created = (response.json() or {}).get("data")
+    if not isinstance(created, dict):
+        return None, "ERP did not return the created Project"
+    created_id = str(_erp_issue_value(created, "name", "id")).strip()
+    created_name = str(
+        _erp_issue_value(created, "project_name", "subject", "title") or deployment_name
+    ).strip()
+    if not created_id:
+        return None, "ERP created Project but returned no id"
+    return {
+        "project_id": created_id,
+        "project_name": created_name,
+        "url": _project_ticket_url(created_id),
+        "prep_project_id": prep_project_id,
+    }, None
+
+--- create_noc_termination_project ---  (work_tool.py)
+
+def create_noc_termination_project(issue_id, issue_subject=None):
+    """Create NOC Termination project(s) from a Termination issue (one per unit)."""
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return None, "Missing issue id"
+    subject = str(issue_subject or "").strip()
+    if not subject:
+        response = requests.get(
+            f"{ERP_ISSUES_URL}/{issue_id}",
+            headers=_erp_headers(),
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return None, f"{issue_id} was not found in ERP"
+        if not response.ok:
+            return None, _erp_response_error(response)
+        doc = (response.json() or {}).get("data")
+        if not isinstance(doc, dict):
+            return None, f"ERP did not return Issue {issue_id}"
+        subject = _normalize_erp_issue(doc).get("subject") or ""
+    if not subject:
+        return None, "Issue has no subject"
+    if "termination" not in subject.lower():
+        return None, "Selected issue does not look like a Termination ticket"
+    termination_names = _noc_termination_names_from_issue(subject)
+    if not termination_names:
+        return None, (
+            "Could not derive NOC Termination name from issue subject. "
+            "Expected 'Region - Unit[/Unit...] - Termination - Rest'."
+        )
+    created_projects = []
+    errors = []
+    for termination_name in termination_names:
+        payload = {
+            "project_name": termination_name,
+            "project_template": NOC_TERMINATION_PROJECT_TEMPLATE,
+            "status": "Open",
+        }
+        response = requests.post(
+            ERP_PROJECTS_URL,
+            headers={**_erp_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        if not response.ok:
+            errors.append(f"{termination_name}: {_erp_response_error(response)}")
+            continue
+        created = (response.json() or {}).get("data")
+        if not isinstance(created, dict):
+            errors.append(f"{termination_name}: ERP did not return the created Project")
+            continue
+        created_id = str(_erp_issue_value(created, "name", "id")).strip()
+        created_name = str(
+            _erp_issue_value(created, "project_name", "subject", "title")
+            or termination_name
+        ).strip()
+        if not created_id:
+            errors.append(f"{termination_name}: ERP created Project but returned no id")
+            continue
+        created_projects.append({
+            "project_id": created_id,
+            "project_name": created_name,
+            "url": _project_ticket_url(created_id),
+        })
+    if not created_projects:
+        return None, (errors[0] if errors else "Failed to create Termination project(s)")
+    first = created_projects[0]
+    return {
+        "project_id": first["project_id"],
+        "project_name": first["project_name"],
+        "url": first["url"],
+        "issue_id": issue_id,
+        "count": len(created_projects),
+        "projects": created_projects,
+        "errors": errors,
+    }, None
+
+--- create_noc_relocation_project ---  (work_tool.py)
+
+def create_noc_relocation_project(issue_id, issue_subject=None):
+    """Create NOC Relocation project(s) from a Relocation issue (one per unit)."""
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return None, "Missing issue id"
+    subject = str(issue_subject or "").strip()
+    if not subject:
+        response = requests.get(
+            f"{ERP_ISSUES_URL}/{issue_id}",
+            headers=_erp_headers(),
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return None, f"{issue_id} was not found in ERP"
+        if not response.ok:
+            return None, _erp_response_error(response)
+        doc = (response.json() or {}).get("data")
+        if not isinstance(doc, dict):
+            return None, f"ERP did not return Issue {issue_id}"
+        subject = _normalize_erp_issue(doc).get("subject") or ""
+    if not subject:
+        return None, "Issue has no subject"
+    if "relocation" not in subject.lower():
+        return None, "Selected issue does not look like a Relocation ticket"
+    relocation_names = _noc_relocation_names_from_issue(subject)
+    if not relocation_names:
+        return None, (
+            "Could not derive NOC Relocation name from issue subject. "
+            "Expected 'Region - Unit[/Unit...] - Relocation - Rest'."
+        )
+    created_projects = []
+    errors = []
+    for relocation_name in relocation_names:
+        payload = {
+            "project_name": relocation_name,
+            "project_template": NOC_RELOCATION_PROJECT_TEMPLATE,
+            "status": "Open",
+        }
+        response = requests.post(
+            ERP_PROJECTS_URL,
+            headers={**_erp_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        if not response.ok:
+            errors.append(f"{relocation_name}: {_erp_response_error(response)}")
+            continue
+        created = (response.json() or {}).get("data")
+        if not isinstance(created, dict):
+            errors.append(f"{relocation_name}: ERP did not return the created Project")
+            continue
+        created_id = str(_erp_issue_value(created, "name", "id")).strip()
+        created_name = str(
+            _erp_issue_value(created, "project_name", "subject", "title")
+            or relocation_name
+        ).strip()
+        if not created_id:
+            errors.append(f"{relocation_name}: ERP created Project but returned no id")
+            continue
+        created_projects.append({
+            "project_id": created_id,
+            "project_name": created_name,
+            "url": _project_ticket_url(created_id),
+        })
+    if not created_projects:
+        return None, (errors[0] if errors else "Failed to create Relocation project(s)")
+    first = created_projects[0]
+    return {
+        "project_id": first["project_id"],
+        "project_name": first["project_name"],
+        "url": first["url"],
+        "issue_id": issue_id,
+        "count": len(created_projects),
+        "projects": created_projects,
+        "errors": errors,
+    }, None
+
+--- create_refurbish_projects_from_termination ---  (work_tool.py)
+
+def create_refurbish_projects_from_termination(subject, unit=None):
+    """Create Digital RD, Physical RD, and optional Physical Trailer refurb projects."""
+    preview, error = _refurbish_project_specs(subject, unit=unit)
+    if error:
+        return None, error
+
+    created_projects = []
+    errors = []
+    for spec in preview["specs"]:
+        project_name = spec["project_name"]
+        payload = {
+            "project_name": project_name,
+            "project_template": spec["project_template"],
+            "status": "Open",
+        }
+        response = requests.post(
+            ERP_PROJECTS_URL,
+            headers={**_erp_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        if not response.ok:
+            errors.append(f"{project_name}: {_erp_response_error(response)}")
+            continue
+        created = (response.json() or {}).get("data")
+        if not isinstance(created, dict):
+            errors.append(f"{project_name}: ERP did not return the created Project")
+            continue
+        created_id = str(_erp_issue_value(created, "name", "id")).strip()
+        created_name = str(
+            _erp_issue_value(created, "project_name", "subject", "title")
+            or project_name
+        ).strip()
+        if not created_id:
+            errors.append(f"{project_name}: ERP created Project but returned no id")
+            continue
+        created_projects.append({
+            "project_id": created_id,
+            "project_name": created_name,
+            "project_template": spec["project_template"],
+            "url": _project_ticket_url(created_id),
+        })
+
+    if not created_projects:
+        return None, (errors[0] if errors else "Failed to create refurbish project(s)")
+
+    first = created_projects[0]
+    return {
+        "project_id": first["project_id"],
+        "project_name": first["project_name"],
+        "url": first["url"],
+        "region": preview["region"],
+        "rd_unit": preview["rd_unit"],
+        "mu_unit": preview["mu_unit"],
+        "count": len(created_projects),
+        "projects": created_projects,
+        "errors": errors,
+    }, None
+
+==============================================================================
+SECTION: SITE
+==============================================================================
+
+--- _normalize_erp_site ---  (work_tool.py)
+
+def _normalize_erp_site(doc):
+    return {
+        "site_id": str(_erp_issue_value(doc, "name", "id")).strip(),
+        "site_name": str(_erp_issue_value(doc, "site_name", "name")).strip(),
+        "status": str(_erp_issue_value(doc, "status")).strip(),
+        "region": str(_erp_issue_value(doc, "region")).strip(),
+        "contract_start": str(_erp_issue_value(doc, "contract_start") or "").strip() or None,
+        "contract_end": str(_erp_issue_value(doc, "contract_end") or "").strip() or None,
+    }
+
+--- _search_erp_sites ---  (work_tool.py)
+
+def _search_erp_sites(filters, limit=20):
+    response = requests.get(
+        ERP_SITES_URL,
+        headers=_erp_headers(),
+        params={
+            "fields": json.dumps([
+                "name",
+                "site_name",
+                "status",
+                "region",
+                "contract_start",
+                "contract_end",
+            ]),
+            "filters": json.dumps(filters),
+            "limit_page_length": limit,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    rows = (response.json() or {}).get("data")
+    if not isinstance(rows, list):
+        return None, "ERP Site response did not contain a data list"
+    return [_normalize_erp_site(row) for row in rows if isinstance(row, dict)], None
+
+--- find_erp_site_by_project_subject ---  (work_tool.py)
+
+def find_erp_site_by_project_subject(subject, prefer_status=None):
+    """Resolve a Site from a project title using the planned name cascade."""
+    subject = str(subject or "").strip()
+    if not subject:
+        return None, "Missing project subject"
+    candidates = _site_name_candidates_from_project_subject(subject)
+    if not candidates:
+        return None, "Could not derive a site name from the project title"
+
+    matches = []
+    seen_ids = set()
+    for candidate in candidates:
+        rows, error = _search_erp_sites([["site_name", "=", candidate]])
+        if error:
+            return None, error
+        for row in rows or []:
+            site_id = row.get("site_id") or ""
+            if site_id and site_id not in seen_ids:
+                seen_ids.add(site_id)
+                matches.append(row)
+        if matches:
+            break
+
+    if not matches and candidates:
+        rows, error = _search_erp_sites(
+            [["site_name", "like", f"%{candidates[0]}%"]],
+            limit=25,
+        )
+        if error:
+            return None, error
+        for row in rows or []:
+            site_id = row.get("site_id") or ""
+            if site_id and site_id not in seen_ids:
+                seen_ids.add(site_id)
+                matches.append(row)
+
+    if not matches:
+        return None, (
+            "No Site found for candidates: " + ", ".join(candidates)
+        )
+
+    prefer = str(prefer_status or "").strip().lower()
+    if prefer and len(matches) > 1:
+        preferred = [
+            row for row in matches
+            if str(row.get("status") or "").strip().lower() == prefer
+        ]
+        if len(preferred) == 1:
+            return preferred[0], None
+        if preferred:
+            matches = preferred
+
+    if len(matches) > 1:
+        labels = [
+            f"{row.get('site_id')} ({row.get('site_name') or '?'}"
+            f" / {row.get('status') or '?'})"
+            for row in matches[:8]
+        ]
+        return None, "Multiple Sites matched: " + "; ".join(labels)
+
+    return matches[0], None
+
+--- _fetch_erp_site_doc ---  (work_tool.py)
+
+def _fetch_erp_site_doc(site_id):
+    site_id = str(site_id or "").strip()
+    if not site_id:
+        return None, "Missing site id"
+    response = requests.get(
+        f"{ERP_SITES_URL}/{quote(site_id, safe='')}",
+        headers=_erp_headers(),
+        timeout=30,
+    )
+    if response.status_code == 404:
+        return None, f"Site {site_id} was not found in ERP"
+    if not response.ok:
+        return None, _erp_response_error(response)
+    doc = (response.json() or {}).get("data")
+    if not isinstance(doc, dict):
+        return None, f"ERP did not return Site {site_id}"
+    return _normalize_erp_site(doc), None
+
+--- _update_erp_site_fields ---  (work_tool.py)
+
+def _update_erp_site_fields(site_id, fields):
+    site_id = str(site_id or "").strip()
+    if not site_id:
+        return None, "Missing site id"
+    response = requests.put(
+        f"{ERP_SITES_URL}/{quote(site_id, safe='')}",
+        headers={**_erp_headers(), "Content-Type": "application/json"},
+        json=fields,
+        timeout=30,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    doc = (response.json() or {}).get("data")
+    if isinstance(doc, dict):
+        return _normalize_erp_site(doc), None
+    return _fetch_erp_site_doc(site_id)
+
+--- terminate_erp_site_from_project ---  (work_tool.py)
+
+def terminate_erp_site_from_project(subject, site_id=None):
+    """Set Site status Active->Inactive and contract_end to today."""
+    site = None
+    if site_id:
+        site, error = _fetch_erp_site_doc(site_id)
+        if error:
+            return None, error
+    else:
+        site, error = find_erp_site_by_project_subject(subject, prefer_status="Active")
+        if error:
+            return None, error
+    current = str((site or {}).get("status") or "").strip()
+    if current.lower() != "active":
+        return None, (
+            f"Site {(site or {}).get('site_id')} status is {current or '(empty)'}; "
+            "Terminate Site requires Active"
+        )
+    today = _today_erp_date()
+    updated, error = _update_erp_site_fields(
+        site["site_id"],
+        {"status": "Inactive", "contract_end": today},
+    )
+    if error:
+        return None, error
+    return {
+        **(updated or site),
+        "status": "Inactive",
+        "contract_end": today,
+        "action": "terminate",
+    }, None
+
+--- activate_erp_site_from_project ---  (work_tool.py)
+
+def activate_erp_site_from_project(subject, site_id=None):
+    """Set Site status Inactive->Active and contract_start to today."""
+    site = None
+    if site_id:
+        site, error = _fetch_erp_site_doc(site_id)
+        if error:
+            return None, error
+    else:
+        site, error = find_erp_site_by_project_subject(subject, prefer_status="Inactive")
+        if error:
+            return None, error
+    current = str((site or {}).get("status") or "").strip()
+    if current.lower() != "inactive":
+        return None, (
+            f"Site {(site or {}).get('site_id')} status is {current or '(empty)'}; "
+            "Activate Site requires Inactive"
+        )
+    today = _today_erp_date()
+    updated, error = _update_erp_site_fields(
+        site["site_id"],
+        {"status": "Active", "contract_start": today},
+    )
+    if error:
+        return None, error
+    return {
+        **(updated or site),
+        "status": "Active",
+        "contract_start": today,
+        "action": "activate",
+    }, None
+
+--- lookup_erp_site_for_project_action ---  (work_tool.py)
+
+def lookup_erp_site_for_project_action(subject, action):
+    """Preview Site resolution for confirm dialogs."""
+    prefer = "Active" if action == "terminate" else "Inactive"
+    return find_erp_site_by_project_subject(subject, prefer_status=prefer)
+
+==============================================================================
+SECTION: TASK / COMMENT / TECH CHECKS
+==============================================================================
+
+--- get_project_task ---  (work_tool.py)
+
+def get_project_task(project_id, subject):
+    """Return the single Task for project_id + exact subject, or an error."""
+    project_id = str(project_id or "").strip()
+    subject = str(subject or "").strip()
+    if not project_id:
+        return None, "Missing project id"
+    if not subject:
+        return None, "Missing task subject"
+    response = requests.get(
+        ERP_TASKS_URL,
+        headers=_erp_headers(),
+        params={
+            "fields": json.dumps([
+                "name",
+                "subject",
+                "status",
+                "project",
+                "completed_on",
+                "description",
+            ]),
+            "filters": json.dumps([
+                ["project", "=", project_id],
+                ["subject", "=", subject],
+            ]),
+            "limit_page_length": 5,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    rows = (response.json() or {}).get("data")
+    if not isinstance(rows, list):
+        return None, "ERP Task response did not contain a data list"
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        task_project = str(row.get("project") or "").strip()
+        task_id = str(row.get("name") or "").strip()
+        task_subject = str(row.get("subject") or "").strip()
+        if not task_id:
+            continue
+        if task_project != project_id:
+            continue
+        if task_subject != subject:
+            continue
+        matches.append({
+            "task_id": task_id,
+            "subject": task_subject,
+            "status": str(row.get("status") or "").strip(),
+            "project": task_project,
+            "completed_on": str(row.get("completed_on") or "").strip() or None,
+        })
+    if not matches:
+        return None, (
+            f"No Task '{subject}' found on project {project_id}"
+        )
+    if len(matches) > 1:
+        return None, (
+            f"Multiple Tasks named '{subject}' on project {project_id}"
+        )
+    return matches[0], None
+
+--- add_task_comment ---  (work_tool.py)
+
+def add_task_comment(task_id, content, project_id=None):
+    """Post a Comment on a single Task. Optionally re-verify project ownership."""
+    task_id = str(task_id or "").strip()
+    content = str(content or "").strip()
+    if not task_id:
+        return None, "Missing task id"
+    if not content:
+        return None, "Missing comment content"
+    if project_id:
+        response = requests.get(
+            f"{ERP_TASKS_URL}/{quote(task_id, safe='')}",
+            headers=_erp_headers(),
+            timeout=30,
+        )
+        if not response.ok:
+            return None, _erp_response_error(response)
+        doc = (response.json() or {}).get("data")
+        if not isinstance(doc, dict):
+            return None, f"ERP did not return Task {task_id}"
+        task_project = str(doc.get("project") or "").strip()
+        if task_project != str(project_id).strip():
+            return None, (
+                f"Refusing comment: Task {task_id} belongs to {task_project or '(none)'}, "
+                f"not {project_id}"
+            )
+    response = requests.post(
+        ERP_COMMENTS_URL,
+        headers={**_erp_headers(), "Content-Type": "application/json"},
+        json={
+            "comment_type": "Comment",
+            "reference_doctype": "Task",
+            "reference_name": task_id,
+            "content": content,
+        },
+        timeout=30,
+    )
+    if not response.ok:
+        return None, _erp_response_error(response)
+    created = (response.json() or {}).get("data")
+    comment_id = ""
+    if isinstance(created, dict):
+        comment_id = str(created.get("name") or "").strip()
+    return {"comment_id": comment_id, "task_id": task_id}, None
+
+--- _complete_single_tech_task ---  (work_tool.py)
+
+def _complete_single_tech_task(project_id, subject, comment_text):
+    task, error = get_project_task(project_id, subject)
+    if error:
+        return None, error
+    if str(task.get("project") or "").strip() != str(project_id).strip():
+        return None, (
+            f"Refusing update: Task {task.get('task_id')} project mismatch"
+        )
+    _, error = add_task_comment(
+        task["task_id"],
+        comment_text,
+        project_id=project_id,
+    )
+    if error:
+        return None, error
+    status = str(task.get("status") or "").strip()
+    already_done = status.lower() == "completed"
+    if not already_done:
+        today = _today_erp_date()
+        response = requests.put(
+            f"{ERP_TASKS_URL}/{quote(task['task_id'], safe='')}",
+            headers={**_erp_headers(), "Content-Type": "application/json"},
+            json={
+                "status": "Completed",
+                "completed_on": today,
+            },
+            timeout=30,
+        )
+        if not response.ok:
+            return None, _erp_response_error(response)
+        # Re-verify ownership after write
+        verify, verify_error = get_project_task(project_id, subject)
+        if verify_error:
+            return None, (
+                f"Updated {task['task_id']} but re-check failed: {verify_error}"
+            )
+        if str(verify.get("project") or "").strip() != str(project_id).strip():
+            return None, (
+                f"Safety check failed after update for Task {task['task_id']}"
+            )
+        task = verify
+        task["completed_on"] = today
+        task["status"] = "Completed"
+    return {
+        "subject": subject,
+        "task_id": task["task_id"],
+        "status": task.get("status"),
+        "completed_on": task.get("completed_on"),
+        "already_completed": already_done,
+        "ok": True,
+    }, None
+
+--- _cancel_single_tech_task ---  (work_tool.py)
+
+def _cancel_single_tech_task(project_id, subject, comment_text):
+    """Cancel one task on this project only. Already-Cancelled tasks are ignored."""
+    task, error = get_project_task(project_id, subject)
+    if error:
+        return {
+            "subject": subject,
+            "ok": False,
+            "skipped": True,
+            "error": error,
+        }, None
+    if str(task.get("project") or "").strip() != str(project_id).strip():
+        return {
+            "subject": subject,
+            "task_id": task.get("task_id"),
+            "ok": False,
+            "skipped": True,
+            "error": (
+                f"Refusing update: Task {task.get('task_id')} project mismatch"
+            ),
+        }, None
+    status = str(task.get("status") or "").strip()
+    if status.lower() == "cancelled":
+        return {
+            "subject": subject,
+            "task_id": task["task_id"],
+            "status": status,
+            "already_cancelled": True,
+            "ok": True,
+            "skipped": True,
+        }, None
+    _, error = add_task_comment(
+        task["task_id"],
+        comment_text,
+        project_id=project_id,
+    )
+    if error:
+        return {
+            "subject": subject,
+            "task_id": task["task_id"],
+            "ok": False,
+            "skipped": True,
+            "error": error,
+        }, None
+    response = requests.put(
+        f"{ERP_TASKS_URL}/{quote(task['task_id'], safe='')}",
+        headers={**_erp_headers(), "Content-Type": "application/json"},
+        json={"status": "Cancelled"},
+        timeout=30,
+    )
+    if not response.ok:
+        return {
+            "subject": subject,
+            "task_id": task["task_id"],
+            "ok": False,
+            "skipped": True,
+            "error": _erp_response_error(response),
+        }, None
+    verify, verify_error = get_project_task(project_id, subject)
+    if verify_error:
+        return {
+            "subject": subject,
+            "task_id": task["task_id"],
+            "ok": False,
+            "skipped": True,
+            "error": (
+                f"Updated {task['task_id']} but re-check failed: {verify_error}"
+            ),
+        }, None
+    if str(verify.get("project") or "").strip() != str(project_id).strip():
+        return {
+            "subject": subject,
+            "task_id": task["task_id"],
+            "ok": False,
+            "skipped": True,
+            "error": (
+                f"Safety check failed after update for Task {task['task_id']}"
+            ),
+        }, None
+    return {
+        "subject": subject,
+        "task_id": verify["task_id"],
+        "status": "Cancelled",
+        "already_cancelled": False,
+        "ok": True,
+        "skipped": False,
+    }, None
+
+--- preview_project_tech_checks ---  (work_tool.py)
+
+def preview_project_tech_checks(project_id, project_subject):
+    """Read-only preview for the Tech Checks (180 Unit) confirm modal."""
+    project_id = str(project_id or "").strip()
+    project_subject = str(project_subject or "").strip()
+    if not project_id:
+        return None, "Missing project id"
+    if not _is_noc_deployment_project_subject(project_subject):
+        return None, "Tech Checks is only available for NOC Deployment projects"
+    unit = _unit_from_deployment_project_subject(project_subject)
+    if not unit:
+        return None, "Could not parse unit from deployment project title"
+    raindance, error = find_open_raindance_issue(unit)
+    if error:
+        return None, error
+    tasks = []
+    for subject in TECH_CHECK_TASK_SUBJECTS:
+        task, task_error = get_project_task(project_id, subject)
+        if task_error:
+            if subject == TECH_CHECK_ROUTER_SUBJECT:
+                return None, task_error
+            tasks.append({
+                "subject": subject,
+                "ok": False,
+                "error": task_error,
+            })
+            continue
+        tasks.append({
+            "subject": subject,
+            "task_id": task["task_id"],
+            "status": task.get("status"),
+            "ok": True,
+        })
+    cancel_tasks = []
+    for subject in TECH_CHECK_CANCEL_SUBJECTS:
+        task, task_error = get_project_task(project_id, subject)
+        if task_error:
+            cancel_tasks.append({
+                "subject": subject,
+                "ok": False,
+                "error": task_error,
+            })
+            continue
+        cancel_tasks.append({
+            "subject": subject,
+            "task_id": task["task_id"],
+            "status": task.get("status"),
+            "ok": True,
+        })
+    return {
+        "project_id": project_id,
+        "subject": project_subject,
+        "unit": unit,
+        "raindance": raindance,
+        "tasks": tasks,
+        "task_subjects": list(TECH_CHECK_TASK_SUBJECTS),
+        "cancel_tasks": cancel_tasks,
+        "cancel_subjects": list(TECH_CHECK_CANCEL_SUBJECTS),
+        "cancel_comment": TECH_CHECK_CANCEL_COMMENT,
+    }, None
+
+--- complete_project_tech_checks ---  (work_tool.py)
+
+def complete_project_tech_checks(project_id, project_subject):
+    """Complete Tech Checks, then cancel 180-unit N/A tasks on one project only."""
+    preview, error = preview_project_tech_checks(project_id, project_subject)
+    if error:
+        return None, error
+    raindance = preview["raindance"]
+    comment_text = f"PASSED: {raindance['url']}"
+    results = []
+
+    # Router first — abort entirely if it fails before any later writes.
+    router_result, router_error = _complete_single_tech_task(
+        project_id,
+        TECH_CHECK_ROUTER_SUBJECT,
+        comment_text,
+    )
+    if router_error:
+        return None, f"Router tech check failed; no tasks were completed: {router_error}"
+    results.append(router_result)
+
+    for subject in TECH_CHECK_TASK_SUBJECTS[1:]:
+        result, task_error = _complete_single_tech_task(
+            project_id,
+            subject,
+            comment_text,
+        )
+        if task_error:
+            results.append({
+                "subject": subject,
+                "ok": False,
+                "error": task_error,
+            })
+            return {
+                "project_id": project_id,
+                "unit": preview["unit"],
+                "raindance_issue_id": raindance["issue_id"],
+                "raindance_url": raindance["url"],
+                "comment": comment_text,
+                "results": results,
+                "cancel_results": [],
+                "partial": True,
+                "error": (
+                    f"Stopped after failure on '{subject}': {task_error}"
+                ),
+            }, None
+        results.append(result)
+
+    cancel_results = []
+    cancel_errors = []
+    for subject in TECH_CHECK_CANCEL_SUBJECTS:
+        cancel_result, _ = _cancel_single_tech_task(
+            project_id,
+            subject,
+            TECH_CHECK_CANCEL_COMMENT,
+        )
+        cancel_results.append(cancel_result)
+        if not cancel_result.get("ok"):
+            cancel_errors.append(
+                f"{subject}: {cancel_result.get('error') or 'unknown error'}"
+            )
+
+    partial = bool(cancel_errors)
+    error_text = None
+    if cancel_errors:
+        error_text = (
+            "Tech checks completed; some cancel targets were skipped: "
+            + "; ".join(cancel_errors)
+        )
+    return {
+        "project_id": project_id,
+        "unit": preview["unit"],
+        "raindance_issue_id": raindance["issue_id"],
+        "raindance_url": raindance["url"],
+        "comment": comment_text,
+        "cancel_comment": TECH_CHECK_CANCEL_COMMENT,
+        "results": results,
+        "cancel_results": cancel_results,
+        "partial": partial,
+        "error": error_text,
+    }, None
+
+==============================================================================
+SECTION: LEGACY CLI
+==============================================================================
+
+--- rd_battery_map ---  (work_tool.py)
+
+def rd_battery_map():
+    for row in all_battery_units:
+        url = f"{erp_base_url()}/api/resource/Component"
+        erp_token = os.getenv("erp_token")
+        headers = {
+            "Authorization": f"token {erp_token}"
+        }
+
+        params = {
+            "fields": '["name"]',
+            "filters": f'[["parent_component","=","{row["name"]}"]]',
+            "limit_page_length": 0
+        }
+
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        for doc in data.get("data", []):
+            rd_unit = doc["name"]
+            full_unit = {
+                "name": rd_unit,
+                "trailer": row["name"]
+            }
+            all_battery_units_mapped.append(full_unit)
+    return
+
+--- low_battery_rd_fisheye_tool ---  (work_tool.py)
+
+def low_battery_rd_fisheye_tool():
+    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    print("Low battery units: ")
+    for row in low_battery_units:
+        if row["name"][:3] != 'SC-':
+            row["name"] = "SC-" + row["name"]
+            print(f'Adjusted {row["name"]}')
+        battery = row["battery"]
+        print(f"{row['name']} - {battery}")
+        erp_token = os.getenv("erp_token")
+        url = f"{erp_base_url()}/api/resource/Component"
+        headers = {
+            "Authorization": f"token {erp_token}"
+        }
+
+        params = {
+            "fields": '["name"]',
+            "filters": f'[["parent_component","=","{row["name"]}"]]',
+            "limit_page_length": 0
+        }
+
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        for doc in data.get("data", []):
+            rd_unit = doc["name"]
+            print(rd_unit)
+            full_unit = {
+                "name": rd_unit,
+                "trailer": row["name"]
+            }
+            print(f'Adding {full_unit["name"]} to RD low list')
+            rd_down.append(full_unit)
+    print('RD List:')
+    for rd in rd_down:
+        print(f"{rd['name']} - {rd['trailer']}")
+
+==============================================================================
+SECTION: FLASK ROUTES (flask_endpoints.py)
+==============================================================================
+
+--- issues_set_fields ---
+
+def issues_set_fields(preset_id, issue_id):
+    payload = request.get_json(silent=True) or {}
+    unit = str(payload.get("unit") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    source_list_id = str(payload.get("source_list_id") or "").strip()
+    result, error = work_tool.set_issue_preset_fields(
+        preset_id, issue_id, unit, subject=subject
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    list_id = result.get("list_id") or ""
+    move_to_list = ""
+    field_updates = {
+        "issue_type": result.get("issue_type") or "",
+        "outage_type": result.get("outage_type") or "",
+        "issue_subtype": result.get("issue_subtype") or "",
+        "undiagnosed": bool(result.get("undiagnosed")),
+    }
+    if (
+        source_list_id == "false_positives"
+        and str(preset_id or "").strip() in CAMERA_FIELD_PRESET_IDS
+    ):
+        move_to_list = "camera_view"
+        field_updates.update({
+            "is_camera_view": True,
+            "camera_view_status": "green",
+            "led_status": "green",
+        })
+    elif (
+        source_list_id in ("false_positives", "truly_down")
+        and str(preset_id or "").strip() in NUC_DOWN_FIELD_PRESET_IDS
+    ):
+        move_to_list = "nuc_down"
+        field_updates.update({
+            "is_nuc_down": True,
+            "connectivity_kind": "nuc_down",
+            "led_status": "yellow",
+        })
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if job and job.get("results") is not None:
+        with job["state_lock"]:
+            if move_to_list:
+                from_list = (
+                    "false_positives"
+                    if move_to_list == "camera_view"
+                    else source_list_id
+                )
+                _move_shared_issue_to_list(
+                    job["results"],
+                    issue_id,
+                    unit,
+                    from_list,
+                    move_to_list,
+                    field_updates,
+                )
+                job["version"] += 1
+            elif list_id:
+                # Patch even when set_fields is empty so subtype/type refresh
+                # still lands on the shared job without nested-lock hangs.
+                for key in (list_id,):
+                    for item in job["results"].get(key) or []:
+                        if str(item.get("unit") or "").strip() != unit:
+                            continue
+                        if _item_issue_id(item) != str(issue_id or "").strip():
+                            continue
+                        item.update(field_updates)
+                if result.get("set_fields"):
+                    job["version"] += 1
+    result["ok"] = True
+    result["move_to_list"] = move_to_list
+    return jsonify(result)
+
+--- issues_add_missing_components ---
+
+def issues_add_missing_components():
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if job is None or not job.get("done") or job.get("results") is None:
+        return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
+    if not job["poll_lock"].acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Another ERP update is already running"}), 409
+    try:
+        result = _run_add_missing_components(job, scheduled=False)
+        result["ok"] = True
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    finally:
+        job["poll_lock"].release()
+
+--- issues_sync_netsheet ---
+
+def issues_sync_netsheet():
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if job is None or not job.get("done") or job.get("results") is None:
+        return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
+    if not job["poll_lock"].acquire(blocking=False):
+        return jsonify({"ok": False, "error": "Another ERP update is already running"}), 409
+    try:
+        result = _run_netsheet_sync(job, scheduled=False)
+        result["ok"] = True
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    finally:
+        job["poll_lock"].release()
+
+--- issues_create_deployment_project ---
+
+def issues_create_deployment_project():
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("project_id") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    created, error = work_tool.create_noc_deployment_project(
+        project_id,
+        prep_subject=subject or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **created})
+
+--- issues_create_termination_project ---
+
+def issues_create_termination_project():
+    payload = request.get_json(silent=True) or {}
+    issue_id = str(payload.get("issue_id") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    created, error = work_tool.create_noc_termination_project(
+        issue_id,
+        issue_subject=subject or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **created})
+
+--- issues_create_relocation_project ---
+
+def issues_create_relocation_project():
+    payload = request.get_json(silent=True) or {}
+    issue_id = str(payload.get("issue_id") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    created, error = work_tool.create_noc_relocation_project(
+        issue_id,
+        issue_subject=subject or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **created})
+
+--- issues_lookup_site ---
+
+def issues_lookup_site():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in ("terminate", "activate"):
+        return jsonify({"ok": False, "error": "action must be terminate or activate"}), 400
+    site, error = work_tool.lookup_erp_site_for_project_action(subject, action)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **site})
+
+--- issues_terminate_site ---
+
+def issues_terminate_site():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    site_id = str(payload.get("site_id") or "").strip()
+    result, error = work_tool.terminate_erp_site_from_project(
+        subject,
+        site_id=site_id or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **result})
+
+--- issues_activate_site ---
+
+def issues_activate_site():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    site_id = str(payload.get("site_id") or "").strip()
+    result, error = work_tool.activate_erp_site_from_project(
+        subject,
+        site_id=site_id or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **result})
+
+--- issues_clear_mu_coordinates ---
+
+def issues_clear_mu_coordinates():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    unit = str(payload.get("unit") or "").strip()
+    mu = str(payload.get("mu") or "").strip()
+    if mu:
+        result, error = work_tool.clear_mu_coordinates(mu)
+    else:
+        result, error = work_tool.clear_mu_coordinates_from_subject(subject, unit=unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **result})
+
+--- issues_clear_mu_site ---
+
+def issues_clear_mu_site():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    unit = str(payload.get("unit") or "").strip()
+    mu = str(payload.get("mu") or "").strip()
+    if mu:
+        result, error = work_tool.clear_mu_site(mu)
+    else:
+        result, error = work_tool.clear_mu_site_from_subject(subject, unit=unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **result})
+
+--- issues_refurbish_projects_preview ---
+
+def issues_refurbish_projects_preview():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    unit = str(payload.get("unit") or "").strip()
+    preview, error = work_tool.preview_refurbish_projects_from_termination(
+        subject,
+        unit=unit or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **preview})
+
+--- issues_refurbish_projects ---
+
+def issues_refurbish_projects():
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or "").strip()
+    unit = str(payload.get("unit") or "").strip()
+    created, error = work_tool.create_refurbish_projects_from_termination(
+        subject,
+        unit=unit or None,
+    )
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **created})
+
+--- issues_tech_checks_preview ---
+
+def issues_tech_checks_preview():
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("project_id") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    if not project_id:
+        return jsonify({"ok": False, "error": "Missing project id"}), 400
+    if not work_tool._is_noc_deployment_project_subject(subject):
+        return jsonify({
+            "ok": False,
+            "error": "Tech Checks is only available for NOC Deployment projects",
+        }), 400
+    preview, error = work_tool.preview_project_tech_checks(project_id, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **preview})
+
+--- issues_tech_checks ---
+
+def issues_tech_checks():
+    payload = request.get_json(silent=True) or {}
+    project_id = str(payload.get("project_id") or "").strip()
+    subject = str(payload.get("subject") or "").strip()
+    if not project_id:
+        return jsonify({"ok": False, "error": "Missing project id"}), 400
+    if not work_tool._is_noc_deployment_project_subject(subject):
+        return jsonify({
+            "ok": False,
+            "error": "Tech Checks is only available for NOC Deployment projects",
+        }), 400
+    result, error = work_tool.complete_project_tech_checks(project_id, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **result})
+
+--- issues_shield ---
+
+def issues_shield(unit):
+    subject = str(request.args.get("subject") or "").strip()
+    if work_tool._is_noc_deployment_project_subject(subject):
+        site, error = work_tool.find_erp_site_by_project_subject(subject)
+        if error:
+            return error, 404
+        site_id = str((site or {}).get("site_id") or "").strip()
+        if not site_id:
+            return "Matched Site has no id", 404
+    else:
+        site_id, error = work_tool.resolve_shield_site_id(unit, subject)
+        if error:
+            return error, 404
+    url = work_tool.shield_web_url(site_id)
+    if not url:
+        return "workTLD is not set in .env", 502
+    return redirect(url)
+
+==============================================================================
+SECTION: ERP URL CONSTANTS (work_tool.py, module level)
+==============================================================================
+
+ERP_ISSUES_URL = f"{erp_base_url()}/api/resource/Issue"
+ERP_PROJECTS_URL = f"{erp_base_url()}/api/resource/Project"
+ERP_ACTIVE_ISSUE_STATUSES = ("Open", "Monitoring", "On Hold")
+ERP_ACTIVE_PROJECT_STATUSES = ("Open", "In Progress")
+PROJECT_NOC_SUBJECT_TOKEN = "NOC"
+PROJECT_PREP_SUBJECT_TOKEN = "prep"
+NOC_DEPLOYMENT_PROJECT_TEMPLATE = "NOC Deployment/Activation"
+NOC_TERMINATION_PROJECT_TEMPLATE = "NOC Termination"
+NOC_RELOCATION_PROJECT_TEMPLATE = "NOC Unit Relocation"
+DIGITAL_RD_REFURB_TEMPLATE = "Digital RD Refurb"
+PHYSICAL_RD_REFURB_TEMPLATE = "Physical RD Refurb"
+PHYSICAL_TRAILER_REFURB_TEMPLATE = "Physical Trailer Refurb"
+ERP_SITES_URL = f"{erp_base_url()}/api/resource/Site"
+ERP_TASKS_URL = f"{erp_base_url()}/api/resource/Task"
+ERP_COMMENTS_URL = f"{erp_base_url()}/api/resource/Comment"
+TECH_CHECK_TASK_SUBJECTS = (
+
+==============================================================================
+SECTION: FLASK POLL & SCHEDULER (flask_endpoints.py — ERP call sites)
+==============================================================================
+
+--- _run_issues_validation (ERP fetch on startup / 4:00 AM) ---
+
+                issue_records = work_tool.fetch_erp_issues()
+                project_records = work_tool.fetch_erp_projects()
+                prep_records = work_tool.fetch_erp_prep_projects()
+
+--- issues_poll (ERP incremental refresh, ~30 min) ---
+
+                if scope == "projects":
+                    project_records = work_tool.fetch_erp_projects()
+                    prep_records = work_tool.fetch_erp_prep_projects()
+                else:
+                    current_records = work_tool.fetch_erp_issues()
+
+--- _run_add_missing_components (manual + 4:05 AM scheduled) ---
+
+        result = work_tool.add_missing_issue_components(tickets)
+
+--- issues_sync_netsheet / 4:10 AM scheduled (v19 exe, NOT Frappe REST) ---
+
+        result = work_tool.sync_netsheet_from_erp(...)
+
+==============================================================================
+SECTION: V19 INVENTORY (work_tool.py — NOT direct ERP REST API)
+==============================================================================
+
+--- fetch_unit_inventory ---
+
+def fetch_unit_inventory(unit):
+    """Unit inventory provider. Currently v19.exe; swap to native ERP later."""
+    return fetch_unit_inventory_via_v19_exe(unit)
+
+
+--- fetch_unit_inventory_via_v19_exe ---
+
+def fetch_unit_inventory_via_v19_exe(unit):
+    """
+    Query unit IPs through Sentra_Network_toolv19.exe (stdin protocol).
+    Returns (inventory_dict, error). inventory keys are netsheet column indexes.
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return {}, f"Invalid unit: {unit}"
+
+    with _v19_inventory_cache_lock:
+        cached = _v19_inventory_cache.get(unit_key)
+    if cached is not None:
+        inventory, error, _ts = cached
+        return dict(inventory), error
+
+    tool_dir = sentra_network_tool_v19_dir()
+    exe_path = os.path.join(tool_dir, "Sentra_Network_toolv19.exe")
+    if not os.path.isfile(exe_path):
+        error = f"Network utility not found: {exe_path}"
+        with _v19_inventory_cache_lock:
+            _v19_inventory_cache[unit_key] = ({}, error, time.time())
+        return {}, error
+
+    try:
+        process = subprocess.Popen(
+            [exe_path, unit_key],
+            cwd=tool_dir,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            shell=False,
+        )
+    except OSError as exc:
+        error = f"Unable to start Sentra_Network_toolv19.exe: {exc}"
+        with _v19_inventory_cache_lock:
+            _v19_inventory_cache[unit_key] = ({}, error, time.time())
+        return {}, error
+
+    try:
+        stdout, _ = process.communicate(
+            input="show\nclose\n",
+            timeout=V19_INVENTORY_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            stdout, _ = process.communicate(timeout=5)
+        except Exception:
+            stdout = ""
+        error = f"v19 inventory timed out for {unit_key}"
+        with _v19_inventory_cache_lock:
+            _v19_inventory_cache[unit_key] = ({}, error, time.time())
+        return {}, error
+
+    output = stdout or ""
+    if "No ERP component was found" in output:
+        error = f"No ERP component was found for {unit_key}"
+        with _v19_inventory_cache_lock:
+            _v19_inventory_cache[unit_key] = ({}, error, time.time())
+        return {}, error
+
+    inventory = parse_v19_inventory_output(output)
+    if not inventory:
+        error = f"No IP addresses parsed from v19 for {unit_key}"
+        with _v19_inventory_cache_lock:
+            _v19_inventory_cache[unit_key] = ({}, error, time.time())
+        return {}, error
+
+    with _v19_inventory_cache_lock:
+        _v19_inventory_cache[unit_key] = (dict(inventory), None, time.time())
+    return inventory, None
+
+
+--- sync_netsheet_from_erp ---
+
+def sync_netsheet_from_erp(units=None, include_sparse_sheet_rows=True, max_units=200):
+    """
+    Bulk backfill missing/sparse netsheet rows via v19.
+    units: optional iterable of unit codes (from tickets/projects).
+    """
+    if not net_array:
+        generate_net_array()
+
+    candidates = []
+    seen = set()
+
+    def _add(unit_code):
+        key = _normalize_netsheet_unit(unit_code)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        candidates.append(key)
+
+    for unit_code in units or []:
+        _add(unit_code)
+
+    if include_sparse_sheet_rows:
+        # Prefer FD and high RD when capping.
+        sparse = []
+        for row in net_array:
+            if not row:
+                continue
+            key = _normalize_netsheet_unit(row[0])
+            if not key or key in seen:
+                continue
+            if _netsheet_row_is_sparse(row):
+                sparse.append(key)
+        def _sparse_sort_key(code):
+            prefix = code[:2]
+            number = unit_number(code) or 0
+            fd_first = 0 if prefix == "FD" else 1
+            high = 0 if number >= 3300 else 1
+            return (fd_first, high, -number, code)
+        for key in sorted(sparse, key=_sparse_sort_key):
+            if key not in seen:
+                seen.add(key)
+                candidates.append(key)
+
+    if max_units and len(candidates) > max_units:
+        candidates = candidates[:max_units]
+
+    stats = {
+        "checked": 0,
+        "added": 0,
+        "backfilled": 0,
+        "unchanged": 0,
+        "failed": 0,
+        "errors": [],
+        "updated_units": [],
+    }
+    pending_writes = {}
+
+    for unit_key in candidates:
+        stats["checked"] += 1
+        existing = _net_row_for_unit(unit_key)
+        had_row = existing is not None
+        if not _netsheet_row_is_sparse(existing):
+            stats["unchanged"] += 1
+            continue
+        inventory, error = fetch_unit_inventory(unit_key)
+        if error:
+            stats["failed"] += 1
+            stats["errors"].append(f"{unit_key}: {error}")
+            continue
+        merged, changed = merge_sparse_net_row(existing, unit_key, inventory)
+        if not changed:
+            stats["unchanged"] += 1
+            continue
+        pending_writes[unit_key] = merged
+        stats["updated_units"].append(unit_key)
+        if had_row:
+            stats["backfilled"] += 1
+        else:
+            stats["added"] += 1
+
+    if pending_writes:
+        try:
+            persist_net_sheet_updates(pending_writes)
+        except OSError as exc:
+            stats["errors"].append(f"Failed to write net_sheet.csv: {exc}")
+            stats["failed"] += len(pending_writes)
+            stats["added"] = 0
+            stats["backfilled"] = 0
+            stats["updated_units"] = []
+
+    return stats
+
+
+==============================================================================
+SECTION: work_tool_refactored.py (partial duplicate — not used by flask_endpoints)
+==============================================================================
+
+--- erp_base_url ---
+
+def erp_base_url() -> str:
+    tld = work_tld()
+    return f"https://erp.{tld}" if tld else ""
+
+
