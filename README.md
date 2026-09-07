@@ -2,7 +2,7 @@
 
 Internal Flask dashboard for NOC / field ops: ERP outage verification, unit health checks, camera launch, router/switch tools, and related helpers.
 
-Screenshots below were taken from a live local instance. **Sensitive ticket text, unit IDs, customer/site names, and stdout are blurred.** Menu labels and chrome are left readable on purpose.
+Screenshots below were taken from a live local instance.
 
 > **ERP writes are disabled by default** (`DISABLE_ERP_WRITES=1`). Mutating actions stay visible but inactive (Set Fields, Create Project, Terminate/Activate Site, Clear MU, Tech Checks, Add Missing Components). **Resolve (R)** is local-only and stays enabled. Set `DISABLE_ERP_WRITES=0` only when you intentionally need writes. Open / Validate / Ping / Snapshot / cameras remain read-oriented.
 
@@ -14,7 +14,7 @@ Screenshots below were taken from a live local instance. **Sensitive ticket text
 2. Clone the repo.
 3. Copy `.env.example` → `.env` and fill in credentials.
 4. **Never commit** `.env`, `net_sheet.csv`, `uploads/`, or exported CSVs.
-5. Install Python packages used by `flask_endpoints.py` / `work_tool.py` (and `Pillow` only if regenerating docs screenshots).
+5. Install Python packages used by `flask_endpoints.py` / `work_tool.py`.
 6. Copy a local `net_sheet.csv` from an existing install (gitignored).
 7. Optionally set `SENTRA_NETWORK_TOOL_V19_DIR` to your v19 tool folder.
 
@@ -38,24 +38,9 @@ With `DISABLE_ERP_WRITES=1` (default when unset), ERP-mutating actions (Set Fiel
 
 Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navbar + ticket lists + stdout).
 
-![Issues report (blurred)](docs/screenshots/02-issues-report.png)
+![Issues report](docs/screenshots/02-issues-report.png)
 
 **Navbar:** **Issues Dashboard** (home) · **Recovery Email Check** (`/recovery_email`)
-
-### Moved URLs
-
-These old entry points show a short “page moved” screen and auto-redirect to `/`:
-
-| Old URL | Former tool |
-|---------|-------------|
-| `/issues` | Unit Outage Verification landing |
-| `/issues/watch` | Issues watch report |
-| `/victron` | Victron VRM Checker |
-| `/outage_filter` | Outage Filter |
-| `/linux` | Linux Diagnostic Tool |
-| `/zabbix` | Zabbix Monitor |
-
-API-style routes under `/issues/...` (validate, cameras, ping, etc.) are unchanged.
 
 ### Layout
 
@@ -86,13 +71,9 @@ Each list (except a few write-heavy specialty buckets) has **Revalidate** to re-
 
 Switch the toolbar dropdown from **Issues** → **Projects**.
 
-![Projects panel (blurred)](docs/screenshots/06-projects-panel.png)
+![Projects panel](docs/screenshots/06-projects-panel.png)
 
 Shows ERP-ish project buckets such as **Open**, **In Progress**, and **Deployment Prep**, with the same unit command menus and connectivity LEDs. **Pull Projects** refreshes project data (read). Task Controls that write stay visible but disabled when `DISABLE_ERP_WRITES=1` (default).
-
-### Same unit on multiple tickets
-
-If a unit appears more than once (e.g. three tickets), **Validate (Quick/Full)** updates the **status LED on every occurrence** of that unit across lists. Tickets are not auto-moved just because a sibling was validated.
 
 ### Unit search / Unit tools
 
@@ -104,7 +85,7 @@ Type a unit into the list filter even if it is not on the current report. Matchi
 
 Click the unit button (left of the LED) to open **Commands**.
 
-![Command menu (blurred)](docs/screenshots/03-command-menu.png)
+![Command menu](docs/screenshots/03-command-menu.png)
 
 ### Validate
 
@@ -134,7 +115,7 @@ LED colors (compute):
 
 ### Open (external / proxied UIs)
 
-In-app **Open** menu with **Shield** and **ERP** expanded. Button labels are unblurred; ticket/unit context elsewhere on the page is blurred.
+In-app **Open** menu with **Shield** and **ERP** expanded.
 
 ![Open menu — Shield & ERP](docs/screenshots/11-open-shield-erp-buttons.png)
 
@@ -178,8 +159,8 @@ These open browser tabs / redirects. They do **not** write ERP fields by themsel
 
 ### Linux / NUC (when unit supports them)
 
-- **NUC:** reboot, uptime, chkdsk (read-only), Check Patch Version  
-- **Linux → Scrypted:** Set No Audio, Reboot Scrypted / Reboot PVE (destructive — use carefully; not ERP writes, but they reboot gear)
+- **NUC:** reboot, uptime, chkdsk (read-only)  
+- **Linux → Scrypted:** Set No Audio, Reboot Scrypted / Reboot PVE, Check Patch Version, Update Patch Version
 
 ### Disabled ERP Write Functions
 
@@ -202,7 +183,7 @@ With `DISABLE_ERP_WRITES=1` (default), these stay **visible but disabled** in th
 
 From **Cameras → Open All Cameras** (or `/issues/cameras-launch/<UNIT>`).
 
-![Camera launch grid (blurred)](docs/screenshots/05-cameras-launch.png)
+![Camera launch grid](docs/screenshots/05-cameras-launch.png)
 
 - Grid of proxied camera UIs (Dahua H5 / Hikvision with shim).  
 - Controls: **Columns**, **Zoom**, **Height**, **IE mode**, **Reload all**, **Open all in tabs**.  
@@ -220,11 +201,9 @@ Upload the latest Shield NOC outage spreadsheet (`.xlsx` / `.csv`) → **Check R
 
 ### Results dashboard
 
-Lists use **status lights** (same LED language as Issues) next to each list name and ticket row. Ticket units/IDs are blurred in docs screenshots; **list names and LEDs stay visible**.
+Lists use **status lights** (same LED language as Issues) next to each list name and ticket row.
 
 ![Recovery Email results](docs/screenshots/14-recovery-email-results.png)
-
-![Recovery lists with status lights](docs/screenshots/15-recovery-email-lists.png)
 
 | List | LED | Meaning |
 |------|-----|---------|
@@ -269,24 +248,3 @@ See `.env.example` for the full list. Common ones:
 | `PAUSE_AUTOMATED_TASKS` | `1` pauses schedulers / auto poll |
 | `DISABLE_ERP_WRITES` | `1` (default) leaves ERP write buttons visible but disabled; POST routes return 403. Set `0` to allow writes. Resolve (R) is local-only and stays enabled. |
 | `WORK_TOOL_ENV` / `WORK_TOOL_PORT` | live vs sandbox |
-
----
-
-## Secrets policy
-
-- Commit `.env.example` and blurred docs screenshots only.  
-- Do not commit `.env`, netsheets, uploads, or raw unblurred ops screenshots.  
-- Rotate any token that ever appeared in an older git history of a different clone.
-
----
-
-## Regenerating screenshots
-
-Screenshots live in `docs/screenshots/`. They were captured with the Cursor browser tools against a local `:5000` instance (gowitness is optional; not required).
-
-**Issues Dashboard blur rules**
-
-- Blur ticket subject / unit link text (`.ticket-label > a`), unit command-button labels, stdout, and counters.
-- **Leave readable:** status LEDs, issue type / subtype meta (`.meta`), **UNDIAGNOSED** (`.undiagnosed-badge`), **(New!)** (`.new-ticket-badge`), and menu chrome labels.
-- Do **not** press ERP write confirmations.
-- Document Open → Shield / ERP with the in-app button crops only (do not capture live Shield/ERP destination pages).
