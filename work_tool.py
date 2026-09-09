@@ -84,10 +84,10 @@ def raindance_base_url():
     return _env_url("RAINDANCE_BASE_URL", "https://raindance.sentracam.net/unit/")
 
 def art_base_url():
-    """ART report endpoint (see art_get.py)."""
+    """ART report endpoint (see art_get.py / download_art_noc_outage_report)."""
     return _env_url(
         "ART_DATA_URL",
-        "https://art.sentracam.com/art/selectReportParameters?reportId=152",
+        "https://art.sentracam.com/art/selectReportParameters?reportId=153",
     )
 
 def erp_base_url():
@@ -3281,6 +3281,9 @@ def camera_login_info(unit, target):
 
 _camera_session_lock = threading.Lock()
 _camera_sessions = {}
+# requests.Session is not thread-safe. Keep one session per camera *per worker
+# thread* so parallel iframe RPCs (4-camera grid) do not corrupt Digest auth.
+_camera_thread_local = threading.local()
 _CAMERA_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -3303,7 +3306,7 @@ _CAMERA_SKIP_RESP_HEADERS = {
 }
 
 
-_CAMERA_SHIM_VERSION = "39"
+_CAMERA_SHIM_VERSION = "41"
 
 # Injected as early as possible on Hikvision HTML so "download plugin/addon" never flashes.
 _HIKVISION_PLUGIN_HIDE_CSS = (
@@ -3566,24 +3569,56 @@ def open_camera_urls(urls, ie_mode=True):
 
 
 def _camera_proxy_session(unit, target, host, port, username, password, force_auth=None):
-    """Reuse a camera session; Digest by default, optional forced Basic."""
+    """Reuse a per-thread camera session; Digest by default, optional forced Basic.
+
+    requests.Session is not thread-safe. Sharing one Session across Flask worker
+    threads (common with a 4-camera grid) corrupts Digest auth and drops tiles.
+    """
     key = f"{unit}|{target}|{host}|{port}"
+    mode = str(force_auth or "digest").strip().lower()
+    if mode not in ("digest", "basic"):
+        mode = "digest"
+    if force_auth is None:
+        with _camera_session_lock:
+            shared = _camera_sessions.get(key)
+            if shared is not None:
+                mode = getattr(shared, "_work_tool_auth", mode) or mode
+    store = getattr(_camera_thread_local, "sessions", None)
+    if store is None:
+        store = {}
+        _camera_thread_local.sessions = store
+    existing = store.get(key)
+    if existing is not None and getattr(existing, "_work_tool_auth", None) == mode:
+        return existing
+    session = requests.Session()
+    if mode == "basic":
+        session.auth = HTTPBasicAuth(username, password)
+    else:
+        session.auth = HTTPDigestAuth(username, password)
+    session.headers.update({"User-Agent": "work_tool-camera-proxy/1.0"})
+    session._work_tool_auth = mode
+    store[key] = session
     with _camera_session_lock:
-        existing = _camera_sessions.get(key)
-        if existing is not None and force_auth is None:
-            return existing
-        mode = str(force_auth or "digest").strip().lower()
-        if mode not in ("digest", "basic"):
-            mode = "digest"
-        session = requests.Session()
-        if mode == "basic":
-            session.auth = HTTPBasicAuth(username, password)
-        else:
-            session.auth = HTTPDigestAuth(username, password)
-        session.headers.update({"User-Agent": "work_tool-camera-proxy/1.0"})
-        session._work_tool_auth = mode
+        # Remember preferred auth mode for other threads; do not share the Session.
         _camera_sessions[key] = session
-        return session
+    return session
+
+
+def _camera_response_set_cookies(response):
+    """Return every Set-Cookie value (requests collapses multiples by default)."""
+    cookies = []
+    raw = getattr(response, "raw", None)
+    headers = getattr(raw, "headers", None) if raw is not None else None
+    if headers is not None and hasattr(headers, "getlist"):
+        try:
+            cookies = list(headers.getlist("Set-Cookie") or [])
+        except Exception:
+            cookies = []
+    if not cookies:
+        one = response.headers.get("Set-Cookie")
+        if one:
+            cookies = [one]
+    return cookies
 
 
 def proxy_camera_http(
@@ -3718,16 +3753,21 @@ def proxy_camera_http(
             resp_headers[key] = location
             continue
         if lower == "set-cookie":
-            # Scope cookies to this camera's proxy path so a grid of cameras on the
-            # dashboard origin does not overwrite each other's sessions.
-            cleaned = re.sub(r"(?i);\s*domain=[^;]*", "", str(value or ""))
-            cleaned = re.sub(r"(?i);\s*path=[^;]*", "", cleaned)
-            resp_headers[key] = f"{cleaned}; Path={proxy_prefix}/"
             continue
         if lower == "x-frame-options":
             # Allow same-origin Open All launcher iframes.
             continue
         resp_headers[key] = value
+
+    set_cookies = []
+    for cookie in _camera_response_set_cookies(response):
+        # Scope cookies to this camera's proxy path so a grid of cameras on the
+        # dashboard origin does not overwrite each other's sessions.
+        cleaned = re.sub(r"(?i);\s*domain=[^;]*", "", str(cookie or ""))
+        cleaned = re.sub(r"(?i);\s*path=[^;]*", "", cleaned)
+        set_cookies.append(f"{cleaned}; Path={proxy_prefix}/")
+    if set_cookies:
+        resp_headers["Set-Cookie"] = set_cookies
 
     body = response.content or b""
     content_type = response.headers.get("Content-Type") or resp_headers.get("Content-Type") or ""
@@ -4919,7 +4959,8 @@ def find_erp_site_by_project_subject(subject, prefer_status=None):
 
     return matches[0], None
 
-def _fetch_erp_site_doc(site_id):
+def _fetch_erp_site_doc_raw(site_id):
+    """Fetch full ERP Site document (includes addresses child table)."""
     site_id = str(site_id or "").strip()
     if not site_id:
         return None, "Missing site id"
@@ -4935,7 +4976,355 @@ def _fetch_erp_site_doc(site_id):
     doc = (response.json() or {}).get("data")
     if not isinstance(doc, dict):
         return None, f"ERP did not return Site {site_id}"
+    return doc, None
+
+
+def _fetch_erp_site_doc(site_id):
+    doc, error = _fetch_erp_site_doc_raw(site_id)
+    if error:
+        return None, error
     return _normalize_erp_site(doc), None
+
+
+def _parse_nonzero_coords(lat, lon):
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return None
+    if lat_f == 0.0 and lon_f == 0.0:
+        return None
+    return lat_f, lon_f
+
+
+def _coords_from_site_addresses(site_doc):
+    """Primary weather coords: main Site Address, else first address with GPS."""
+    addresses = (site_doc or {}).get("addresses") or []
+    if not isinstance(addresses, list):
+        return None
+    ordered = [row for row in addresses if isinstance(row, dict)]
+    if not ordered:
+        return None
+    mains = [row for row in ordered if row.get("main_address")]
+    for row in (mains + ordered):
+        coords = _parse_nonzero_coords(row.get("latitude"), row.get("longitude"))
+        if coords:
+            return coords
+    return None
+
+
+def _coords_from_trailer_component(unit, subject=""):
+    """Fallback weather coords: attached trailer (MU) Component lat/lon."""
+    mu_code = resolve_attached_mu_code(unit, subject)
+    if not mu_code:
+        return None, ""
+    doc, component_name, error = _fetch_mu_component_doc(mu_code)
+    if error or not doc:
+        return None, mu_code
+    coords = _parse_nonzero_coords(doc.get("latitude"), doc.get("longitude"))
+    if not coords:
+        return None, mu_code or component_name
+    return coords, mu_code or component_name
+
+
+_WMO_WEATHER_LABELS = {
+    0: "Clear",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Drizzle",
+    55: "Dense drizzle",
+    56: "Light freezing drizzle",
+    57: "Freezing drizzle",
+    61: "Slight rain",
+    63: "Rain",
+    65: "Heavy rain",
+    66: "Light freezing rain",
+    67: "Freezing rain",
+    71: "Slight snow",
+    73: "Snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Slight rain showers",
+    81: "Rain showers",
+    82: "Violent rain showers",
+    85: "Slight snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
+
+
+def _wmo_weather_label(code):
+    try:
+        key = int(code)
+    except (TypeError, ValueError):
+        return "Unknown"
+    return _WMO_WEATHER_LABELS.get(key, f"Code {key}")
+
+
+def _wmo_icon_class(code, cloud_cover=None):
+    try:
+        value = int(code)
+    except (TypeError, ValueError):
+        value = None
+    if value is None:
+        icon = "cloud"
+    elif value in (0, 1):
+        icon = "sun"
+    elif value == 2:
+        icon = "sun-cloud"  # partly cloudy
+    elif value == 3:
+        icon = "cloud"  # overcast
+    elif value in (45, 48):
+        icon = "fog"
+    elif value in (71, 73, 75, 77, 85, 86):
+        icon = "cloud-snow"
+    elif value in (95, 96, 99):
+        icon = "cloud-lightning"
+    elif value >= 50:
+        icon = "cloud-rain"
+    else:
+        icon = "cloud"
+
+    # Prefer cloud cover for Google-style partly / mostly cloudy.
+    try:
+        cover = float(cloud_cover)
+    except (TypeError, ValueError):
+        return icon
+    if cover >= 85 and icon in ("sun", "sun-cloud"):
+        return "cloud-mostly"
+    if cover >= 50 and icon == "sun":
+        return "sun-cloud"
+    return icon
+
+
+def _fetch_open_meteo_current(lat, lon):
+    response = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat,
+            "longitude": lon,
+            "current": (
+                "temperature_2m,weather_code,wind_speed_10m,"
+                "relative_humidity_2m,cloud_cover"
+            ),
+            "temperature_unit": "fahrenheit",
+            "wind_speed_unit": "mph",
+            "timezone": "auto",
+        },
+        timeout=20,
+    )
+    if not response.ok:
+        return None, f"Open-Meteo HTTP {response.status_code}"
+    payload = response.json() or {}
+    current = payload.get("current")
+    if not isinstance(current, dict):
+        return None, "Open-Meteo response missing current conditions"
+    weather_code = current.get("weather_code")
+    cloud_cover = current.get("cloud_cover")
+    temp = current.get("temperature_2m")
+    wind = current.get("wind_speed_10m")
+    humidity = current.get("relative_humidity_2m")
+    conditions = _wmo_weather_label(weather_code)
+    try:
+        cover_f = float(cloud_cover)
+        if cover_f >= 85 and weather_code in (0, 1, 2):
+            conditions = "Mostly cloudy"
+        elif cover_f >= 50 and weather_code in (0, 1):
+            conditions = "Partly cloudy"
+    except (TypeError, ValueError):
+        pass
+    try:
+        temp_label = f"{round(float(temp))}°F"
+    except (TypeError, ValueError):
+        temp_label = "?°F"
+    try:
+        wind_label = f"{round(float(wind))} mph"
+    except (TypeError, ValueError):
+        wind_label = "? mph"
+    try:
+        humidity_label = f"{int(round(float(humidity)))}%"
+    except (TypeError, ValueError):
+        humidity_label = "?%"
+    return {
+        "temperature_f": temp,
+        "temperature_label": temp_label,
+        "weather_code": weather_code,
+        "cloud_cover": cloud_cover,
+        "conditions": conditions,
+        "icon": _wmo_icon_class(weather_code, cloud_cover),
+        "wind_mph": wind,
+        "wind_label": wind_label,
+        "humidity": humidity,
+        "humidity_label": humidity_label,
+        "timezone": payload.get("timezone") or "",
+        "observed_at": current.get("time") or "",
+    }, None
+
+
+def get_unit_weather(unit, subject=""):
+    """
+    Resolve site/trailer GPS and fetch current weather from Open-Meteo.
+    Returns (payload_dict, error_message).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+
+    subject_text = str(subject or "").strip()
+    site_id = ""
+    site_name = ""
+    site_error = ""
+    resolved_site_id, resolve_error = resolve_dashboard_site_id(unit_key, subject_text)
+    if resolve_error:
+        site_error = resolve_error
+    elif resolved_site_id:
+        site_id = str(resolved_site_id).strip()
+
+    lat = lon = None
+    coord_source = ""
+    trailer = ""
+
+    if site_id:
+        raw_site, raw_error = _fetch_erp_site_doc_raw(site_id)
+        if raw_error:
+            site_error = raw_error
+        elif raw_site:
+            site_name = str(raw_site.get("site_name") or "").strip()
+            coords = _coords_from_site_addresses(raw_site)
+            if coords:
+                lat, lon = coords
+                coord_source = "site"
+
+    if lat is None:
+        trailer_coords, trailer = _coords_from_trailer_component(unit_key, subject_text)
+        if trailer_coords:
+            lat, lon = trailer_coords
+            coord_source = "trailer"
+
+    if lat is None:
+        bits = ["No GPS on site address or trailer"]
+        if site_id:
+            bits.append(f"site {site_id}")
+        if trailer:
+            bits.append(f"trailer {trailer}")
+        if site_error:
+            bits.append(site_error)
+        return None, " — ".join(bits)
+
+    weather, weather_error = _fetch_open_meteo_current(lat, lon)
+    if weather_error:
+        return None, weather_error
+
+    place = site_name or (f"site {site_id}" if site_id else unit_key)
+    coord_label = f"{lat:.3f},{lon:.3f}"
+    message = (
+        f"{unit_key} weather @ {place} [{coord_source} {coord_label}]: "
+        f"{weather['temperature_label']}, {weather['conditions']}, "
+        f"wind {weather['wind_label']}, humidity {weather['humidity_label']}"
+    )
+    return {
+        "unit": unit_key,
+        "site_id": site_id,
+        "site_name": site_name,
+        "trailer": trailer,
+        "coord_source": coord_source,
+        "latitude": lat,
+        "longitude": lon,
+        **weather,
+        "message": message,
+    }, None
+
+
+# Metro coords for subject region codes (airport-metro centers). Zero ERP.
+REGION_WEATHER_COORDS = {
+    "LAX": (33.9425, -118.4081),
+    "OAK": (37.80437, -122.2708),
+    "HOU": (29.76328, -95.36327),
+    "PHX": (33.44838, -112.07404),
+    "SLC": (40.76078, -111.89105),
+    "DEN": (39.73915, -104.9847),
+}
+
+_REGION_WEATHER_CACHE = {}
+_REGION_WEATHER_CACHE_TTL_SEC = 30 * 60
+_REGION_WEATHER_CACHE_LOCK = threading.Lock()
+
+
+def region_code_from_subject(subject):
+    """Parse leading region code from subjects like 'PHX - RD...' or 'PHX-RD...'."""
+    text = str(subject or "").strip().upper()
+    if not text:
+        return ""
+    codes = "|".join(sorted(REGION_WEATHER_COORDS.keys(), key=len, reverse=True))
+    match = re.match(rf"^({codes})\b", text)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def get_weather_for_regions(regions, force=False):
+    """
+    Current weather for unique subject region codes (LAX/OAK/HOU/PHX/SLC/DEN).
+    Open-Meteo only — no ERP. Returns (regions_map, error_message).
+    """
+    wanted = []
+    seen = set()
+    for raw in regions or []:
+        code = str(raw or "").strip().upper()
+        if code in REGION_WEATHER_COORDS and code not in seen:
+            seen.add(code)
+            wanted.append(code)
+    if not wanted:
+        return {}, None
+
+    now = time.time()
+    out = {}
+    missing = []
+    with _REGION_WEATHER_CACHE_LOCK:
+        for code in wanted:
+            cached = _REGION_WEATHER_CACHE.get(code)
+            if (
+                not force
+                and cached
+                and cached.get("expires_at", 0) > now
+            ):
+                payload = dict(cached.get("payload") or {})
+                payload["cached"] = True
+                out[code] = payload
+            else:
+                missing.append(code)
+
+    for code in missing:
+        lat, lon = REGION_WEATHER_COORDS[code]
+        weather, error = _fetch_open_meteo_current(lat, lon)
+        if error:
+            continue
+        payload = {
+            "region": code,
+            "latitude": lat,
+            "longitude": lon,
+            "coord_source": "region",
+            **weather,
+            "message": (
+                f"{code}: {weather['temperature_label']}, {weather['conditions']}"
+            ),
+            "cached": False,
+        }
+        with _REGION_WEATHER_CACHE_LOCK:
+            _REGION_WEATHER_CACHE[code] = {
+                "expires_at": now + _REGION_WEATHER_CACHE_TTL_SEC,
+                "payload": dict(payload),
+            }
+        out[code] = payload
+
+    return out, None
+
 
 def _update_erp_site_fields(site_id, fields):
     site_id = str(site_id or "").strip()
@@ -6722,6 +7111,23 @@ def validate_issues_report(issue_path=None):
                         "reason": "Additional Features subtype",
                     })
                     continue
+                if (
+                    "add lpr" in subject_lower
+                    or issue_type.lower() == "equipment addition"
+                ):
+                    reason = (
+                        "Equipment Addition"
+                        if issue_type.lower() == "equipment addition"
+                        else "Add LPR ticket"
+                    )
+                    print(f"Discarding {reason}: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": reason,
+                    })
+                    continue
                 if "deployment" in issue_type.lower():
                     print(f"Discarding Deployment ticket: {subject_cell}")
                     discarded_tickets.append({
@@ -7842,13 +8248,217 @@ def _read_spreadsheet_rows(report_path):
                 rows.append(line)
     return rows
 
+
+def art_recovery_report_path():
+    """Persistent path for the hourly ART NOC outage spreadsheet."""
+    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
+    if not data_dir:
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
+    art_dir = os.path.join(data_dir, "art")
+    os.makedirs(art_dir, exist_ok=True)
+    return os.path.join(art_dir, "Shield_NOC_Outage_no_initial_email.xlsx")
+
+
+def _parse_html_table_rows(html_text):
+    """Parse the first HTML table into a list of row lists."""
+    from html.parser import HTMLParser
+
+    class _TableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_table = False
+            self.in_cell = False
+            self.cell_parts = []
+            self.row = []
+            self.rows = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "table" and not self.rows and not self.in_table:
+                self.in_table = True
+            elif self.in_table and tag == "tr":
+                self.row = []
+            elif self.in_table and tag in ("td", "th"):
+                self.in_cell = True
+                self.cell_parts = []
+            elif self.in_cell and tag == "br":
+                self.cell_parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag == "table" and self.in_table:
+                self.in_table = False
+            elif self.in_table and tag == "tr":
+                if self.row:
+                    self.rows.append(self.row)
+            elif self.in_cell and tag in ("td", "th"):
+                text = re.sub(r"\s+", " ", "".join(self.cell_parts)).strip()
+                self.row.append(text)
+                self.in_cell = False
+
+        def handle_data(self, data):
+            if self.in_cell:
+                self.cell_parts.append(data)
+
+    parser = _TableParser()
+    parser.feed(html_text or "")
+    return parser.rows
+
+
+def _parse_art_parameters_form(html_text):
+    """Extract hidden/input/select fields from ART parametersForm."""
+    from html.parser import HTMLParser
+
+    class _FormParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.in_form = False
+            self.fields = {}
+            self.select_name = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form" and attrs.get("id") == "parametersForm":
+                self.in_form = True
+            if not self.in_form:
+                return
+            if tag == "input":
+                name = attrs.get("name")
+                itype = (attrs.get("type") or "text").lower()
+                if not name or itype in ("submit", "button"):
+                    return
+                if itype in ("checkbox", "radio") and "checked" not in attrs:
+                    return
+                self.fields[name] = attrs.get("value") or ""
+            elif tag == "select":
+                self.select_name = attrs.get("name")
+            elif tag == "option" and self.select_name:
+                if self.select_name not in self.fields:
+                    self.fields[self.select_name] = attrs.get("value") or ""
+                if "selected" in attrs:
+                    self.fields[self.select_name] = attrs.get("value") or ""
+
+        def handle_endtag(self, tag):
+            if tag == "select":
+                self.select_name = None
+            if tag == "form" and self.in_form:
+                self.in_form = False
+
+    parser = _FormParser()
+    parser.feed(html_text or "")
+    return parser.fields
+
+
+def download_art_noc_outage_report(dest_path=None):
+    """
+    Login to ART and download report 153 (NOC outage / recovery email sheet).
+
+    ART's native xlsx export fails server-side (Permission denied). This uses the
+    htmlDataTable format (read-only) and writes a local .xlsx via openpyxl.
+
+    Returns (path, error_message).
+    """
+    username = (os.getenv("myemail") or "").strip()
+    password = os.getenv("mypass") or ""
+    if not username or not password:
+        return None, "myemail/mypass are not set in .env"
+
+    dest = dest_path or art_recovery_report_path()
+    report_url = art_base_url()
+    if "reportId=" not in report_url:
+        report_url = (
+            "https://art.sentracam.com/art/selectReportParameters?reportId=153"
+        )
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "work_tool-art-recovery/1.0"})
+    try:
+        login_page = session.get("https://art.sentracam.com/art/login", timeout=30)
+        csrf_match = re.search(
+            r'name="_csrf"\s+value="([^"]+)"',
+            login_page.text or "",
+        )
+        if not csrf_match:
+            return None, "ART login page missing CSRF token"
+        login_resp = session.post(
+            "https://art.sentracam.com/art/login",
+            data={
+                "username": username,
+                "password": password,
+                "_csrf": csrf_match.group(1),
+            },
+            timeout=30,
+            allow_redirects=True,
+        )
+        title_match = re.search(
+            r"<title>(.*?)</title>",
+            login_resp.text or "",
+            re.I | re.S,
+        )
+        title_text = (title_match.group(1) if title_match else "").strip()
+        if "login" in title_text.lower() and 'name="password"' in (login_resp.text or ""):
+            return None, "ART login failed — check myemail/mypass"
+
+        params_page = session.get(report_url, timeout=30)
+        if params_page.status_code != 200:
+            return None, f"ART report page HTTP {params_page.status_code}"
+        fields = _parse_art_parameters_form(params_page.text)
+        if not fields.get("reportId"):
+            return None, "ART parameters form missing reportId (login or permissions?)"
+        fields["reportFormat"] = "htmlDataTable"
+
+        run_resp = session.post(
+            "https://art.sentracam.com/art/runReport",
+            data=fields,
+            files={},
+            headers={"Referer": report_url},
+            timeout=180,
+        )
+        if run_resp.status_code != 200:
+            return None, f"ART runReport HTTP {run_resp.status_code}"
+        if "Permission denied" in (run_resp.text or ""):
+            return None, "ART report failed: Permission denied on ART server"
+        if "An error occurred" in (run_resp.text or "") and "<table" not in (
+            run_resp.text or ""
+        ).lower():
+            return None, "ART runReport returned an error page"
+
+        rows = _parse_html_table_rows(run_resp.text)
+        if not rows:
+            return None, "ART htmlDataTable returned no table rows"
+        header = [str(cell).strip().lower() for cell in rows[0]]
+        if "recovery email" not in header:
+            return None, "ART table missing 'Recovery Email' column"
+
+        try:
+            import openpyxl
+        except ImportError:
+            return None, "openpyxl is required to write .xlsx (pip install openpyxl)"
+
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ART"
+        for row in rows:
+            ws.append(list(row))
+        wb.save(dest)
+        print(f"ART recovery report saved: {dest} ({len(rows)} rows)")
+        return dest, None
+    except requests.exceptions.RequestException as exc:
+        return None, f"ART request failed: {exc}"
+    except Exception as exc:
+        return None, f"ART download failed: {exc}"
+
+
 def check_missing_recovery_emails(report_path=None):
     if report_path is None:
-        report_path = os.path.join(
-            os.path.expanduser("~"),
-            "Downloads",
-            "Shield NOC Outage Issues with no initial email - ART.xlsx",
-        )
+        cached = art_recovery_report_path()
+        if os.path.isfile(cached):
+            report_path = cached
+        else:
+            report_path = os.path.join(
+                os.path.expanduser("~"),
+                "Downloads",
+                "Shield NOC Outage Issues with no initial email - ART.xlsx",
+            )
     units_to_check = []
     unit_issue_map = {}
     unit_meta_map = {}

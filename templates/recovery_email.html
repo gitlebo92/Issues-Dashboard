@@ -49,7 +49,34 @@
             cursor: pointer;
         }
         button:hover { background: #1d4ed8; }
+        button.secondary {
+            background: #334155;
+        }
+        button.secondary:hover { background: #475569; }
         a { color: #93c5fd; }
+        .panel {
+            margin: 16px 0;
+            padding: 14px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 10px;
+        }
+        .panel p {
+            margin: 0 0 12px;
+            color: #cbd5e1;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .panel .meta {
+            color: #94a3b8;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
         .led-legend {
             display: flex;
             flex-wrap: wrap;
@@ -85,7 +112,7 @@
     </nav>
 
     <h1>Recovery Email Check</h1>
-    <h2>Upload the Shield NOC outage spreadsheet (.xlsx or .csv).</h2>
+    <h2>Uses ART report 153 (Shield: NOC outage issues with no initial email), refreshed hourly.</h2>
 
     <div class="led-legend" aria-label="Result list legend">
         <span><i class="status-led is-warning"></i> Needs recovery email</span>
@@ -93,6 +120,24 @@
         <span><i class="status-led is-multi"></i> Potential false positive</span>
         <span><i class="status-led is-info"></i> Pending recovery</span>
         <span><i class="status-led is-up"></i> Email status up to date</span>
+    </div>
+
+    <div class="panel">
+        {% if art_report_ready %}
+        <p class="meta">Cached ART spreadsheet last refreshed: {{ art_report_mtime }}</p>
+        {% else %}
+        <p class="meta">No cached ART spreadsheet yet — download once or wait for the hourly job.</p>
+        {% endif %}
+        <div class="actions">
+            <form method="POST" action="/recovery_email/results">
+                <input type="hidden" name="source" value="art_cached">
+                <button type="submit"{% if not art_report_ready %} disabled title="No cache yet"{% endif %}>Check cached ART report</button>
+            </form>
+            <form method="POST" action="/recovery_email/results">
+                <input type="hidden" name="source" value="art">
+                <button type="submit" class="secondary">Download from ART &amp; Check</button>
+            </form>
+        </div>
     </div>
 
     <ul>
@@ -103,12 +148,16 @@
         <li>row[5] and row[6] both filled → email status up to date</li>
     </ul>
 
-    <form method="POST" action="/recovery_email/results" enctype="multipart/form-data">
-        <label for="report_file">Outage report:</label>
-        <input id="report_file" type="file" name="report_file" accept=".xlsx,.csv" required>
-        <br><br>
-        <button type="submit">Check Recovery Emails</button>
-    </form>
+    <div class="panel">
+        <p>Optional: upload a spreadsheet manually (.xlsx or .csv).</p>
+        <form method="POST" action="/recovery_email/results" enctype="multipart/form-data">
+            <input type="hidden" name="source" value="upload">
+            <label for="report_file">Outage report:</label>
+            <input id="report_file" type="file" name="report_file" accept=".xlsx,.csv" required>
+            <br><br>
+            <button type="submit">Check uploaded file</button>
+        </form>
+    </div>
 
     <br>
     <a href="/">Issues Dashboard</a>
