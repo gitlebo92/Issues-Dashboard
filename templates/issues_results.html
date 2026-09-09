@@ -790,6 +790,155 @@
             background: #f97316;
             box-shadow: 0 0 8px rgba(249, 115, 22, 0.95);
         }
+        .wx-icon {
+            width: 18px;
+            height: 14px;
+            flex-shrink: 0;
+            position: relative;
+            display: inline-block;
+            opacity: 0.95;
+            cursor: pointer;
+        }
+        .wx-icon:hover {
+            opacity: 1;
+            filter: brightness(1.15);
+        }
+        .wx-icon.wx-loading {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+        .wx-icon.wx-pending {
+            opacity: 0.35;
+            background: #64748b;
+            border-radius: 3px;
+        }
+        .wx-icon.wx-sun {
+            background:
+                linear-gradient(#f59e0b, #f59e0b) center / 2px 100% no-repeat,
+                linear-gradient(#f59e0b, #f59e0b) center / 100% 2px no-repeat;
+        }
+        .wx-icon.wx-sun::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 6px;
+            height: 6px;
+            margin: -3px 0 0 -3px;
+            border-radius: 50%;
+            background: #fde047;
+            box-shadow: 0 0 4px rgba(253, 224, 71, 0.95);
+            z-index: 1;
+        }
+        .wx-icon.wx-sun::after {
+            content: "";
+            position: absolute;
+            inset: -1px;
+            background:
+                linear-gradient(#f59e0b, #f59e0b) center / 2px 100% no-repeat,
+                linear-gradient(#f59e0b, #f59e0b) center / 100% 2px no-repeat;
+            transform: rotate(45deg);
+        }
+        .wx-icon.wx-cloud::before,
+        .wx-icon.wx-cloud-mostly::before,
+        .wx-icon.wx-sun-cloud::before,
+        .wx-icon.wx-cloud-rain::before,
+        .wx-icon.wx-cloud-snow::before,
+        .wx-icon.wx-cloud-lightning::before,
+        .wx-icon.wx-fog::before {
+            content: "";
+            position: absolute;
+            left: 1px;
+            right: 1px;
+            top: 3px;
+            height: 7px;
+            border-radius: 8px;
+            background: #cbd5e1;
+            box-shadow: 3px -2px 0 1px #94a3b8, -3px -1px 0 0 #94a3b8;
+        }
+        /* Partly cloudy: bright sun clearly beside / behind cloud */
+        .wx-icon.wx-sun-cloud::after {
+            content: "";
+            position: absolute;
+            width: 7px;
+            height: 7px;
+            right: -1px;
+            top: -1px;
+            border-radius: 50%;
+            background: #fde047;
+            box-shadow: 0 0 5px rgba(253, 224, 71, 0.95);
+            z-index: -1;
+        }
+        /* Mostly cloudy: larger gray cloud, tiny sun barely peeking */
+        .wx-icon.wx-cloud-mostly::before {
+            background: #94a3b8;
+            box-shadow: 4px -2px 0 2px #64748b, -4px -1px 0 1px #64748b;
+            height: 8px;
+            top: 2px;
+        }
+        .wx-icon.wx-cloud-mostly::after {
+            content: "";
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            left: 1px;
+            top: 0;
+            border-radius: 50%;
+            background: #fbbf24;
+            box-shadow: 0 0 3px rgba(251, 191, 36, 0.7);
+            z-index: -1;
+            opacity: 0.85;
+        }
+        .wx-icon.wx-cloud-rain::after,
+        .wx-icon.wx-cloud-snow::after {
+            content: "";
+            position: absolute;
+            left: 4px;
+            right: 4px;
+            bottom: 0;
+            height: 4px;
+            background:
+                radial-gradient(circle at 20% 50%, #38bdf8 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, #38bdf8 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, #38bdf8 1.2px, transparent 1.4px);
+        }
+        .wx-icon.wx-cloud-snow::after {
+            background:
+                radial-gradient(circle at 20% 50%, #e2e8f0 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, #e2e8f0 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, #e2e8f0 1.2px, transparent 1.4px);
+        }
+        .wx-icon.wx-fog::before {
+            height: 2px;
+            top: 4px;
+            box-shadow: 0 3px 0 #94a3b8, 0 6px 0 #64748b;
+            background: #94a3b8;
+            border-radius: 2px;
+        }
+        .wx-icon.wx-cloud-lightning::after {
+            content: "";
+            position: absolute;
+            left: 7px;
+            top: 7px;
+            width: 4px;
+            height: 7px;
+            background: #fde047;
+            clip-path: polygon(40% 0, 100% 0, 55% 45%, 90% 45%, 0 100%, 35% 50%, 5% 50%);
+            animation: wx-bolt-flash 1.2s ease-in-out infinite;
+            filter: drop-shadow(0 0 3px #facc15);
+        }
+        .wx-icon.wx-cloud-lightning::before {
+            animation: wx-cloud-drift 2.4s ease-in-out infinite;
+        }
+        @keyframes wx-bolt-flash {
+            0%, 70%, 100% { opacity: 0.15; }
+            75%, 85% { opacity: 1; }
+            80% { opacity: 0.35; }
+        }
+        @keyframes wx-cloud-drift {
+            0%, 100% { transform: translateX(0); }
+            50% { transform: translateX(1px); }
+        }
         .snapshot-modal {
             position: fixed;
             inset: 0;
@@ -951,6 +1100,7 @@
                 </div>
                 <button type="button" id="clear_checkboxes" class="toolbar-btn">Clear checkboxes</button>
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
+                <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
             <div class="list-section" id="unit_tools_section" data-panel="issues" hidden>
@@ -1145,6 +1295,16 @@
             </div>
         </div>
     </div>
+    <div class="confirm-modal" id="bounce_switch_modal">
+        <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="bounce_switch_title">
+            <h2 id="bounce_switch_title">Bounce switch?</h2>
+            <p id="bounce_switch_message">This will bounce the relay/switch for this unit.</p>
+            <div class="confirm-actions">
+                <button type="button" class="confirm-cancel" id="bounce_switch_cancel">Cancel</button>
+                <button type="button" class="confirm-ok" id="bounce_switch_confirm">Bounce Switch</button>
+            </div>
+        </div>
+    </div>
     <div class="confirm-modal" id="create_deployment_modal">
         <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="create_deployment_title">
             <h2 id="create_deployment_title">Create Deployment Project?</h2>
@@ -1276,6 +1436,7 @@
         const listCategoryOptions = document.getElementById("list_category_options");
         const clearCheckboxesBtn = document.getElementById("clear_checkboxes");
         const pullErpBtn = document.getElementById("pull_erp");
+        const updateWeatherBtn = document.getElementById("update_weather");
         const clearCheckboxesModal = document.getElementById("clear_checkboxes_modal");
         const clearCheckboxesCancel = document.getElementById("clear_checkboxes_cancel");
         const clearCheckboxesConfirm = document.getElementById("clear_checkboxes_confirm");
@@ -1285,6 +1446,14 @@
         const patchUpdateConfirm = document.getElementById("patch_update_confirm");
         let patchUpdateUnit = "";
         let patchUpdateButton = null;
+        const bounceSwitchModal = document.getElementById("bounce_switch_modal");
+        const bounceSwitchMessage = document.getElementById("bounce_switch_message");
+        const bounceSwitchCancel = document.getElementById("bounce_switch_cancel");
+        const bounceSwitchConfirm = document.getElementById("bounce_switch_confirm");
+        let bounceSwitchUnit = "";
+        let bounceSwitchLabel = "Bounce (Relay)";
+        let bounceSwitchEndpoint = "/issues/bounce-switch/";
+        let bounceSwitchButton = null;
         const createDeploymentModal = document.getElementById("create_deployment_modal");
         const createDeploymentMessage = document.getElementById("create_deployment_message");
         const createDeploymentCancel = document.getElementById("create_deployment_cancel");
@@ -1444,6 +1613,315 @@
             }
             return matches;
         }
+
+        const KNOWN_WEATHER_REGIONS = {
+            LAX: true,
+            OAK: true,
+            HOU: true,
+            PHX: true,
+            SLC: true,
+            DEN: true,
+        };
+        const REGION_WEATHER_HISTORY = {
+            LAX: { slug: "los-angeles", name: "Los Angeles" },
+            OAK: { slug: "oakland", name: "Oakland" },
+            HOU: { slug: "houston", name: "Houston" },
+            PHX: { slug: "phoenix", name: "Phoenix" },
+            SLC: { slug: "salt-lake-city", name: "Salt Lake City" },
+            DEN: { slug: "denver", name: "Denver" },
+        };
+        const weatherByRegion = {};
+        let weatherRefreshTimer = null;
+        let weatherAutoRefreshTimer = null;
+        let weatherInitialForcePending = true;
+        const WEATHER_CACHE_MS = 30 * 60 * 1000;
+        const WEATHER_AUTO_REFRESH_MS = 30 * 60 * 1000;
+
+        function regionFromSubject(subject) {
+            const text = String(subject || "").trim().toUpperCase();
+            if (!text) {
+                return "";
+            }
+            const match = text.match(/^(LAX|OAK|HOU|PHX|SLC|DEN)\b/);
+            return match ? match[1] : "";
+        }
+
+        function applyWeatherToIcon(el, data) {
+            if (!el || !data) {
+                return;
+            }
+            const icon = data.icon || "cloud";
+            el.className = "wx-icon wx-" + icon;
+            const weatherTitle = data.message
+                || (
+                    (data.region || el.dataset.region || "")
+                    + ": "
+                    + (data.temperature_label || "?")
+                    + ", "
+                    + (data.conditions || "?")
+                );
+            el.title = weatherTitle + " — click for site weather";
+            el.classList.remove("wx-pending");
+            el.classList.remove("wx-loading");
+        }
+
+        function runGetWeatherForEntry(entry, triggerEl) {
+            if (!entry || !entry.unit) {
+                return;
+            }
+            const isIcon = !!(triggerEl && triggerEl.classList && triggerEl.classList.contains("wx-icon"));
+            const isButton = !!(triggerEl && triggerEl.tagName === "BUTTON");
+            if (isIcon) {
+                triggerEl.classList.add("wx-loading");
+            }
+            if (isButton) {
+                triggerEl.disabled = true;
+                triggerEl.textContent = "Loading...";
+            }
+            statusEl.textContent = "Getting weather for " + entry.unit + "...";
+            fetch("/issues/weather/" + encodeURIComponent(entry.unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    subject: entry.ticketSubject || entry.subject || "",
+                }),
+            })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    const line = data.message
+                        || (
+                            "Weather for "
+                            + (data.unit || entry.unit)
+                            + ": "
+                            + (data.temperature_label || "?")
+                            + ", "
+                            + (data.conditions || "?")
+                        );
+                    consoleLines.push(line);
+                    renderConsole(true);
+                    statusEl.textContent = line;
+                    applyGetWeatherToEntryIcons(entry, data, triggerEl);
+                })
+                .catch(function (error) {
+                    const message = "Weather (Current) failed: " + (error.message || error);
+                    consoleLines.push(message);
+                    renderConsole(true);
+                    statusEl.textContent = message;
+                    window.alert(message);
+                })
+                .finally(function () {
+                    if (isIcon) {
+                        triggerEl.classList.remove("wx-loading");
+                    }
+                    if (isButton) {
+                        triggerEl.disabled = false;
+                        triggerEl.textContent = "Weather (Current)";
+                    }
+                });
+        }
+
+        function wireWeatherIconClick(el, entry) {
+            if (!el || el.dataset.wxWired === "1") {
+                return;
+            }
+            el.dataset.wxWired = "1";
+            el.setAttribute("role", "button");
+            el.tabIndex = 0;
+            el.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                runGetWeatherForEntry(entry, el);
+            });
+            el.addEventListener("keydown", function (event) {
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    runGetWeatherForEntry(entry, el);
+                }
+            });
+        }
+
+        function applyGetWeatherToEntryIcons(entry, data, menuButton) {
+            if (!data) {
+                return;
+            }
+            const region = regionFromSubject(
+                (entry && (entry.ticketSubject || entry.subject)) || ""
+            );
+            const shortMessage = region
+                ? (
+                    region
+                    + ": "
+                    + (data.temperature_label || "?")
+                    + ", "
+                    + (data.conditions || "?")
+                )
+                : (data.message || "");
+            const payload = {
+                region: region,
+                icon: data.icon || "cloud",
+                temperature_label: data.temperature_label,
+                conditions: data.conditions,
+                message: shortMessage,
+                _fetchedAt: Date.now(),
+            };
+            if (region) {
+                weatherByRegion[region] = payload;
+                document.querySelectorAll(
+                    '.wx-icon[data-region="' + region + '"]'
+                ).forEach(function (el) {
+                    applyWeatherToIcon(el, payload);
+                });
+            }
+            const row = menuButton && menuButton.closest
+                ? menuButton.closest("li.ticket-row")
+                : null;
+            if (!row) {
+                return;
+            }
+            let iconEl = row.querySelector(".wx-icon");
+            if (!iconEl) {
+                const rowBody = row.querySelector(".ticket-row-body");
+                if (!rowBody) {
+                    return;
+                }
+                iconEl = document.createElement("span");
+                iconEl.className = "wx-icon wx-pending";
+                if (region) {
+                    iconEl.dataset.region = region;
+                }
+                iconEl.setAttribute("aria-hidden", "true");
+                const label = rowBody.querySelector(".ticket-label");
+                if (label) {
+                    rowBody.insertBefore(iconEl, label);
+                } else {
+                    rowBody.appendChild(iconEl);
+                }
+                wireWeatherIconClick(iconEl, entry);
+            }
+            applyWeatherToIcon(iconEl, payload);
+        }
+
+        function appendWeatherIcon(rowBody, entry) {
+            const region = regionFromSubject(
+                (entry && (entry.ticketSubject || entry.subject)) || ""
+            );
+            if (!region) {
+                return;
+            }
+            const el = document.createElement("span");
+            el.className = "wx-icon wx-pending";
+            el.dataset.region = region;
+            el.setAttribute("aria-hidden", "true");
+            const cached = weatherByRegion[region];
+            if (cached) {
+                applyWeatherToIcon(el, cached);
+            } else {
+                el.title = region + " weather — click for site weather";
+            }
+            wireWeatherIconClick(el, entry);
+            rowBody.appendChild(el);
+        }
+
+        function scheduleTicketWeatherRefresh() {
+            if (weatherRefreshTimer) {
+                clearTimeout(weatherRefreshTimer);
+            }
+            weatherRefreshTimer = setTimeout(function () {
+                const forceInitial = weatherInitialForcePending;
+                if (forceInitial) {
+                    weatherInitialForcePending = false;
+                }
+                refreshTicketWeather(forceInitial ? { force: true } : undefined);
+            }, 250);
+        }
+
+        function refreshTicketWeather(options) {
+            const force = !!(options && options.force);
+            weatherRefreshTimer = null;
+            const needed = {};
+            document.querySelectorAll(".wx-icon[data-region]").forEach(function (el) {
+                const region = el.dataset.region;
+                if (region) {
+                    needed[region] = true;
+                }
+            });
+            const regionList = Object.keys(needed);
+            if (!regionList.length) {
+                return Promise.resolve({ skipped: true });
+            }
+            const now = Date.now();
+            if (!force) {
+                regionList.forEach(function (region) {
+                    const cached = weatherByRegion[region];
+                    if (cached) {
+                        document.querySelectorAll(
+                            '.wx-icon[data-region="' + region + '"]'
+                        ).forEach(function (el) {
+                            applyWeatherToIcon(el, cached);
+                        });
+                    }
+                });
+            }
+            const toFetch = force
+                ? regionList
+                : regionList.filter(function (region) {
+                    const cached = weatherByRegion[region];
+                    return !cached || (now - (cached._fetchedAt || 0) > WEATHER_CACHE_MS);
+                });
+            if (!toFetch.length) {
+                return Promise.resolve({ skipped: true });
+            }
+            return fetch("/issues/weather-bulk", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ regions: toFetch, force: force }),
+            })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    const regions = data.regions || {};
+                    Object.keys(regions).forEach(function (region) {
+                        const payload = regions[region] || {};
+                        payload._fetchedAt = Date.now();
+                        weatherByRegion[region] = payload;
+                        document.querySelectorAll(
+                            '.wx-icon[data-region="' + region + '"]'
+                        ).forEach(function (el) {
+                            applyWeatherToIcon(el, payload);
+                        });
+                    });
+                    return data;
+                })
+                .catch(function () {
+                    // Keep pending placeholders; do not alert on bulk weather failures.
+                    return { ok: false };
+                });
+        }
+
+        function startWeatherAutoRefresh() {
+            if (weatherAutoRefreshTimer) {
+                return;
+            }
+            weatherAutoRefreshTimer = window.setInterval(function () {
+                refreshTicketWeather({ force: true });
+            }, WEATHER_AUTO_REFRESH_MS);
+        }
+
+        startWeatherAutoRefresh();
 
         function renderConsole(scrollToBottom) {
             const query = (consoleSearchEl.value || "").trim();
@@ -2315,6 +2793,19 @@
         pullErpBtn.addEventListener("click", function () {
             pollForNewIssues({ force: true, manual: true });
         });
+        if (updateWeatherBtn) {
+            updateWeatherBtn.addEventListener("click", function () {
+                if (updateWeatherBtn.disabled) {
+                    return;
+                }
+                updateWeatherBtn.disabled = true;
+                updateWeatherBtn.textContent = "Updating…";
+                refreshTicketWeather({ force: true }).finally(function () {
+                    updateWeatherBtn.disabled = false;
+                    updateWeatherBtn.textContent = "Update Weather";
+                });
+            });
+        }
         clearCheckboxesCancel.addEventListener("click", closeClearCheckboxesModal);
         clearCheckboxesConfirm.addEventListener("click", clearTicketCheckboxes);
         clearCheckboxesModal.addEventListener("click", function (event) {
@@ -2328,6 +2819,9 @@
             }
             if (event.key === "Escape" && patchUpdateModal.classList.contains("is-open")) {
                 closePatchUpdateModal();
+            }
+            if (event.key === "Escape" && bounceSwitchModal.classList.contains("is-open")) {
+                closeBounceSwitchModal();
             }
         });
 
@@ -2721,6 +3215,52 @@
                     });
             });
             parentMenu.appendChild(carrierBtn);
+        }
+
+        function appendWeatherCommandMenu(parentMenu, entry) {
+            const weatherMenu = appendCommandSubmenu(parentMenu, "Weather");
+
+            const currentBtn = document.createElement("button");
+            currentBtn.type = "button";
+            currentBtn.className = "action-btn";
+            currentBtn.textContent = "Weather (Current)";
+            if (!entry || !entry.unit) {
+                currentBtn.disabled = true;
+                currentBtn.title = "No unit on this ticket";
+            } else {
+                currentBtn.title = "Current weather from site GPS (trailer fallback)";
+                currentBtn.addEventListener("click", function () {
+                    runGetWeatherForEntry(entry, currentBtn);
+                });
+            }
+            weatherMenu.appendChild(currentBtn);
+
+            const region = regionFromSubject(
+                (entry && (entry.ticketSubject || entry.subject)) || ""
+            );
+            const historyInfo = REGION_WEATHER_HISTORY[region];
+            if (historyInfo) {
+                const historyLink = document.createElement("a");
+                historyLink.className = "action-btn";
+                historyLink.href =
+                    "https://www.timeanddate.com/weather/usa/"
+                    + historyInfo.slug
+                    + "/historic";
+                historyLink.target = "_blank";
+                historyLink.rel = "noopener noreferrer";
+                historyLink.textContent = "Weather (History)";
+                historyLink.title =
+                    "Historic weather for " + historyInfo.name + " (" + region + ")";
+                weatherMenu.appendChild(historyLink);
+            } else {
+                const historyBtn = document.createElement("button");
+                historyBtn.type = "button";
+                historyBtn.className = "action-btn";
+                historyBtn.textContent = "Weather (History)";
+                historyBtn.disabled = true;
+                historyBtn.title = "No known region in subject (LAX/OAK/HOU/PHX/SLC/DEN)";
+                weatherMenu.appendChild(historyBtn);
+            }
         }
 
         function appendRouterPingButton(parentMenu, entry, label, mode) {
@@ -3757,6 +4297,7 @@
             appendValidateButton("Validate (Quick)", "/issues/validate-unit/", false);
             appendValidateButton("Validate (Full)", "/issues/validate-unit-full/", true);
 
+            appendWeatherCommandMenu(commandItems, entry);
             appendRouterCommandMenu(commandItems, entry);
             appendCamerasCommandMenu(commandItems, entry);
 
@@ -3851,72 +4392,11 @@
                 bounceBtn.className = "action-btn";
                 bounceBtn.textContent = label;
                 bounceBtn.addEventListener("click", function () {
-                    bounceBtn.disabled = true;
-                    bounceBtn.textContent = "Starting...";
-                    fetch(endpoint + encodeURIComponent(entry.unit), { method: "POST" })
-                        .then(function (response) {
-                            if (!response.ok) {
-                                return response.text().then(function (body) {
-                                    let message = body || ("HTTP " + response.status);
-                                    try {
-                                        message = JSON.parse(body).error || message;
-                                    } catch (ignore) {
-                                        // plain text error
-                                    }
-                                    throw new Error(message);
-                                });
-                            }
-                            bounceBtn.textContent = "Running...";
-                            let bufferedText = "";
-                            function appendOutput(text, finalChunk) {
-                                bufferedText += text;
-                                const lines = bufferedText.split(/\r?\n/);
-                                bufferedText = finalChunk ? "" : lines.pop();
-                                lines.forEach(function (line) {
-                                    if (line) {
-                                        consoleLines.push(line);
-                                    }
-                                });
-                                if (finalChunk && bufferedText) {
-                                    consoleLines.push(bufferedText);
-                                    bufferedText = "";
-                                }
-                                renderConsole(true);
-                            }
-                            if (!response.body || !response.body.getReader) {
-                                return response.text().then(function (text) {
-                                    appendOutput(text, true);
-                                });
-                            }
-                            const reader = response.body.getReader();
-                            const decoder = new TextDecoder();
-                            function readOutput() {
-                                return reader.read().then(function (chunk) {
-                                    if (chunk.done) {
-                                        appendOutput(decoder.decode(), true);
-                                        return;
-                                    }
-                                    appendOutput(
-                                        decoder.decode(chunk.value, { stream: true }),
-                                        false
-                                    );
-                                    return readOutput();
-                                });
-                            }
-                            return readOutput();
-                        })
-                        .then(function () {
-                            bounceBtn.textContent = "Finished";
-                            window.setTimeout(function () {
-                                bounceBtn.disabled = false;
-                                bounceBtn.textContent = label;
-                            }, 1500);
-                        })
-                        .catch(function (error) {
-                            window.alert(label + " failed: " + (error.message || error));
-                            bounceBtn.disabled = false;
-                            bounceBtn.textContent = label;
-                        });
+                    if (String(endpoint || "").indexOf("/issues/bounce-switch/") !== -1) {
+                        openBounceSwitchModal(entry.unit, label, endpoint, bounceBtn);
+                        return;
+                    }
+                    executeBounceAction(entry.unit, label, endpoint, bounceBtn);
                 });
                 parentMenu.appendChild(bounceBtn);
             }
@@ -4211,6 +4691,124 @@
         patchUpdateModal.addEventListener("click", function (event) {
             if (event.target === patchUpdateModal) {
                 closePatchUpdateModal();
+            }
+        });
+
+        function executeBounceAction(unit, label, endpoint, bounceBtn) {
+            if (!unit || !endpoint) {
+                return;
+            }
+            if (bounceBtn) {
+                bounceBtn.disabled = true;
+                bounceBtn.textContent = "Starting...";
+            }
+            fetch(endpoint + encodeURIComponent(unit), { method: "POST" })
+                .then(function (response) {
+                    if (!response.ok) {
+                        return response.text().then(function (body) {
+                            let message = body || ("HTTP " + response.status);
+                            try {
+                                message = JSON.parse(body).error || message;
+                            } catch (ignore) {
+                                // plain text error
+                            }
+                            throw new Error(message);
+                        });
+                    }
+                    if (bounceBtn) {
+                        bounceBtn.textContent = "Running...";
+                    }
+                    let bufferedText = "";
+                    function appendOutput(text, finalChunk) {
+                        bufferedText += text;
+                        const lines = bufferedText.split(/\r?\n/);
+                        bufferedText = finalChunk ? "" : lines.pop();
+                        lines.forEach(function (line) {
+                            if (line) {
+                                consoleLines.push(line);
+                            }
+                        });
+                        if (finalChunk && bufferedText) {
+                            consoleLines.push(bufferedText);
+                            bufferedText = "";
+                        }
+                        renderConsole(true);
+                    }
+                    if (!response.body || !response.body.getReader) {
+                        return response.text().then(function (text) {
+                            appendOutput(text, true);
+                        });
+                    }
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    function readOutput() {
+                        return reader.read().then(function (chunk) {
+                            if (chunk.done) {
+                                appendOutput(decoder.decode(), true);
+                                return;
+                            }
+                            appendOutput(
+                                decoder.decode(chunk.value, { stream: true }),
+                                false
+                            );
+                            return readOutput();
+                        });
+                    }
+                    return readOutput();
+                })
+                .then(function () {
+                    if (bounceBtn) {
+                        bounceBtn.textContent = "Finished";
+                        window.setTimeout(function () {
+                            bounceBtn.disabled = false;
+                            bounceBtn.textContent = label;
+                        }, 1500);
+                    }
+                })
+                .catch(function (error) {
+                    window.alert(label + " failed: " + (error.message || error));
+                    if (bounceBtn) {
+                        bounceBtn.disabled = false;
+                        bounceBtn.textContent = label;
+                    }
+                });
+        }
+
+        function openBounceSwitchModal(unit, label, endpoint, button) {
+            bounceSwitchUnit = unit || "";
+            bounceSwitchLabel = label || "Bounce (Relay)";
+            bounceSwitchEndpoint = endpoint || "/issues/bounce-switch/";
+            bounceSwitchButton = button || null;
+            bounceSwitchMessage.textContent =
+                "This will bounce the relay/switch for "
+                + (bounceSwitchUnit || "this unit")
+                + ". Continue?";
+            bounceSwitchModal.classList.add("is-open");
+            bounceSwitchCancel.focus();
+        }
+
+        function closeBounceSwitchModal() {
+            bounceSwitchModal.classList.remove("is-open");
+            bounceSwitchUnit = "";
+            bounceSwitchLabel = "Bounce (Relay)";
+            bounceSwitchEndpoint = "/issues/bounce-switch/";
+            bounceSwitchButton = null;
+        }
+
+        function runBounceSwitch() {
+            const unit = bounceSwitchUnit;
+            const label = bounceSwitchLabel;
+            const endpoint = bounceSwitchEndpoint;
+            const button = bounceSwitchButton;
+            closeBounceSwitchModal();
+            executeBounceAction(unit, label, endpoint, button);
+        }
+
+        bounceSwitchCancel.addEventListener("click", closeBounceSwitchModal);
+        bounceSwitchConfirm.addEventListener("click", runBounceSwitch);
+        bounceSwitchModal.addEventListener("click", function (event) {
+            if (event.target === bounceSwitchModal) {
+                closeBounceSwitchModal();
             }
         });
 
@@ -6236,6 +6834,8 @@
                     rowBody.appendChild(panelLed);
                 }
 
+                appendWeatherIcon(rowBody, entry);
+
                 const label = document.createElement("span");
                 label.className = "ticket-label";
                 const displayText = entry.ticketSubject || entry.unit || entry.issueId || entry.projectId || "(No subject)";
@@ -6675,6 +7275,7 @@
                     );
                 }
 
+                appendWeatherCommandMenu(commandItems, entry);
                 appendRouterCommandMenu(commandItems, entry);
                 appendCamerasCommandMenu(commandItems, entry);
 
@@ -6901,78 +7502,11 @@
                     bounceBtn.className = "action-btn";
                     bounceBtn.textContent = label;
                     bounceBtn.addEventListener("click", function () {
-                        bounceBtn.disabled = true;
-                        bounceBtn.textContent = "Starting...";
-                        fetch(endpoint + encodeURIComponent(entry.unit), {
-                            method: "POST",
-                        })
-                            .then(function (response) {
-                                if (!response.ok) {
-                                    return response.text().then(function (body) {
-                                        let message = body || ("HTTP " + response.status);
-                                        try {
-                                            message = JSON.parse(body).error || message;
-                                        } catch (ignore) {
-                                            // The server may return plain text for an unexpected error.
-                                        }
-                                        throw new Error(message);
-                                    });
-                                }
-
-                                bounceBtn.textContent = "Running...";
-                                let bufferedText = "";
-
-                                function appendOutput(text, finalChunk) {
-                                    bufferedText += text;
-                                    const lines = bufferedText.split(/\r?\n/);
-                                    bufferedText = finalChunk ? "" : lines.pop();
-                                    lines.forEach(function (line) {
-                                        if (line) {
-                                            consoleLines.push(line);
-                                        }
-                                    });
-                                    if (finalChunk && bufferedText) {
-                                        consoleLines.push(bufferedText);
-                                        bufferedText = "";
-                                    }
-                                    renderConsole(true);
-                                }
-
-                                if (!response.body || !response.body.getReader) {
-                                    return response.text().then(function (text) {
-                                        appendOutput(text, true);
-                                    });
-                                }
-
-                                const reader = response.body.getReader();
-                                const decoder = new TextDecoder();
-                                function readOutput() {
-                                    return reader.read().then(function (chunk) {
-                                        if (chunk.done) {
-                                            appendOutput(decoder.decode(), true);
-                                            return;
-                                        }
-                                        appendOutput(
-                                            decoder.decode(chunk.value, { stream: true }),
-                                            false
-                                        );
-                                        return readOutput();
-                                    });
-                                }
-                                return readOutput();
-                            })
-                            .then(function () {
-                                bounceBtn.textContent = "Finished";
-                                window.setTimeout(function () {
-                                    bounceBtn.disabled = false;
-                                    bounceBtn.textContent = label;
-                                }, 1500);
-                            })
-                            .catch(function (error) {
-                                window.alert(label + " failed: " + (error.message || error));
-                                bounceBtn.disabled = false;
-                                bounceBtn.textContent = label;
-                            });
+                        if (String(endpoint || "").indexOf("/issues/bounce-switch/") !== -1) {
+                            openBounceSwitchModal(entry.unit, label, endpoint, bounceBtn);
+                            return;
+                        }
+                        executeBounceAction(entry.unit, label, endpoint, bounceBtn);
                     });
                     (parentMenu || cliMenu).appendChild(bounceBtn);
                 }
@@ -7766,6 +8300,7 @@
             });
             applyListFilters();
             setListComplete(id, isListComplete(entries));
+            scheduleTicketWeatherRefresh();
         }
 
         function renderDiscardedList() {

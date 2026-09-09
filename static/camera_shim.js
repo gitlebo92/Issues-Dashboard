@@ -918,7 +918,9 @@
                     if (path.indexOf(config.prefix + "/") === 0) {
                         path = path.slice(config.prefix.length);
                     }
-                    if (/rtspoverwebsocket/i.test(path) || path === "/" || path === "") {
+                    if (/httpprivateoverwebsocket/i.test(path)) {
+                        path = "/httpprivateoverwebsocket";
+                    } else if (/rtspoverwebsocket/i.test(path) || path === "/" || path === "") {
                         path = "/rtspoverwebsocket";
                     }
                     target = config.wsOrigin + path;
@@ -1725,16 +1727,99 @@
         return found;
     }
 
+    function mainTabName() {
+        // Prefer the active top tab only. Bare li.current matches Setting sidebar
+        // items (Conditions, Video, …) and would incorrectly suppress Live/PTZ.
+        var current = document.querySelector("ul.u-tab.main > li.current[data-for]")
+            || document.querySelector(".u-tab.main > li.current[data-for]");
+        if (!current) {
+            return "";
+        }
+        return String(current.getAttribute("data-for") || "").trim().toLowerCase();
+    }
+
+    function shortNodeLabel(node) {
+        if (!node) {
+            return "";
+        }
+        return String(node.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase()
+            .slice(0, 48);
+    }
+
+    function isIvsContext() {
+        var name = mainTabName();
+        if (/^(ivs|intelligent|ai)\b/.test(name) || /\bivs\b/.test(name)) {
+            return true;
+        }
+        var side = document.querySelector(
+            ".fn-aside li.current, .g-aside li.current, .left-nav li.current, "
+            + ".fn-tree li.current, .u-menu li.current, .aside li.current, "
+            + ".fn-aside .current, .g-aside .current, .fn-nav li.current"
+        );
+        var sideBlob = shortNodeLabel(side)
+            + " "
+            + String((side && side.getAttribute && side.getAttribute("data-for")) || "")
+                .toLowerCase();
+        if (/\bivs\b|intelligent|tripwire|intrusion|perimeter|video\s*analyse/.test(sideBlob)) {
+            return true;
+        }
+        var panels = document.querySelectorAll(
+            "[id*='ivs'], [id*='Ivs'], [id*='IVS'], "
+            + "[class*='ivs'], [class*='Ivs'], [class*='IVS']"
+        );
+        var i;
+        for (i = 0; i < panels.length; i += 1) {
+            var el = panels[i];
+            if (!el || (el.closest && el.closest("ul.u-tab, .u-tab.main"))) {
+                continue;
+            }
+            var st = window.getComputedStyle(el);
+            if (
+                st
+                && st.display !== "none"
+                && st.visibility !== "hidden"
+                && el.offsetWidth > 80
+                && el.offsetHeight > 80
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function isLegacyPreviewActive() {
         // Prefer the active top tab. Before the tab widget marks anything current,
         // allow play so first-load is not blocked.
-        var current = document.querySelector("ul.u-tab.main > li.current[data-for]")
-            || document.querySelector(".u-tab.main > li.current[data-for]")
-            || document.querySelector("li.current[data-for]");
-        if (current) {
-            var name = current.getAttribute("data-for") || "";
-            // Live (and PTZ) keep video; Setting / Alarm / etc. must not be covered.
-            return name === "preview" || name === "ptz";
+        var name = mainTabName();
+        if (isIvsContext()) {
+            return true;
+        }
+        if (name) {
+            // Live / PTZ / Event / IVS / AI keep video.
+            // Setting / Alarm / Network / Storage / System must not be covered.
+            if (
+                name === "preview"
+                || name === "ptz"
+                || name === "event"
+                || name === "ivs"
+                || name === "ai"
+                || name === "intelligent"
+            ) {
+                return true;
+            }
+            if (/^(preview|ptz|event|ivs|ai|intelligent)\b/.test(name)) {
+                return true;
+            }
+            if (
+                /(^|[^a-z])(preview|ptz|event|ivs|smartevent|smart|intelligent)([^a-z]|$)/.test(name)
+                && !/(setting|config|system|storage|network|info|alarm)/.test(name)
+            ) {
+                return true;
+            }
+            return false;
         }
         return !!(
             document.getElementById("preview_video")
@@ -1744,6 +1829,37 @@
 
     function h5Container() {
         return document.getElementById("h5playerContainer");
+    }
+
+    function injectH5PointerCss() {
+        if (document.getElementById("worktool-h5-pointer")) {
+            return;
+        }
+        var style = document.createElement("style");
+        style.id = "worktool-h5-pointer";
+        // The H5 root often covers the whole viewport (including Live/IVS tabs and
+        // the Event sidebar). Keep chrome clickable; only the media surface captures.
+        style.textContent = [
+            "#h5playerContainer { pointer-events: none !important; }",
+            "#h5playerContainer canvas,",
+            "#h5playerContainer video,",
+            "#h5playerContainer .vjs-tech { pointer-events: auto !important; }"
+        ].join("\n");
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function applyH5PointerPolicy() {
+        injectH5PointerCss();
+        var el = h5Container();
+        if (!el || cfg.legacyForcedHidden) {
+            return;
+        }
+        el.style.setProperty("pointer-events", "none", "important");
+        var media = el.querySelectorAll("canvas, video, .vjs-tech");
+        var i;
+        for (i = 0; i < media.length; i += 1) {
+            media[i].style.setProperty("pointer-events", "auto", "important");
+        }
     }
 
     function forceHideH5Overlay() {
@@ -1765,6 +1881,10 @@
         el.style.removeProperty("display");
         el.style.removeProperty("visibility");
         el.style.removeProperty("pointer-events");
+        if (el.style.top === "-10000px") {
+            el.style.removeProperty("top");
+        }
+        applyH5PointerPolicy();
     }
 
     function isLegacyH5Playing() {
@@ -1878,9 +1998,57 @@
     }
 
     function legacyLivePane() {
-        // Native cover target is .main-video; on these builds that is #preview_video.
-        var preview = document.getElementById("preview_video")
-            || document.querySelector(".main-video");
+        // Prefer IVS/Event draw panes when that page is open — preview_video is often
+        // hidden then, and covering it leaves a black IVS rule canvas.
+        var ivsFirst = isIvsContext() || /^(event|ivs|ai|intelligent)/.test(mainTabName());
+        var ivsSelectors = [
+            document.getElementById("ivs_video"),
+            document.querySelector("#ivs .main-video"),
+            document.querySelector("#ivs .video-content"),
+            document.querySelector(".ivs-video"),
+            document.querySelector(".draw-video"),
+            document.querySelector("#smartVideo"),
+            document.querySelector(".smart-video"),
+            document.querySelector("[id*='Ivs'] .main-video"),
+            document.querySelector("[id*='ivs'] .main-video"),
+            document.querySelector("#event_video"),
+            document.querySelector(".event-video"),
+            document.querySelector(".video-contain"),
+        ];
+        var liveSelectors = [
+            document.getElementById("preview_video"),
+            document.querySelector(".main-video"),
+            document.getElementById("ptz_video"),
+            document.querySelector(".ptz-video"),
+        ];
+        var candidates = ivsFirst
+            ? ivsSelectors.concat(liveSelectors)
+            : liveSelectors.concat(ivsSelectors);
+        var preview = null;
+        var i;
+        for (i = 0; i < candidates.length; i += 1) {
+            var candidate = candidates[i];
+            if (!candidate) {
+                continue;
+            }
+            var style = window.getComputedStyle(candidate);
+            if (style && (style.display === "none" || style.visibility === "hidden")) {
+                continue;
+            }
+            if (candidate.offsetWidth < 40 && candidate.offsetHeight < 40) {
+                continue;
+            }
+            preview = candidate;
+            break;
+        }
+        if (!preview) {
+            for (i = 0; i < candidates.length; i += 1) {
+                if (candidates[i]) {
+                    preview = candidates[i];
+                    break;
+                }
+            }
+        }
         if (!preview) {
             return null;
         }
@@ -1890,7 +2058,9 @@
             var top = Math.max(0, Math.floor(preview.getBoundingClientRect().top) || 60);
             var height = Math.max(240, window.innerHeight - top - 8);
             var container = preview.parentElement;
-            if (container && /main-video-container/i.test(container.className || "")) {
+            if (container && /main-video-container|video-contain|ptz|event|ivs|smart|draw/i.test(
+                String(container.className || "") + " " + String(container.id || "")
+            )) {
                 container.style.height = height + "px";
                 container.style.minHeight = height + "px";
             }
@@ -1912,7 +2082,19 @@
         var mod = mods[0];
         patchLegacyH5(dest);
 
-        if (!isLegacyPreviewActive()) {
+        var videoTab = isLegacyPreviewActive();
+        if (cfg._lastVideoTab === true && !videoTab) {
+            cfg.legacyNeedsReplay = true;
+            cfg.playedViews = false;
+        } else if (cfg._lastVideoTab === false && videoTab) {
+            // Returning from Setting/Alarm — force a fresh playPreview.
+            cfg.legacyNeedsReplay = true;
+            cfg.playedViews = false;
+            cfg.legacyPlayAt = 0;
+        }
+        cfg._lastVideoTab = videoTab;
+
+        if (!videoTab) {
             // leave() hides behind an init Deferred; if that stalls (or a late
             // playPreview callback fires), Setting stays covered. Force-hide.
             try {
@@ -1993,6 +2175,7 @@
                 cfg.legacyPlayAttempts = (cfg.legacyPlayAttempts || 0) + 1;
                 cfg.directStream = true;
                 cfg.legacyChannels = channels;
+                applyH5PointerPolicy();
                 if (forceSub) {
                     markStreamSettled();
                 }
@@ -2003,6 +2186,7 @@
         } else if (playing && typeof mod.cover === "function") {
             try {
                 mod.cover(pane);
+                applyH5PointerPolicy();
             } catch (err) {
                 // ignore cover jitter
             }
@@ -2080,6 +2264,71 @@
         return cfg.directStream;
     }
 
+    function installIvsNavAssist() {
+        if (cfg._ivsNavAssist || isHikvision()) {
+            return;
+        }
+        cfg._ivsNavAssist = true;
+        injectH5PointerCss();
+        // Let top tabs / Event sidebar receive the click that the H5 overlay stole.
+        document.addEventListener("pointerdown", function (event) {
+            var node = event.target;
+            if (!node || !node.closest) {
+                return;
+            }
+            if (node.closest("#h5playerContainer canvas, #h5playerContainer video, #h5playerContainer .vjs-tech")) {
+                return;
+            }
+            if (
+                node.closest(
+                    "ul.u-tab.main, .u-tab.main, .fn-aside, .g-aside, .left-nav, "
+                    + ".fn-tree, .u-menu, .nav-left, .fn-nav, .aside"
+                )
+            ) {
+                var el = h5Container();
+                if (el) {
+                    el.style.setProperty("pointer-events", "none", "important");
+                }
+            }
+        }, true);
+        document.addEventListener("click", function (event) {
+            var node = event.target;
+            if (!node || !node.closest) {
+                return;
+            }
+            var hit = node.closest("li[data-for], li, a, span, button");
+            if (!hit) {
+                return;
+            }
+            var blob = [
+                (hit.getAttribute && hit.getAttribute("data-for")) || "",
+                hit.id || "",
+                String(hit.className || ""),
+                shortNodeLabel(hit)
+            ].join(" ").toLowerCase();
+            var wantsVideo = /\b(ivs|intelligent|tripwire|intrusion|perimeter|event|ptz|preview|live|ai)\b/
+                .test(blob);
+            if (!wantsVideo) {
+                return;
+            }
+            cfg.legacyNeedsReplay = true;
+            cfg.playedViews = false;
+            cfg.legacyPlayAt = 0;
+            cfg.ivsNavAt = Date.now();
+            window.setTimeout(function () {
+                cfg.legacyNeedsReplay = true;
+                preferDirectStream();
+            }, 250);
+            window.setTimeout(function () {
+                cfg.legacyNeedsReplay = true;
+                preferDirectStream();
+                applyH5PointerPolicy();
+            }, 900);
+        }, true);
+    }
+
+    installIvsNavAssist();
+
     var streamIntervalMs = 200;
     var streamTimer = setInterval(function streamTick() {
         if (isHikvision()) {
@@ -2094,6 +2343,9 @@
         // Once live is up and substream settled, stop hammering playPreview.
         var settled = !!(cfg.subStreamSettled || cfg.userPickedStream);
         var wantMs = (cfg.playedViews && settled && !loginForm()) ? 1500 : 200;
+        if (cfg.ivsNavAt && (Date.now() - cfg.ivsNavAt) < 5000) {
+            wantMs = 200;
+        }
         if (wantMs !== streamIntervalMs) {
             streamIntervalMs = wantMs;
             clearInterval(streamTimer);

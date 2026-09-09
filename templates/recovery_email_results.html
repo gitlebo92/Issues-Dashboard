@@ -60,6 +60,56 @@
             white-space: pre-wrap;
             word-break: break-word;
         }
+        .console mark {
+            background: #fbbf24;
+            color: #0f172a;
+            border-radius: 2px;
+            padding: 0 1px;
+        }
+        .console-toolbar,
+        .list-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .console-toolbar input[type="search"],
+        .list-toolbar input[type="search"] {
+            flex: 1;
+            background: #020617;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+        .console-toolbar input[type="search"]:focus,
+        .list-toolbar input[type="search"]:focus {
+            outline: none;
+            border-color: #2563eb;
+        }
+        .console-match-count,
+        .list-match-count {
+            color: #94a3b8;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .console-toolbar button {
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .console-toolbar button:hover {
+            background: #334155;
+        }
+        .list-block.is-filtered-empty {
+            display: none;
+        }
         .panel {
             background: #1e293b;
             border-radius: 8px;
@@ -102,7 +152,7 @@
         .highlight-uptodate .title { color: #4ade80; }
         .ticket-row {
             display: grid;
-            grid-template-columns: auto auto minmax(0, 1fr);
+            grid-template-columns: auto auto auto minmax(0, 1fr);
             gap: 8px;
             align-items: start;
             padding: 4px 0;
@@ -113,10 +163,43 @@
         }
         .ticket-row:last-child { border-bottom: none; }
         .ticket-row.menu-open { z-index: 50; }
+        .ticket-row.worked-row .ticket-label {
+            opacity: 0.55;
+            text-decoration: line-through;
+        }
         .ticket-row .status-led {
             width: 10px;
             height: 10px;
             margin-top: 8px;
+        }
+        .ticket-row .worked-box {
+            margin-top: 6px;
+            accent-color: #38bdf8;
+            cursor: pointer;
+        }
+        .worked-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        .worked-counter {
+            color: #94a3b8;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .worked-toolbar button {
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .worked-toolbar button:hover {
+            background: #334155;
         }
         .ticket-label {
             color: #e2e8f0;
@@ -269,10 +352,23 @@
     <div class="layout">
         <div>
             <h2>Stdout</h2>
+            <div class="console-toolbar">
+                <input type="search" id="console_search" placeholder="Search units / stdout..." autocomplete="off">
+                <button type="button" id="console_clear" title="Clear stdout window">Clear</button>
+                <span class="console-match-count" id="console_match_count"></span>
+            </div>
             <div class="console" id="console"></div>
         </div>
 
         <div class="panel" id="results_panel">
+            <div class="list-toolbar">
+                <input type="search" id="list_search" placeholder="Filter tickets by unit / subject..." autocomplete="off" spellcheck="false">
+                <span class="list-match-count" id="list_match_count"></span>
+            </div>
+            <div class="worked-toolbar">
+                <span class="worked-counter" id="tickets_worked">Worked: 0</span>
+                <button type="button" id="clear_worked" title="Clear all worked checkboxes">Clear worked</button>
+            </div>
             <div class="list-block highlight-recovery" data-led="is-warning">
                 <div class="list-heading">
                     <span class="status-led is-warning" title="Needs recovery email"></span>
@@ -336,16 +432,262 @@
         const meshBaseUrl = {{ mesh_base_url|default("https://meshcentral.sentracam.com/login?filter=")|tojson }};
         const raindanceBaseUrl = {{ raindance_base_url|default("https://raindance.sentracam.net/unit/")|tojson }};
         const consoleEl = document.getElementById("console");
+        const consoleSearchEl = document.getElementById("console_search");
+        const consoleClearBtn = document.getElementById("console_clear");
+        const consoleMatchCountEl = document.getElementById("console_match_count");
+        const listSearchEl = document.getElementById("list_search");
+        const listMatchCountEl = document.getElementById("list_match_count");
+        const ticketsWorkedEl = document.getElementById("tickets_worked");
+        const clearWorkedBtn = document.getElementById("clear_worked");
         const statusEl = document.getElementById("status");
         const source = new EventSource("/recovery_email/stream/" + jobId);
+        const consoleLines = [];
+        let consoleFollow = true;
+        const RECOVERY_WORKED_STORAGE_KEY = "recoveryEmailWorkedState_v1";
+        let workedState = {};
+        try {
+            workedState = JSON.parse(localStorage.getItem(RECOVERY_WORKED_STORAGE_KEY) || "{}") || {};
+        } catch (err) {
+            workedState = {};
+        }
+        const recoveryListIds = [
+            "needs_recovery_email",
+            "needs_initial_email",
+            "potential_false_positive",
+            "pending_recovery",
+            "email_status_up_to_date",
+        ];
+
+        function workedKey(entry) {
+            return [
+                String((entry && entry.unit) || "").trim().toUpperCase(),
+                String((entry && entry.issueId) || "").trim(),
+            ].join("::");
+        }
+
+        function persistWorkedState() {
+            try {
+                localStorage.setItem(
+                    RECOVERY_WORKED_STORAGE_KEY,
+                    JSON.stringify(workedState)
+                );
+            } catch (err) {
+                // ignore quota / private mode
+            }
+        }
+
+        function isEntryWorked(entry) {
+            const key = workedKey(entry);
+            return !!(key && workedState[key] && workedState[key].worked);
+        }
+
+        function setEntryWorked(entry, worked) {
+            const key = workedKey(entry);
+            if (!key || key === "::") {
+                return;
+            }
+            if (worked) {
+                workedState[key] = {
+                    worked: true,
+                    unit: entry.unit || "",
+                    issueId: entry.issueId || "",
+                };
+            } else {
+                delete workedState[key];
+            }
+            persistWorkedState();
+            updateWorkedCounter();
+        }
+
+        function updateWorkedCounter() {
+            let visibleWorked = 0;
+            let visibleTotal = 0;
+            recoveryListIds.forEach(function (id) {
+                const listEl = document.getElementById(id);
+                if (!listEl) {
+                    return;
+                }
+                listEl.querySelectorAll("li.ticket-row").forEach(function (row) {
+                    if (row.hidden) {
+                        return;
+                    }
+                    visibleTotal += 1;
+                    if (row.classList.contains("worked-row")) {
+                        visibleWorked += 1;
+                    }
+                });
+            });
+            const savedCount = Object.keys(workedState).filter(function (key) {
+                return workedState[key] && workedState[key].worked;
+            }).length;
+            ticketsWorkedEl.textContent = visibleTotal
+                ? ("Worked: " + visibleWorked + " / " + visibleTotal + " visible (" + savedCount + " saved)")
+                : ("Worked saved: " + savedCount);
+        }
+
+        function clearAllWorked() {
+            workedState = {};
+            persistWorkedState();
+            recoveryListIds.forEach(function (id) {
+                const listEl = document.getElementById(id);
+                if (!listEl) {
+                    return;
+                }
+                listEl.querySelectorAll("li.ticket-row").forEach(function (row) {
+                    row.classList.remove("worked-row");
+                    const box = row.querySelector(".worked-box");
+                    if (box) {
+                        box.checked = false;
+                    }
+                });
+            });
+            updateWorkedCounter();
+        }
+
+        clearWorkedBtn.addEventListener("click", clearAllWorked);
+        function escapeHtml(text) {
+            return String(text || "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        function highlightMatch(text, query) {
+            if (!query) {
+                return escapeHtml(text);
+            }
+            const lower = text.toLowerCase();
+            const q = query.toLowerCase();
+            let result = "";
+            let cursor = 0;
+            let idx = lower.indexOf(q);
+            while (idx !== -1) {
+                result += escapeHtml(text.slice(cursor, idx));
+                result += "<mark>" + escapeHtml(text.slice(idx, idx + q.length)) + "</mark>";
+                cursor = idx + q.length;
+                idx = lower.indexOf(q, cursor);
+            }
+            result += escapeHtml(text.slice(cursor));
+            return result;
+        }
+
+        function collectSearchMatches(lines, query) {
+            const q = query.toLowerCase();
+            const include = new Array(lines.length).fill(false);
+            const checkingRe = /^Checking\s+/i;
+            const sectionEndRe = /^(Validating\s|Needs recovery|Needs initial|Potential false|Pending recovery|Email status|Validation complete)/i;
+
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].toLowerCase().indexOf(q) !== -1) {
+                    include[i] = true;
+                }
+            }
+
+            for (let i = 0; i < lines.length; i++) {
+                if (!checkingRe.test(lines[i]) || lines[i].toLowerCase().indexOf(q) === -1) {
+                    continue;
+                }
+                for (let j = i + 1; j < lines.length; j++) {
+                    if (checkingRe.test(lines[j]) || sectionEndRe.test(lines[j])) {
+                        break;
+                    }
+                    include[j] = true;
+                }
+            }
+
+            const matches = [];
+            for (let i = 0; i < lines.length; i++) {
+                if (include[i]) {
+                    matches.push(lines[i]);
+                }
+            }
+            return matches;
+        }
+
+        function renderConsole(scrollToBottom) {
+            const query = (consoleSearchEl.value || "").trim();
+            if (!query) {
+                consoleEl.textContent = consoleLines.join("\n") + (consoleLines.length ? "\n" : "");
+                consoleMatchCountEl.textContent = "";
+            } else {
+                const matches = collectSearchMatches(consoleLines, query);
+                consoleEl.innerHTML = matches.length
+                    ? matches.map(function (line) {
+                        return highlightMatch(line, query);
+                    }).join("\n") + "\n"
+                    : "";
+                consoleMatchCountEl.textContent = matches.length
+                    ? matches.length + " matching line" + (matches.length === 1 ? "" : "s")
+                    : "No matches";
+            }
+            if (scrollToBottom && consoleFollow) {
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            }
+        }
 
         function logLine(line) {
             if (!line) {
                 return;
             }
-            consoleEl.textContent += line + "\n";
-            consoleEl.scrollTop = consoleEl.scrollHeight;
+            consoleLines.push(line);
+            renderConsole(true);
         }
+
+        function applyListFilters() {
+            const query = listSearchEl.value.trim().toLowerCase();
+            let matchCount = 0;
+
+            recoveryListIds.forEach(function (id) {
+                const listEl = document.getElementById(id);
+                if (!listEl) {
+                    return;
+                }
+                const blockEl = listEl.closest(".list-block");
+                const rows = Array.from(listEl.querySelectorAll("[data-search-text]"));
+                let visibleRows = 0;
+
+                rows.forEach(function (row) {
+                    const matches = !query || row.dataset.searchText.indexOf(query) !== -1;
+                    row.hidden = !matches;
+                    if (matches) {
+                        visibleRows += 1;
+                    }
+                });
+
+                if (blockEl) {
+                    blockEl.classList.toggle(
+                        "is-filtered-empty",
+                        !!(query && rows.length && visibleRows === 0)
+                    );
+                }
+                if (query) {
+                    matchCount += visibleRows;
+                }
+            });
+
+            if (query) {
+                listMatchCountEl.textContent = matchCount === 0
+                    ? "No ticket matches"
+                    : (matchCount + (matchCount === 1 ? " match" : " matches"));
+            } else {
+                listMatchCountEl.textContent = "";
+            }
+            updateWorkedCounter();
+        }
+
+        consoleEl.addEventListener("scroll", function () {
+            const nearBottom = consoleEl.scrollHeight - consoleEl.scrollTop - consoleEl.clientHeight < 40;
+            consoleFollow = nearBottom;
+        });
+        consoleSearchEl.addEventListener("input", function () {
+            renderConsole(false);
+        });
+        consoleClearBtn.addEventListener("click", function () {
+            consoleLines.length = 0;
+            renderConsole(false);
+        });
+        listSearchEl.addEventListener("input", applyListFilters);
 
         function makeEntry(item) {
             const isObject = typeof item === "object" && item !== null;
@@ -1131,11 +1473,31 @@
                 const entry = makeEntry(item);
                 const li = document.createElement("li");
                 li.className = "ticket-row";
+                li.dataset.searchText = [
+                    entry.unit,
+                    entry.issueId,
+                    entry.ticketSubject,
+                    entry.siteId,
+                ].join(" ").toLowerCase();
 
                 const led = document.createElement("span");
                 led.className = "status-led " + (ledClass || "");
                 led.title = "Status";
                 li.appendChild(led);
+
+                const workedBox = document.createElement("input");
+                workedBox.type = "checkbox";
+                workedBox.className = "worked-box";
+                workedBox.title = "Mark as worked";
+                workedBox.checked = isEntryWorked(entry);
+                if (workedBox.checked) {
+                    li.classList.add("worked-row");
+                }
+                workedBox.addEventListener("change", function () {
+                    setEntryWorked(entry, workedBox.checked);
+                    li.classList.toggle("worked-row", workedBox.checked);
+                });
+                li.appendChild(workedBox);
 
                 const actions = document.createElement("div");
                 actions.className = "ticket-row-actions";
@@ -1159,6 +1521,7 @@
                 li.appendChild(label);
                 el.appendChild(li);
             });
+            applyListFilters();
         }
 
         source.onmessage = function (event) {
@@ -1173,6 +1536,7 @@
                 fillList("pending_recovery", r.pending_recovery, "is-info");
                 fillList("email_status_up_to_date", r.email_status_up_to_date, "is-up");
                 statusEl.textContent = "Validation complete.";
+                applyListFilters();
                 source.close();
             }
         };

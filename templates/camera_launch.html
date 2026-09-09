@@ -324,10 +324,21 @@
         }
 
         // A cached camera page would come back without the proxy shim, so every load
-        // is made unique.
+        // is made unique. Stagger grid boots so four RPC2 long-polls do not starve
+        // the browser's per-origin connection pool (C2/C3 often lose that race).
         function reload(frame) {
             const base = frame.dataset.src;
             frame.src = base + (base.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
+        }
+
+        function reloadStaggered(frames, gapMs) {
+            const list = Array.prototype.slice.call(frames || []);
+            const gap = typeof gapMs === "number" ? gapMs : 700;
+            list.forEach(function (frame, index) {
+                window.setTimeout(function () {
+                    reload(frame);
+                }, index * gap);
+            });
         }
 
         colsSel.addEventListener("change", applyLayout);
@@ -367,11 +378,13 @@
         }
 
         document.getElementById("reload_btn").addEventListener("click", function () {
+            const frames = [];
             document.querySelectorAll(".card").forEach(function (card) {
                 if (card.dataset.session !== "off") {
-                    reload(card.querySelector("iframe"));
+                    frames.push(card.querySelector("iframe"));
                 }
             });
+            reloadStaggered(frames, 700);
         });
 
         document.querySelectorAll(".reload-one").forEach(function (button) {
@@ -432,7 +445,7 @@
 
         window.addEventListener("resize", applyLayout);
         applyLayout();
-        document.querySelectorAll(".frame-wrap iframe").forEach(reload);
+        reloadStaggered(document.querySelectorAll(".frame-wrap iframe"), 700);
     </script>
     {% endif %}
 </body>

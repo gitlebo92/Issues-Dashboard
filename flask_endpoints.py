@@ -688,7 +688,7 @@ def _run_issues_validation(job_id, scheduled=False):
         job["done"] = True
         poll_lock.release()
 
-def _run_recovery_email_check(job_id, report_path):
+def _run_recovery_email_check(job_id, report_path, delete_after=True):
     import sys
     job = stream_jobs[job_id]
     original_stdout = sys.stdout
@@ -716,10 +716,11 @@ def _run_recovery_email_check(job_id, report_path):
         }})
     finally:
         sys.stdout = original_stdout
-        try:
-            os.remove(report_path)
-        except Exception as e:
-            print(f"Failed to remove upload: {e}")
+        if delete_after:
+            try:
+                os.remove(report_path)
+            except Exception as e:
+                print(f"Failed to remove upload: {e}")
         job["done"] = True
 
 def _sse_stream(job_id):
@@ -1274,7 +1275,10 @@ def issues_camera_proxy(unit, target, subpath):
     response = Response(content if request.method != "HEAD" else b"", status=status or 502)
     for key, value in (headers or {}).items():
         if key.lower() == "set-cookie":
-            response.headers.add(key, value)
+            values = value if isinstance(value, (list, tuple)) else [value]
+            for item in values:
+                if item:
+                    response.headers.add(key, item)
         else:
             response.headers[key] = value
     return response
@@ -1793,6 +1797,31 @@ def issues_carrier(unit):
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
+
+@app.route("/issues/weather/<unit>", methods=["POST"])
+def issues_weather(unit):
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.get_unit_weather(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/weather-bulk", methods=["POST"])
+def issues_weather_bulk():
+    payload = request.get_json(silent=True) or {}
+    regions = payload.get("regions") or []
+    if not isinstance(regions, list):
+        return jsonify({"ok": False, "error": "regions must be a list"}), 400
+    force = bool(payload.get("force"))
+    info, error = work_tool.get_weather_for_regions(regions, force=force)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, "regions": info})
 
 @app.route("/issues/reboot-scrypted/<unit>", methods=["POST"])
 @app.route("/issues/reboot-snuc/<unit>", methods=["POST"])
@@ -2324,23 +2353,58 @@ def issues_pve(unit):
 
 @app.route("/recovery_email", methods=["GET"])
 def recovery_email_form():
-    return render_template("recovery_email.html")
+    art_path = work_tool.art_recovery_report_path()
+    art_mtime = ""
+    if os.path.isfile(art_path):
+        try:
+            art_mtime = datetime.fromtimestamp(os.path.getmtime(art_path)).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except Exception:
+            art_mtime = "unknown"
+    return render_template(
+        "recovery_email.html",
+        art_report_ready=os.path.isfile(art_path),
+        art_report_mtime=art_mtime,
+    )
 
 @app.route("/recovery_email/results", methods=["POST"])
 def recovery_email_results():
-    report = request.files.get("report_file")
-    if not report:
-        return "Missing report file", 400
+    source = str(request.form.get("source") or "upload").strip().lower()
+    delete_after = True
     job_id = uuid.uuid4().hex
-    report_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{report.filename}")
-    report.save(report_path)
-    report.close()
+    report_path = None
+
+    if source == "art":
+        report_path, error = work_tool.download_art_noc_outage_report()
+        if error:
+            return f"ART download failed: {error}", 502
+        delete_after = False
+    elif source == "art_cached":
+        report_path = work_tool.art_recovery_report_path()
+        if not os.path.isfile(report_path):
+            report_path, error = work_tool.download_art_noc_outage_report()
+            if error:
+                return f"ART download failed: {error}", 502
+        delete_after = False
+    else:
+        report = request.files.get("report_file")
+        if not report:
+            return "Missing report file", 400
+        report_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{report.filename}")
+        report.save(report_path)
+        report.close()
+
     stream_jobs[job_id] = {
         "queue": queue.Queue(),
         "done": False,
         "results": None,
     }
-    thread = threading.Thread(target=_run_recovery_email_check, args=(job_id, report_path), daemon=True)
+    thread = threading.Thread(
+        target=_run_recovery_email_check,
+        args=(job_id, report_path, delete_after),
+        daemon=True,
+    )
     thread.start()
     return redirect(url_for("recovery_email_watch", job_id=job_id))
 
@@ -2535,7 +2599,8 @@ def _start_arizona_validation_scheduler():
         if automated_tasks_paused():
             print(
                 "PAUSE_AUTOMATED_TASKS is enabled — daily 4:00/4:05/4:10 AM "
-                "jobs and automatic ERP polling are paused until cleared"
+                "jobs, hourly ART report refresh, and automatic ERP polling "
+                "are paused until cleared"
             )
         thread = threading.Thread(
             target=_arizona_validation_loop,
@@ -2574,6 +2639,43 @@ def _start_arizona_validation_scheduler():
             f"{netsheet_nxt.strftime('%Y-%m-%d %H:%M %Z')} "
             "(4:10 AM MST daily)"
         )
+        art_thread = threading.Thread(
+            target=_art_recovery_report_loop,
+            daemon=True,
+            name="art-recovery-report",
+        )
+        art_thread.start()
+        if not automated_tasks_paused():
+            print(
+                "ART NOC outage report (reportId=153) refresh scheduled "
+                f"every {ART_REPORT_REFRESH_SECONDS // 60} minutes"
+            )
+
+def _run_scheduled_art_recovery_report():
+    if automated_tasks_paused():
+        return
+    path, error = work_tool.download_art_noc_outage_report()
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    if error:
+        print(f"[{when}] Scheduled ART recovery report failed: {error}")
+    else:
+        print(f"[{when}] Scheduled ART recovery report refreshed: {path}")
+
+
+def _art_recovery_report_loop():
+    # Brief startup delay so the service finishes boot before first pull.
+    time.sleep(45)
+    while True:
+        try:
+            _run_scheduled_art_recovery_report()
+        except Exception as exc:
+            print(f"Scheduled ART recovery report failed: {exc}")
+        time.sleep(ART_REPORT_REFRESH_SECONDS)
+
+
+ART_REPORT_REFRESH_SECONDS = int(
+    (os.getenv("ART_REPORT_REFRESH_SECONDS") or "3600").strip() or "3600"
+)
 
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ != "__main__":
     if WORK_TOOL_ENV != "sandbox":
