@@ -81,7 +81,8 @@ def meshcentral_base_url():
 
 def raindance_base_url():
     """Raindance unit page base, e.g. https://raindance.example.net/unit/"""
-    return _env_url("RAINDANCE_BASE_URL", "https://raindance.sentracam.net/unit/")
+    # Keep trailing slash: UI concatenates unit id directly onto this prefix.
+    return _env_url("RAINDANCE_BASE_URL", "https://raindance.sentracam.net/unit/") + "/"
 
 def art_base_url():
     """ART report endpoint (see art_get.py / download_art_noc_outage_report)."""
@@ -534,6 +535,13 @@ def main():
             if output:
                 print(output)
             print(message if ok else f"Error: {message}")
+        elif cmd == "28":
+            unit = input("Enter unit to run step one of scrypted fix: ")
+            version, unit = security_update_fix_part_1(unit)
+            input("Step 1 finished, complete WEBUI steps then hit enter once finished: ")
+            security_update_fix_step_2(unit)
+            print("Step 2 completed, beginning step 3")
+            security_update_fix_step_3(unit, version)
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -811,7 +819,11 @@ def ping_speaker(unit):
 
 def _detect_switch_type(banner):
     text = str(banner or "")
-    if "HGW-802SM-BT" in text or "Welcome to the CLI for HGW" in text:
+    if (
+        "HGW-802SM-BT" in text
+        or "HGW-802SM-PSE" in text
+        or "Welcome to the CLI for HGW" in text
+    ):
         return "robofiber"
     if "BusyBox" in text:
         return "netonix"
@@ -920,12 +932,12 @@ def _iter_switch_log_lines(
         cutoff = _switch_log_cutoff()
     channel = session["channel"]
     channel.send(f"{command}\n")
-    time.sleep(2)
+    time.sleep(1.0)
     output = ""
     page = 0
     idle_rounds = 0
     while page < max_pages:
-        time.sleep(0.75)
+        time.sleep(0.25)
         if channel.recv_ready():
             idle_rounds = 0
             chunk = channel.recv(65535).decode("utf-8", errors="replace")
@@ -991,10 +1003,16 @@ def _open_switch_session(unit):
             look_for_keys=False,
         )
         channel = switch_ssh.invoke_shell()
-        time.sleep(1.5)
         banner = ""
-        if channel.recv_ready():
-            banner = channel.recv(65535).decode("utf-8", errors="replace")
+        # Wait for the login banner/prompt; a short sleep alone often misses it
+        # on slower PSE units and then type detection fails.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.25)
+            if channel.recv_ready():
+                banner += channel.recv(65535).decode("utf-8", errors="replace")
+                if _detect_switch_type(banner) or _at_switch_prompt(banner):
+                    break
         switch_type = _detect_switch_type(banner)
         if not switch_type:
             return None, (
@@ -1119,6 +1137,192 @@ def _fetch_switch_log(unit, max_pages=SWITCH_LOG_MAX_PAGES):
         )
     return output, session["ip"], session["switch_type"], None
 
+def security_update_fix_part_1(unit):
+    load_dotenv(env_path)
+    pveSshUsername = os.getenv("pvesshuser")
+    pveSshPass = os.getenv("pvepass")
+    ip = None
+    version = None
+    errors = ""
+    commands = [
+        "set -e",
+        "qm stop 101",
+        "qm config 101 | grep hostpci",
+        "qm set 101 --delete hostpci0",
+        "qm set 101 --vga std"
+    ]
+
+    pvescript = "\n".join(commands)
+
+
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+            ip = row[11]
+            break
+
+    pveSshClient = paramiko.SSHClient()
+    pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        pveSshClient.connect(hostname=ip, username=pveSshUsername, password=pveSshPass)
+        stdin, stdout, stderr = pveSshClient.exec_command(f"bash << 'EOF'\n{pvescript}\nEOF")
+        output = stdout.read().decode("utf-8").strip()
+        errors = stderr.read().decode("utf-8").strip()
+        output = output.splitlines()
+        if errors:
+            print(f"stderr: {errors}")
+        for line in output:
+            print(line)
+            if "hostpci" in line:
+                parts = line.split(":", 1)
+                version = parts[1].strip()
+                print(f"version: {version}")
+        if version is None:
+            print(f"Could not find hostpci configuration for {unit}")
+            return None, unit
+        return version, unit
+    except Exception as e:
+        print(f"failed: {e} also {errors}")
+        return None, unit
+    finally:
+        pveSshClient.close()
+
+def security_update_fix_step_2(unit):
+    load_dotenv(env_path)
+    scryptSshUsername = os.getenv("scryptuserssh")
+    scryptSshPass = os.getenv("scryptpass")
+    ip = None
+    errors = ""
+    unattended_fix_cmd = f"""
+    if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
+        echo '{scryptSshPass}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
+    fi
+    """
+    commands = [
+            "set -e",
+            f"echo '{scryptSshPass}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
+            f"echo '{scryptSshPass}' | sudo -S apt install -f -y",
+            f"echo '{scryptSshPass}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
+            f"echo '{scryptSshPass}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
+            f"echo '{scryptSshPass}' | sudo -S update-grub",
+            "ls /boot/vmlinuz-* /boot/initrd.img-*",
+            f"echo '{scryptSshPass}' | sudo -S dpkg -l | grep -E '^i[^i]'",
+            f"echo '{scryptSshPass}' | sudo -S apt-mark showhold",
+            unattended_fix_cmd,
+            f"echo '{scryptSshPass}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades",
+            f"echo '{scryptSshPass}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true"
+        ]
+    scryptedscript = "\n".join(commands)
+
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+            ip = row[12]
+            break
+
+    scryptedSshClient = paramiko.SSHClient()
+    scryptedSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        scryptedSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
+        stdin, stdout, stderr = scryptedSshClient.exec_command(f"bash << 'EOF'\n{scryptedscript}\nEOF")
+        output = stdout.read().decode("utf-8")
+        errors = stderr.read().decode("utf-8")
+
+        if errors:
+            print(f"errors: {errors}")
+            return
+
+        output = output.splitlines()
+        for line in output:
+            print(line)
+
+        print(f"Rebooting {unit}...")
+
+        scryptedSshClient.exec_command(
+            f"echo '{scryptSshPass}' | sudo -S reboot")
+        return unit
+    except Exception as e:
+        print(f"exception: {e}")
+        return unit
+    finally:
+        scryptedSshClient.close()
+
+def security_update_fix_step_3(unit, version):
+    load_dotenv(env_path)
+    scryptSshUsername = os.getenv("scryptuserssh")
+    scryptSshPass = os.getenv("scryptpass")
+    pveSshUsername = os.getenv("pvesshuser")
+    pveSshPass = os.getenv("pvepass")
+    scrypt_ip = None
+    pve_ip = None
+    errors = ""
+    errors2 = ""
+    commands = [
+        "set -e",
+        f"echo '{scryptSshPass}' | sudo -S uname -r "
+    ]
+    commands2 = [
+        "set -e",
+        f"qm set 101 --hostpci0 {version}",
+        "qm start 101"
+    ]
+    cmdscript = "\n".join(commands)
+    cmdscript2 = "\n".join(commands2)
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+            scrypt_ip = row[12]
+            pve_ip = row[11]
+            break
+
+    scryptSshClient = paramiko.SSHClient()
+    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    pveSshClient = paramiko.SSHClient()
+    pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+
+        scryptSshClient.connect(hostname=scrypt_ip, username=scryptSshUsername, password=scryptSshPass)
+        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
+        output = stdout.read().decode("utf-8")
+        errors = stderr.read().decode("utf-8")
+
+        output = output.splitlines()
+        if errors:
+            print(f"errors: {errors}")
+            
+
+        for line in output:
+            print(line)
+        print("Shutting down...")
+        
+        scryptSshClient.exec_command(f"echo '{scryptSshPass}' | sudo -S shutdown -h now")
+        scryptSshClient.close()
+
+        input("Once unit has fully shut down press enter to continue: ")
+        try:
+            print(f"Set hostpci version to: {version}")
+            pveSshClient.connect(hostname=pve_ip, username=pveSshUsername, password=pveSshPass)
+            stdin2, stdout2, stderr2 = pveSshClient.exec_command(f"bash << 'EOF'\n{cmdscript2}\nEOF")
+            output2 = stdout2.read().decode("utf-8")
+            output2 = output2.splitlines()
+            errors2 = stderr2.read().decode("utf-8")
+            if errors2:
+                print(f"errors: {errors2}")
+            for line in output2:
+                print(line)
+        except Exception as e:
+            print(f"Excepted error: {e}")
+            return None, unit
+        finally:
+            pveSshClient.close()
+        return unit
+            
+            
+    except Exception as e:
+        print(f"Excepted error: {e}")
+        return None, unit
+
+
+    
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
     session, error = _open_switch_session(unit)
@@ -1191,30 +1395,47 @@ def get_robofiber_uptime(unit):
         _close_switch_session(session)
 
 def get_robofiber_logs_last_month(unit):
-    """Return filtered switch syslog/log lines from the first 10 pager pages."""
-    output, ip, switch_type, error = _fetch_switch_log(unit)
+    """Return filtered switch syslog/log lines from the last 30 days."""
+    session, error = _open_switch_session(unit)
     if error:
         print(error)
         return None, error
+    command = (
+        "show log"
+        if session["switch_type"] == "netonix"
+        else "show syslog messages"
+    )
     skip_terms = (
         NETONIX_SYSLOG_SKIP
-        if switch_type == "netonix"
+        if session["switch_type"] == "netonix"
         else ROBOFIBER_SYSLOG_SKIP
     )
+    # Robofiber HGW (BT/PSE) returns newest-first; stop once we pass the cutoff.
+    # Netonix buffers are oldest-first, so keep paging through old lines.
+    newest_first = session["switch_type"] != "netonix"
+    ip = session["ip"]
+    switch_type = session["switch_type"]
     lines = []
-    for line in output.splitlines():
-        text = line.strip()
-        if not _is_switch_log_line(text):
-            continue
-        lower = text.lower()
-        if any(skip.lower() in lower for skip in skip_terms):
-            continue
-        lines.append(text)
-        print(text)
+    try:
+        for text in _iter_switch_log_lines(
+            session,
+            command,
+            cutoff=_switch_log_cutoff(),
+            newest_first=newest_first,
+        ):
+            lower = text.lower()
+            if any(skip.lower() in lower for skip in skip_terms):
+                continue
+            lines.append(text)
+            print(text)
+    except Exception as exc:
+        return None, f"Switch log command failed for {unit}: {exc}"
+    finally:
+        _close_switch_session(session)
     if not lines:
         msg = (
             f"No syslog lines for {unit} "
-            f"(checked {SWITCH_LOG_MAX_PAGES} pager pages; logs may be deeper or filtered)"
+            f"in the last {SWITCH_LOG_MAX_AGE_DAYS} days"
         )
         print(msg)
         return None, msg
@@ -1241,15 +1462,16 @@ def get_robofiber_logs_link_events(unit):
     cutoff = _switch_log_cutoff()
     ip = session["ip"]
     switch_type = session["switch_type"]
+    # Robofiber returns newest-first — stop at the 30-day cutoff instead of
+    # paging through the entire buffer (was ~60s and looked like a hang).
+    newest_first = switch_type != "netonix"
     lines = []
     try:
         for text in _iter_switch_log_lines(
             session,
             command,
             cutoff=cutoff,
-            # Both Netonix and Robofiber buffers are oldest-first; keep paging
-            # through sub-cutoff lines instead of stopping at the first old entry.
-            newest_first=False,
+            newest_first=newest_first,
         ):
             if not _is_link_event_line(text, switch_type):
                 continue
