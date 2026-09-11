@@ -1336,6 +1336,7 @@ def security_update_step_4(unit):
     load_dotenv(env_path)
     scryptSshUsername = os.getenv("scryptuserssh")
     scryptSshPass = os.getenv("scryptpass")
+    company = os.getenv("company")
     ip = None
     errors = ""
     errors2 = ""
@@ -1343,7 +1344,8 @@ def security_update_step_4(unit):
 
     commands = [
         f"echo {scryptSshPass} | sudo -S lspci -nn | grep -i VGA",
-        f"echo {scryptSshPass} | sudo -S lsmod | grep i915"
+        f"echo {scryptSshPass} | sudo -S lsmod | grep i915",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service"
     ]
     cmd2 = f"echo {scryptSshPass} | sudo -S dmesg | grep -i i915 | tail -20"
     cmdscript = "\n".join(commands)
@@ -1371,6 +1373,7 @@ def security_update_step_4(unit):
                 vga_counter += 1
             if "i915" in line:
                 i915_counter += 1
+        print("DUCK-DB Restarted..")
         stdin2, stdout2, stderr2 = scryptSshClient.exec_command(f"{cmd2}")
         errors2 = stderr2.read().decode("utf-8")
         output2 = stdout2.read().decode("utf-8")
