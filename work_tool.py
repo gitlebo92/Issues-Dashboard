@@ -542,6 +542,16 @@ def main():
             security_update_fix_step_2(unit)
             print("Step 2 completed, beginning step 3")
             security_update_fix_step_3(unit, version)
+            print("Step 3 completed, checking drivers...")
+            drivers_loaded = security_update_step_4(unit)
+            if drivers_loaded:
+                print("Successfully completed scrypted security update fix")
+            else:
+                print("Failed to load drivers")
+            
+        elif cmd == "29":
+            unit = input('Enter RDXXXX to check drivers: ')
+            security_update_step_4(unit)
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -1172,7 +1182,7 @@ def security_update_fix_part_1(unit):
             print(f"stderr: {errors}")
         for line in output:
             print(line)
-            if "hostpci" in line:
+            if "hostpci" in line and "delete" not in line:
                 parts = line.split(":", 1)
                 version = parts[1].strip()
                 print(f"version: {version}")
@@ -1322,7 +1332,68 @@ def security_update_fix_step_3(unit, version):
         return None, unit
 
 
-    
+def security_update_step_4(unit):
+    load_dotenv(env_path)
+    scryptSshUsername = os.getenv("scryptuserssh")
+    scryptSshPass = os.getenv("scryptpass")
+    ip = None
+    errors = ""
+    errors2 = ""
+    drivers_loaded = True
+
+    commands = [
+        f"echo {scryptSshPass} | sudo -S lspci -nn | grep -i VGA",
+        f"echo {scryptSshPass} | sudo -S lsmod | grep i915"
+    ]
+    cmd2 = f"echo {scryptSshPass} | sudo -S dmesg | grep -i i915 | tail -20"
+    cmdscript = "\n".join(commands)
+    scryptSshClient = paramiko.SSHClient()
+    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    vga_counter = 0
+    i915_counter = 0
+
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+            ip = row[12]
+            break
+    try:
+        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
+        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
+        errors = stderr.read().decode("utf-8")
+        output = stdout.read().decode("utf-8")
+
+        if errors:
+            print(f"errors: {errors}")
+        output = output.splitlines()
+        for line in output:
+            if "VGA compatible controller" in line:
+                vga_counter += 1
+            if "i915" in line:
+                i915_counter += 1
+        stdin2, stdout2, stderr2 = scryptSshClient.exec_command(f"{cmd2}")
+        errors2 = stderr2.read().decode("utf-8")
+        output2 = stdout2.read().decode("utf-8")
+
+        if errors2:
+            print(f"errors: {errors2}")
+
+        output2 = output2.splitlines()
+        for line in output2:
+            print(line)
+        print(f"VGA controllers: {vga_counter}")
+        print(f"i915 entries: {i915_counter}")
+
+        if vga_counter != 2 or i915_counter != 7:
+            print("!!!!Some drivers did not load!!!!")
+            drivers_loaded = False
+        return drivers_loaded
+    except Exception as e:
+        print(f"Exception error: {e}")
+        return False
+    finally:
+        scryptSshClient.close()
+
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
     session, error = _open_switch_session(unit)
