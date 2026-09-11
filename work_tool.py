@@ -548,10 +548,23 @@ def main():
                 print("Successfully completed scrypted security update fix")
             else:
                 print("Failed to load drivers")
-            
+            print("Restarting services...")
+            services_refreshed = refresh_platform_services(unit)
+            if services_refreshed == True:
+                print("Successfully refreshed services")
+            else:
+                print("Failed to restart services")
+                
         elif cmd == "29":
             unit = input('Enter RDXXXX to check drivers: ')
             security_update_step_4(unit)
+        elif cmd == "30":
+            unit = input('Enter RDXXXX to refresh services: ')
+            services_refreshed = refresh_platform_services(unit)
+            if services_refreshed == True:
+                print("Successfully refreshed services")
+            else:
+                print("Failed to restart services")
         elif cmd == "cls" or cmd == "clr" or cmd == "clear":
             clear_terminal()
         elif cmd == "quit" or cmd == "exit":
@@ -1345,7 +1358,6 @@ def security_update_step_4(unit):
     commands = [
         f"echo {scryptSshPass} | sudo -S lspci -nn | grep -i VGA",
         f"echo {scryptSshPass} | sudo -S lsmod | grep i915",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service"
     ]
     cmd2 = f"echo {scryptSshPass} | sudo -S dmesg | grep -i i915 | tail -20"
     cmdscript = "\n".join(commands)
@@ -1397,6 +1409,57 @@ def security_update_step_4(unit):
     finally:
         scryptSshClient.close()
 
+def refresh_platform_services(unit):
+    load_dotenv(env_path)
+    scryptSshUsername = os.getenv("scryptuserssh")
+    scryptSshPass = os.getenv("scryptpass")
+    company = os.getenv("company")
+    ip = None
+    errors = ""
+
+    commands = [
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-watchdog.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-web.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-metadata.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-images.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-capture.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-smtp.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-alarms.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-events.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-onvif.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-monitor.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-snmp.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-cache.service"
+    ]
+
+    cmdscript = "\n".join(commands)
+    for row in net_array:
+        if unit.upper() == row[0].upper():
+            ip = row[12]
+            break
+    scryptSshClient = paramiko.SSHClient()
+    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    try:
+        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
+        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
+        errors = stderr.read().decode("utf-8")
+        output = stdout.read().decode("utf-8")
+        output = output.splitlines()
+
+        if errors:
+            print(f"errors: {errors}")
+        for line in output:
+            print(line)
+        return True
+    except Exception as e:
+        print(f"exception: {e}")
+        return False
+
+    finally:
+        scryptSshClient.close()
+        
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
     session, error = _open_switch_session(unit)
