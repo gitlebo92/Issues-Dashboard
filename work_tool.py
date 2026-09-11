@@ -1460,6 +1460,292 @@ def refresh_platform_services(unit):
     finally:
         scryptSshClient.close()
         
+def _security_fix_ip_pair(unit):
+    """PVE + Scrypted IPs for the security update fix flow, via the modern netsheet helpers."""
+    row = ensure_unit_net_info(unit, needed_indexes=(11, 12))
+    if not row:
+        return None, None, f"Unit {unit} not found in net sheet"
+    pve_ip = _host_only(row[11] if len(row) > 11 else "")
+    scrypted_ip = _host_only(row[12] if len(row) > 12 else "")
+    if not pve_ip:
+        return None, None, f"No PVE IP for {unit}"
+    if not scrypted_ip:
+        return None, None, f"No Scrypted IP for {unit}"
+    return pve_ip, scrypted_ip, None
+
+def security_update_web_step1(unit):
+    """
+    Security update fix, step 1: on PVE, stop VM 101 and remove the GPU
+    passthrough (hostpci0) config, saving its value for later reassignment.
+    Web-safe counterpart of security_update_fix_part_1 (no input()).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return False, "Missing unit", None
+    pve_ip, _scrypted_ip, err = _security_fix_ip_pair(unit)
+    if err:
+        return False, err, None
+    username, password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return False, cred_error, None
+
+    commands = [
+        "set -e",
+        "qm stop 101",
+        "qm config 101 | grep hostpci",
+        "qm set 101 --delete hostpci0",
+        "qm set 101 --vga std",
+    ]
+    script = "\n".join(commands)
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    log_lines = []
+    version = None
+    try:
+        client.connect(
+            hostname=pve_ip, username=username, password=password,
+            timeout=30, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
+        output = stdout.read().decode("utf-8").strip().splitlines()
+        errors = stderr.read().decode("utf-8").strip()
+        if errors:
+            log_lines.append(f"stderr: {errors}")
+        for line in output:
+            log_lines.append(line)
+            if "hostpci" in line and "delete" not in line:
+                version = line.split(":", 1)[1].strip()
+        if version is None:
+            return False, f"Could not find hostpci configuration for {unit}", None
+        log_lines.append(f"Saved hostpci0 version: {version}")
+        return True, "\n".join(log_lines), version
+    except Exception as exc:
+        return False, f"Step 1 failed: {exc}", None
+    finally:
+        client.close()
+
+def security_update_web_step2(unit):
+    """
+    Security update fix, step 2: on Scrypted, purge the vulnerable kernel
+    package, hold the previous one, update grub, and reboot.
+    Web-safe counterpart of security_update_fix_step_2 (no input()).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return False, "Missing unit"
+    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
+    if err:
+        return False, err
+    username, password = _scrypted_ssh_credentials()
+    if not username or not password:
+        return False, "Set scryptuserssh and scryptpass in .env"
+
+    unattended_fix_cmd = f"""
+    if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
+        echo '{password}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
+    fi
+    """
+    commands = [
+        "set -e",
+        f"echo '{password}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
+        f"echo '{password}' | sudo -S apt install -f -y",
+        f"echo '{password}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
+        f"echo '{password}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
+        f"echo '{password}' | sudo -S update-grub",
+        "ls /boot/vmlinuz-* /boot/initrd.img-*",
+        f"echo '{password}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
+        f"echo '{password}' | sudo -S apt-mark showhold",
+        unattended_fix_cmd,
+        f"echo '{password}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
+        f"echo '{password}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true",
+    ]
+    script = "\n".join(commands)
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=scrypted_ip, username=username, password=password,
+            timeout=30, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
+        output = stdout.read().decode("utf-8")
+        errors = stderr.read().decode("utf-8")
+        exit_status = stdout.channel.recv_exit_status()
+        log_lines = output.splitlines()
+        if errors:
+            # apt/update-grub write normal progress messages to stderr; only a
+            # non-zero exit status (the script has `set -e`) means a command
+            # actually failed.
+            log_lines.append(f"stderr (informational unless the script failed): {errors}")
+        if exit_status != 0:
+            return False, "Step 2 error (command failed, exit status %d):\n%s" % (
+                exit_status, "\n".join(log_lines)
+            )
+        client.exec_command(f"echo '{password}' | sudo -S reboot")
+        log_lines.append(f"Rebooting {unit}...")
+        return True, "\n".join(log_lines)
+    except Exception as exc:
+        return False, f"Step 2 failed: {exc}"
+    finally:
+        client.close()
+
+def security_update_web_shutdown(unit):
+    """
+    Security update fix, checkpoint: confirm the running kernel on Scrypted
+    (after it comes back up on the held kernel from step 2), then shut it
+    down so PVE can safely reassign the GPU. The web UI waits for you to
+    confirm the unit is fully powered off before calling the finish step.
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return False, "Missing unit"
+    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
+    if err:
+        return False, err
+    username, password = _scrypted_ssh_credentials()
+    if not username or not password:
+        return False, "Set scryptuserssh and scryptpass in .env"
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=scrypted_ip, username=username, password=password,
+            timeout=30, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = client.exec_command(f"echo '{password}' | sudo -S uname -r")
+        output = stdout.read().decode("utf-8").strip()
+        errors = stderr.read().decode("utf-8").strip()
+        log_lines = []
+        if errors:
+            log_lines.append(f"stderr: {errors}")
+        log_lines.append(f"Running kernel: {output}")
+        log_lines.append("Shutting down...")
+        client.exec_command(f"echo '{password}' | sudo -S shutdown -h now")
+        return True, "\n".join(log_lines)
+    except Exception as exc:
+        return False, f"Shutdown step failed: {exc}"
+    finally:
+        client.close()
+
+def security_update_web_finish(unit, version):
+    """
+    Security update fix, finish: on PVE, reassign hostpci0 to the version
+    saved in step 1 and start VM 101 back up. Only call this once the unit
+    is confirmed fully shut down.
+    """
+    unit = str(unit or "").strip()
+    version = str(version or "").strip()
+    if not unit:
+        return False, "Missing unit"
+    if not version:
+        return False, "Missing saved hostpci version from step 1"
+    pve_ip, _scrypted_ip, err = _security_fix_ip_pair(unit)
+    if err:
+        return False, err
+    username, password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return False, cred_error
+
+    commands = [
+        "set -e",
+        f"qm set 101 --hostpci0 {version}",
+        "qm start 101",
+    ]
+    script = "\n".join(commands)
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=pve_ip, username=username, password=password,
+            timeout=30, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
+        output = stdout.read().decode("utf-8").splitlines()
+        errors = stderr.read().decode("utf-8").strip()
+        exit_status = stdout.channel.recv_exit_status()
+        if errors:
+            output.append(f"stderr (informational unless the script failed): {errors}")
+        if exit_status != 0:
+            return False, "Finish step error (command failed, exit status %d):\n%s" % (
+                exit_status, "\n".join(output)
+            )
+        message = "\n".join(output) if output else f"Set hostpci0 to {version} and started VM 101"
+        return True, message
+    except Exception as exc:
+        return False, f"Finish step failed: {exc}"
+    finally:
+        client.close()
+
+def security_update_web_verify(unit):
+    """
+    Security update fix, verify: confirm the VGA/i915 passthrough drivers
+    loaded after VM 101 is back up. Web-safe counterpart of
+    security_update_step4 (returns a message instead of printing).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return False, "Missing unit", False
+    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
+    if err:
+        return False, err, False
+    username, password = _scrypted_ssh_credentials()
+    if not username or not password:
+        return False, "Set scryptuserssh and scryptpass in .env", False
+
+    commands = [
+        f"echo '{password}' | sudo -S lspci -nn | grep -i VGA",
+        f"echo '{password}' | sudo -S lsmod | grep i915",
+    ]
+    cmd2 = f"echo '{password}' | sudo -S dmesg | grep -i i915 | tail -20"
+    script = "\n".join(commands)
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    vga_counter = 0
+    i915_counter = 0
+    log_lines = []
+    try:
+        client.connect(
+            hostname=scrypted_ip, username=username, password=password,
+            timeout=30, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
+        primary_output = stdout.read().decode("utf-8")
+        primary_errors = stderr.read().decode("utf-8")
+        if primary_errors:
+            log_lines.append(f"stderr: {primary_errors}")
+        for line in primary_output.splitlines():
+            if "VGA compatible controller" in line:
+                vga_counter += 1
+            if "i915" in line:
+                i915_counter += 1
+        stdin2, stdout2, stderr2 = client.exec_command(cmd2)
+        secondary_output = stdout2.read().decode("utf-8")
+        secondary_errors = stderr2.read().decode("utf-8")
+        if secondary_errors:
+            log_lines.append(f"stderr: {secondary_errors}")
+        log_lines.extend(secondary_output.splitlines())
+        log_lines.append(f"VGA controllers: {vga_counter}")
+        log_lines.append(f"i915 entries: {i915_counter}")
+        drivers_loaded = vga_counter == 2 and i915_counter == 7
+        if not drivers_loaded:
+            log_lines.append("Some drivers did not load")
+        return True, "\n".join(log_lines), drivers_loaded
+    except Exception as exc:
+        return False, f"Verify step failed: {exc}", False
+    finally:
+        client.close()
+
+def restart_platform_services(unit):
+    """Web-safe wrapper: restart all Scrypted platform services for unit, return (ok, message)."""
+    unit = str(unit or "").strip()
+    if not unit:
+        return False, "Missing unit"
+    ok = refresh_platform_services(unit)
+    if ok:
+        return True, f"Restarted all platform services on {unit}"
+    return False, f"Failed to restart services on {unit}"
+
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
     session, error = _open_switch_session(unit)
