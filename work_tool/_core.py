@@ -1,3 +1,10 @@
+"""
+The original work_tool.py body, minus the domains split into sibling modules.
+
+Still large. Cameras, ERP projects and the PVE helpers are too entangled to
+cut safely without being able to run the app - see the notes in CLAUDE.md.
+"""
+
 import time
 import requests
 import csv
@@ -23,9 +30,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from urllib.parse import quote
 import urllib3
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 multiprocessing.freeze_support()
 def resource_path(relative_path):
     try:
@@ -33,73 +38,58 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
-
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-
 def resolve_env_path():
     override = str(os.getenv("WORK_TOOL_ENV_FILE") or "").strip()
     if override:
         return override if os.path.isabs(override) else os.path.join(BASE_DIR, override)
     return resource_path(".env")
-
 env_path = resolve_env_path()
-
 load_dotenv(env_path)
-
 def pc_user():
     return (os.getenv("pcuser") or "").strip().strip('"').strip("'")
-
 def pc_user_home():
     user = pc_user()
     if not user:
         return os.path.expanduser("~")
     return os.path.join("C:\\Users", user)
-
 SENTRA_NETWORK_TOOL_DIR = os.path.join(pc_user_home(), "Documents", "Sentra_Network_Toolv16")
-
 def sentra_network_tool_v19_dir():
     """Directory containing Sentra_Network_toolv19.exe (ERP unit inventory)."""
     override = (os.getenv("SENTRA_NETWORK_TOOL_V19_DIR") or "").strip().strip('"').strip("'")
     if override:
         return override
     return os.path.join(pc_user_home(), "Documents", "Sentra_Network_toolv19")
-
 def work_tld():
     """Return the configured work domain (workTLD), without scheme or leading dot."""
     tld = (os.getenv("workTLD") or "").strip().strip('"').strip("'")
     tld = tld.replace("https://", "").replace("http://", "").strip()
     return tld.split("/")[0].lstrip(".")
-
 def _env_url(name, default=""):
     """Return a configured absolute URL (no trailing slash), or default."""
     raw = (os.getenv(name) or "").strip().strip('"').strip("'")
     if not raw:
         raw = default
     return str(raw).rstrip("/")
-
 def meshcentral_base_url():
     """MeshCentral login base, e.g. https://meshcentral.example.com/login?filter="""
     return _env_url("MESH_BASE_URL", "https://meshcentral.sentracam.com/login?filter=")
-
 def raindance_base_url():
     """Raindance unit page base, e.g. https://raindance.example.net/unit/"""
     # Keep trailing slash: UI concatenates unit id directly onto this prefix.
     return _env_url("RAINDANCE_BASE_URL", "https://raindance.sentracam.net/unit/") + "/"
-
 def art_base_url():
     """ART report endpoint (see art_get.py / download_art_noc_outage_report)."""
     return _env_url(
         "ART_DATA_URL",
         "https://art.sentracam.com/art/selectReportParameters?reportId=153",
     )
-
 def erp_base_url():
     """ERP host at https://erp.{workTLD}."""
     tld = work_tld()
     if not tld:
         return ""
     return f"https://erp.{tld}"
-
 def scrypted_web_url(unit):
     """Open Scrypted at https://{unit}.{workTLD}/endpoint/@scrypted/core/public/#/."""
     tld = work_tld()
@@ -107,7 +97,6 @@ def scrypted_web_url(unit):
     if not tld or not unit_name:
         return ""
     return f"https://{unit_name}.{tld}/endpoint/@scrypted/core/public/#/"
-
 def scrypted_open_url(unit):
     """Return a Scrypted web UI URL when the unit has a Scrypted IP in the net sheet."""
     ensure_net_array()
@@ -121,22 +110,18 @@ def scrypted_open_url(unit):
     if url:
         return url
     return f"https://{scrypted_ip}:10443/endpoint/@scrypted/core/public/#/"
-
 SCRYPTED_NO_AUDIO_SUFFIXES = ("FISHEYE", "C1-180", "C2-180")
 SCRYPTED_NO_AUDIO_SETTING_KEY = "prebuffer:noAudio"
-
 def _scrypted_web_credentials():
     """Scrypted UI login from scryptuserweb / scryptpass."""
     username = (os.getenv("scryptuserweb") or "").strip().strip('"').strip("'")
     password = (os.getenv("scryptpass") or "").strip().strip('"').strip("'")
     return username, password
-
 def _scrypted_ssh_credentials():
     """Scrypted host SSH login from scryptuserssh / scryptpass."""
     username = (os.getenv("scryptuserssh") or "").strip().strip('"').strip("'")
     password = (os.getenv("scryptpass") or "").strip().strip('"').strip("'")
     return username, password
-
 def _scrypted_setting_truthy(value):
     if value is True:
         return True
@@ -145,13 +130,11 @@ def _scrypted_setting_truthy(value):
     if isinstance(value, str) and value.strip().lower() in ("true", "1", "yes"):
         return True
     return False
-
 def _scrypted_no_audio_wanted_names(unit):
     unit_name = str(unit or "").strip().upper()
     if not unit_name:
         return set()
     return {f"SC-{unit_name}-{suffix}" for suffix in SCRYPTED_NO_AUDIO_SUFFIXES}
-
 def set_scrypted_no_audio(unit):
     """Enable No Audio on Fisheye/C1-180/C2-180 cameras. Skip if already set."""
     unit = str(unit or "").strip()
@@ -245,7 +228,6 @@ def set_scrypted_no_audio(unit):
         return asyncio.run(_run())
     except Exception as exc:
         return None, f"Scrypted No Audio failed for {unit}: {exc}"
-
 def shield_web_url(site_id):
     """Open Shield at https://shield.{workTLD}/site/{siteID}."""
     tld = work_tld()
@@ -253,8 +235,6 @@ def shield_web_url(site_id):
     if not tld or not site:
         return ""
     return f"https://shield.{tld}/site/{site}"
-
-
 def shield_component_web_url(component_or_unit):
     """Open Shield component at https://shield.{workTLD}/component/SC-{unit}."""
     tld = work_tld()
@@ -268,8 +248,6 @@ def shield_component_web_url(component_or_unit):
     if not code:
         return ""
     return f"https://shield.{tld}/component/SC-{code}"
-
-
 def erp_component_web_url(component_or_unit):
     """Open ERP Component at https://erp.{workTLD}/app/component/SC-{unit}."""
     base = erp_base_url()
@@ -283,8 +261,6 @@ def erp_component_web_url(component_or_unit):
     if not code:
         return ""
     return f"{base}/app/component/SC-{code}"
-
-
 def erp_site_web_url(site_id):
     """Open ERP Site at https://erp.{workTLD}/app/site/{siteID}."""
     base = erp_base_url()
@@ -292,8 +268,6 @@ def erp_site_web_url(site_id):
     if not base or not site:
         return ""
     return f"{base}/app/site/{site}"
-
-
 def erp_event_records_web_url(unit):
     """Open ERP Event Records filtered by SC-{unit}% for the last 7 days."""
     from urllib.parse import urlencode
@@ -311,19 +285,13 @@ def erp_event_records_web_url(unit):
         }
     )
     return f"{base}/app/event-record?{query}"
-
-
 _SITE_ID_CACHE = {}
 _SITE_ID_CACHE_TTL_SEC = 300
 _SITE_ID_CACHE_LOCK = threading.Lock()
-
-
 def _site_id_cache_key(unit, subject=""):
     unit_key = (_normalize_netsheet_unit(unit) or str(unit or "").strip()).upper()
     subject_key = str(subject or "").strip()
     return f"{unit_key}|{subject_key}"
-
-
 def _cached_site_id(unit, subject=""):
     key = _site_id_cache_key(unit, subject)
     now = time.time()
@@ -332,8 +300,6 @@ def _cached_site_id(unit, subject=""):
     if cached and len(cached) >= 2 and cached[1] > now:
         return str(cached[0] or ""), None
     return None, None
-
-
 def _store_site_id_cache(unit, subject, site_id):
     site = str(site_id or "").strip()
     if not site:
@@ -341,8 +307,6 @@ def _store_site_id_cache(unit, subject, site_id):
     key = _site_id_cache_key(unit, subject)
     with _SITE_ID_CACHE_LOCK:
         _SITE_ID_CACHE[key] = (site, time.time() + _SITE_ID_CACHE_TTL_SEC)
-
-
 def resolve_dashboard_site_id(unit, subject=""):
     """Resolve Site ID the same way Open Shield does, including project subjects."""
     subject_text = str(subject or "").strip()
@@ -359,7 +323,6 @@ def resolve_dashboard_site_id(unit, subject=""):
         _store_site_id_cache(unit, subject_text, site_id)
         return site_id, None
     return resolve_shield_site_id(unit, subject_text)
-
 toolkit = zabbix_tool.Zabbix_Tool_Kit()
 username = os.getenv("username")
 idUser = os.getenv("idUser")
@@ -380,21 +343,10 @@ false_positive = []
 netsheet = resource_path("net_sheet.csv")
 mapsheet = resource_path("map_sheet.csv")
 false_mu = resource_path("false_mu.csv")
-
 headers = {
     "idUser": f"{idUser}",
     "X-Authorization": f"Token {api_token}"
 }
-
-# NOTE: there used to be a module-level `requests.get(url, headers=headers)`
-# here — a blocking, un-timed call to the Victron VRM API that ran on every
-# `import work_tool`, i.e. before flask_endpoints.py could even bind a port.
-# Its result was never read (every later `response` is a local), and the
-# Victron UI is retired, so it was pure startup latency and a hard dependency
-# on VRM being reachable. The battery/install-checker CLI helpers below build
-# their own url/headers locally and are unaffected.
-
-
 def ensure_net_array():
     """
     Make sure net_sheet.csv has been loaded into net_array.
@@ -411,9 +363,14 @@ def ensure_net_array():
     except Exception as exc:
         print(f"Could not load net sheet ({netsheet}): {exc}")
     return bool(net_array)
-
-
 def main():
+    # Deferred: the CLI menu is the one place core reaches into a submodule.
+    # Importing at call time keeps work_tool._core free of a circular import.
+    from .security_update import (
+        security_update_fix_part_1, security_update_fix_step_2,
+        security_update_fix_step_3, security_update_step_4,
+        refresh_platform_services,
+    )
     while True:
         global counter
         if counter < 1:
@@ -598,10 +555,8 @@ def main():
 
         else:
             print('Invalid command. Please enter a number one through fourteen.')
-
 def clear_terminal():
     os.sys('cls')
-
 def clear_old_reports(mesh_path, issue_path):
     print('Attempting clear here~~~~~~~~~~~')
     try:
@@ -611,7 +566,6 @@ def clear_old_reports(mesh_path, issue_path):
     except Exception as e:
         print(f'Failed to remove: {e}')
     print('Beginning outage validation')
-    
 def file_search(unit, root=r'C:\Temp'):
     results = []
 
@@ -625,10 +579,8 @@ def file_search(unit, root=r'C:\Temp'):
         for file in results:
             print(f'{file}')
     return results
-
 def _ping_reachable(output):
     return bool(output) and "Reply from" in output and "TTL=" in output and "expired" not in output
-
 def _ping_host(host, max_echoes=4, timeout_ms=1000, stop_on_success=True):
     """Send up to max_echoes pings; optionally stop after the first successful Reply/TTL."""
     host = str(host or "").strip()
@@ -653,7 +605,6 @@ def _ping_host(host, max_echoes=4, timeout_ms=1000, stop_on_success=True):
     if _ping_reachable(combined):
         return 0, combined
     return last_code, combined
-
 def ping_router(unit, max_echoes=4, stop_on_success=True):
     row = ensure_unit_net_info(unit, needed_indexes=(1,))
     if not row or len(row) <= 1 or not str(row[1]).strip():
@@ -663,14 +614,12 @@ def ping_router(unit, max_echoes=4, stop_on_success=True):
         max_echoes=max_echoes,
         stop_on_success=stop_on_success,
     )
-
 def router_ip_for_unit(unit):
     """Return the netsheet router IP/host for a unit, or empty string."""
     row = ensure_unit_net_info(unit, needed_indexes=(1,))
     if not row or len(row) <= 1:
         return ""
     return _host_only(row[1]) or str(row[1]).strip()
-
 def ping_router_status(unit, mode="quick"):
     """
     Ping the unit router.
@@ -709,12 +658,9 @@ def ping_router_status(unit, mode="quick"):
             f"jitter {stats['jitter_ms']}ms"
         )
     return payload, None
-
 _LONG_PING_MAX_SEC = 30 * 60
 _long_ping_lock = threading.Lock()
 _long_ping_jobs = {}
-
-
 def _kill_process_tree(process):
     if process is None or process.poll() is not None:
         return
@@ -738,8 +684,6 @@ def _kill_process_tree(process):
             process.kill()
         except Exception:
             pass
-
-
 def stop_router_long_ping(job_id, reason="stopped"):
     """Stop a long ping job. Returns (ok, message, job_info)."""
     job_key = str(job_id or "").strip()
@@ -767,8 +711,6 @@ def stop_router_long_ping(job_id, reason="stopped"):
             "reason": job["stop_reason"],
         }
     return True, f"Long ping {job['stop_reason']}", info
-
-
 def start_router_long_ping(unit):
     """
     Start `ping {router_ip} -t` for a unit.
@@ -832,8 +774,6 @@ def start_router_long_ping(unit):
         "ip": ip,
         "max_seconds": _LONG_PING_MAX_SEC,
     }, None
-
-
 def iter_router_long_ping_output(job_id):
     """Yield stdout lines from a long ping job until it exits or is stopped."""
     job_key = str(job_id or "").strip()
@@ -870,14 +810,11 @@ def iter_router_long_ping_output(job_id):
                     pass
                 current["timer"] = None
         yield f"Long ping {reason} for {unit} ({ip})\n"
-
 def ping_speaker(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(4,))
     if not row or len(row) <= 4 or not str(row[4]).strip():
         return None
     return _ping_host(row[4])
-
-
 def _detect_switch_type(banner):
     text = str(banner or "")
     if (
@@ -889,7 +826,6 @@ def _detect_switch_type(banner):
     if "BusyBox" in text:
         return "netonix"
     return ""
-
 def _format_switch_uptime_seconds(total_seconds):
     try:
         total = int(float(total_seconds))
@@ -903,7 +839,6 @@ def _format_switch_uptime_seconds(total_seconds):
     return (
         f"{days} Days {hours} Hours {minutes} Mins {seconds} Secs"
     )
-
 ROBOFIBER_SYSLOG_SKIP = ("DHCP", "admin", "Vtysh", "Set Time")
 NETONIX_SYSLOG_SKIP = (
     "lease time 600",
@@ -932,13 +867,10 @@ NETONIX_SYSLOG_SKIP = (
     "Mounted root",
     "Setting MAC",
 )
-
 SWITCH_LOG_MAX_PAGES = 50
 SWITCH_LOG_MAX_AGE_DAYS = 30
-
 def _switch_log_cutoff():
     return _arizona_now() - timedelta(days=SWITCH_LOG_MAX_AGE_DAYS)
-
 def _parse_switch_log_timestamp(text):
     """Parse leading timestamps from Robofiber/Netonix switch log lines."""
     text = str(text or "").strip()
@@ -972,7 +904,6 @@ def _parse_switch_log_timestamp(text):
         except ValueError:
             pass
     return None
-
 def _clean_switch_log_line(text):
     """Strip pager redraw backspaces from Robofiber/Netonix log lines."""
     text = str(text or "").strip()
@@ -980,7 +911,6 @@ def _clean_switch_log_line(text):
         text = re.sub(r"\x08.", "", text)
         text = re.sub(r"\s+", " ", text).strip()
     return text
-
 def _iter_switch_log_lines(
     session,
     command,
@@ -1032,7 +962,6 @@ def _iter_switch_log_lines(
                 break
             if idle_rounds >= 5:
                 break
-
 def _open_switch_session(unit):
     unit = str(unit or "").strip()
     if not unit:
@@ -1093,7 +1022,6 @@ def _open_switch_session(unit):
         except Exception:
             pass
         return None, f"Switch SSH failed for {unit} ({ip}): {exc}"
-
 def _close_switch_session(session):
     if not session:
         return
@@ -1101,7 +1029,6 @@ def _close_switch_session(session):
         session["client"].close()
     except Exception:
         pass
-
 def _run_switch_shell_command(session, command, max_pages=10):
     channel = session["channel"]
     channel.send(f"{command}\n")
@@ -1135,7 +1062,6 @@ def _run_switch_shell_command(session, command, max_pages=10):
             if idle_rounds >= 5:
                 break
     return output
-
 def _is_switch_log_line(text):
     if not text:
         return False
@@ -1150,7 +1076,6 @@ def _is_switch_log_line(text):
         "show system",
         "show status",
     )
-
 def _at_switch_prompt(output):
     """True when the shell prompt (not log text) is at the end of captured output."""
     for line in reversed(output.splitlines()):
@@ -1159,7 +1084,6 @@ def _at_switch_prompt(output):
             continue
         return text.endswith("#") and " " not in text
     return False
-
 def _is_link_event_line(text, switch_type):
     lower = text.lower()
     if switch_type == "netonix":
@@ -1173,7 +1097,6 @@ def _is_link_event_line(text, switch_type):
         or "link down" in lower
         or "status changed to link" in lower
     )
-
 def _fetch_switch_log(unit, max_pages=SWITCH_LOG_MAX_PAGES):
     session, error = _open_switch_session(unit)
     if error:
@@ -1196,751 +1119,6 @@ def _fetch_switch_log(unit, max_pages=SWITCH_LOG_MAX_PAGES):
             f"No log output from switch for {unit}"
         )
     return output, session["ip"], session["switch_type"], None
-
-def security_update_fix_part_1(unit):
-    load_dotenv(env_path)
-    pveSshUsername = os.getenv("pvesshuser")
-    pveSshPass = os.getenv("pvepass")
-    ip = None
-    version = None
-    errors = ""
-    commands = [
-        "set -e",
-        "qm stop 101",
-        "qm config 101 | grep hostpci",
-        "qm set 101 --delete hostpci0",
-        "qm set 101 --vga std"
-    ]
-
-    pvescript = "\n".join(commands)
-
-    row = _net_row_for_unit(unit)
-    if row is None or len(row) <= 11 or not str(row[11]).strip():
-        print(f"No PVE IP for {unit} in net sheet")
-        return None, unit
-    ip = row[11]
-
-    pveSshClient = paramiko.SSHClient()
-    pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        pveSshClient.connect(hostname=ip, username=pveSshUsername, password=pveSshPass)
-        stdin, stdout, stderr = pveSshClient.exec_command(f"bash << 'EOF'\n{pvescript}\nEOF")
-        output = stdout.read().decode("utf-8").strip()
-        errors = stderr.read().decode("utf-8").strip()
-        output = output.splitlines()
-        if errors:
-            print(f"stderr: {errors}")
-        for line in output:
-            print(line)
-            if "hostpci" in line and "delete" not in line:
-                parts = line.split(":", 1)
-                version = parts[1].strip()
-                print(f"version: {version}")
-        if version is None:
-            print(f"Could not find hostpci configuration for {unit}")
-            return None, unit
-        return version, unit
-    except Exception as e:
-        print(f"failed: {e} also {errors}")
-        return None, unit
-    finally:
-        pveSshClient.close()
-
-def security_update_fix_step_2(unit):
-    load_dotenv(env_path)
-    scryptSshUsername = os.getenv("scryptuserssh")
-    scryptSshPass = os.getenv("scryptpass")
-    ip = None
-    errors = ""
-    unattended_fix_cmd = f"""
-    if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
-        echo '{scryptSshPass}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
-    fi
-    """
-    commands = [
-            "set -e",
-            f"echo '{scryptSshPass}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
-            f"echo '{scryptSshPass}' | sudo -S apt install -f -y",
-            f"echo '{scryptSshPass}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
-            f"echo '{scryptSshPass}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
-            f"echo '{scryptSshPass}' | sudo -S update-grub",
-            "ls /boot/vmlinuz-* /boot/initrd.img-*",
-            f"echo '{scryptSshPass}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
-            f"echo '{scryptSshPass}' | sudo -S apt-mark showhold",
-            unattended_fix_cmd,
-            f"echo '{scryptSshPass}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
-            f"echo '{scryptSshPass}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true"
-        ]
-    scryptedscript = "\n".join(commands)
-
-    row = _net_row_for_unit(unit)
-    if row is None or len(row) <= 12 or not str(row[12]).strip():
-        print(f"No Scrypted IP for {unit} in net sheet")
-        return unit
-    ip = row[12]
-
-    scryptedSshClient = paramiko.SSHClient()
-    scryptedSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    try:
-        scryptedSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptedSshClient.exec_command(f"bash << 'EOF'\n{scryptedscript}\nEOF")
-        output = stdout.read().decode("utf-8")
-        errors = stderr.read().decode("utf-8")
-
-        if errors:
-            print(f"errors: {errors}")
-            
-
-        output = output.splitlines()
-        for line in output:
-            print(line)
-
-        print(f"Rebooting {unit}...")
-
-        scryptedSshClient.exec_command(
-            f"echo '{scryptSshPass}' | sudo -S reboot")
-        return unit
-    except Exception as e:
-        print(f"exception: {e}")
-        return unit
-    finally:
-        scryptedSshClient.close()
-
-def security_update_fix_step_3(unit, version):
-    load_dotenv(env_path)
-    scryptSshUsername = os.getenv("scryptuserssh")
-    scryptSshPass = os.getenv("scryptpass")
-    pveSshUsername = os.getenv("pvesshuser")
-    pveSshPass = os.getenv("pvepass")
-    scrypt_ip = None
-    pve_ip = None
-    errors = ""
-    errors2 = ""
-    commands = [
-        "set -e",
-        f"echo '{scryptSshPass}' | sudo -S uname -r "
-    ]
-    commands2 = [
-        "set -e",
-        f"qm set 101 --hostpci0 {version}",
-        "qm start 101"
-    ]
-    cmdscript = "\n".join(commands)
-    cmdscript2 = "\n".join(commands2)
-    row = _net_row_for_unit(unit)
-    if row is None or len(row) <= 12:
-        print(f"Unit {unit} not found in net sheet")
-        return None, unit
-    scrypt_ip = row[12]
-    pve_ip = row[11]
-    if not str(scrypt_ip).strip() or not str(pve_ip).strip():
-        print(f"Missing Scrypted or PVE IP for {unit} in net sheet")
-        return None, unit
-
-    scryptSshClient = paramiko.SSHClient()
-    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    pveSshClient = paramiko.SSHClient()
-    pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    try:
-
-        scryptSshClient.connect(hostname=scrypt_ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
-        output = stdout.read().decode("utf-8")
-        errors = stderr.read().decode("utf-8")
-
-        output = output.splitlines()
-        if errors:
-            print(f"errors: {errors}")
-            
-
-        for line in output:
-            print(line)
-        print("Shutting down...")
-        
-        scryptSshClient.exec_command(f"echo '{scryptSshPass}' | sudo -S shutdown -h now")
-        scryptSshClient.close()
-
-        input("Once unit has fully shut down press enter to continue: ")
-        try:
-            print(f"Set hostpci version to: {version}")
-            pveSshClient.connect(hostname=pve_ip, username=pveSshUsername, password=pveSshPass)
-            stdin2, stdout2, stderr2 = pveSshClient.exec_command(f"bash << 'EOF'\n{cmdscript2}\nEOF")
-            output2 = stdout2.read().decode("utf-8")
-            output2 = output2.splitlines()
-            errors2 = stderr2.read().decode("utf-8")
-            if errors2:
-                print(f"errors: {errors2}")
-            for line in output2:
-                print(line)
-        except Exception as e:
-            print(f"Excepted error: {e}")
-            return None, unit
-        finally:
-            pveSshClient.close()
-        return unit
-            
-            
-    except Exception as e:
-        print(f"Excepted error: {e}")
-        return None, unit
-
-
-def security_update_step_4(unit):
-    load_dotenv(env_path)
-    scryptSshUsername = os.getenv("scryptuserssh")
-    scryptSshPass = os.getenv("scryptpass")
-    company = os.getenv("company")
-    ip = None
-    errors = ""
-    errors2 = ""
-    drivers_loaded = True
-
-    commands = [
-        f"echo {scryptSshPass} | sudo -S lspci -nn | grep -i VGA",
-        f"echo {scryptSshPass} | sudo -S lsmod | grep i915",
-    ]
-    cmd2 = f"echo {scryptSshPass} | sudo -S dmesg | grep -i i915 | tail -20"
-    cmdscript = "\n".join(commands)
-    scryptSshClient = paramiko.SSHClient()
-    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    vga_counter = 0
-    i915_counter = 0
-
-    row = _net_row_for_unit(unit)
-    if row is None or len(row) <= 12 or not str(row[12]).strip():
-        print(f"No Scrypted IP for {unit} in net sheet")
-        return False
-    ip = row[12]
-    try:
-        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
-        errors = stderr.read().decode("utf-8")
-        output = stdout.read().decode("utf-8")
-
-        if errors:
-            print(f"errors: {errors}")
-        output = output.splitlines()
-        for line in output:
-            if "VGA compatible controller" in line:
-                vga_counter += 1
-            if "i915" in line:
-                i915_counter += 1
-        print("DUCK-DB Restarted..")
-        stdin2, stdout2, stderr2 = scryptSshClient.exec_command(f"{cmd2}")
-        errors2 = stderr2.read().decode("utf-8")
-        output2 = stdout2.read().decode("utf-8")
-
-        if errors2:
-            print(f"errors: {errors2}")
-
-        output2 = output2.splitlines()
-        for line in output2:
-            print(line)
-        print(f"VGA controllers: {vga_counter}")
-        print(f"i915 entries: {i915_counter}")
-
-        if vga_counter != 2 or i915_counter != 7:
-            print("!!!!Some drivers did not load!!!!")
-            drivers_loaded = False
-        return drivers_loaded
-    except Exception as e:
-        print(f"Exception error: {e}")
-        return False
-    finally:
-        scryptSshClient.close()
-
-def refresh_platform_services(unit):
-    load_dotenv(env_path)
-    scryptSshUsername = os.getenv("scryptuserssh")
-    scryptSshPass = os.getenv("scryptpass")
-    company = os.getenv("company")
-    ip = None
-    errors = ""
-
-    commands = [
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-watchdog.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-web.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-metadata.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-images.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-capture.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-smtp.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-alarms.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-events.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-onvif.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-monitor.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-snmp.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-cache.service"
-    ]
-
-    cmdscript = "\n".join(commands)
-    row = _net_row_for_unit(unit)
-    if row is None or len(row) <= 12 or not str(row[12]).strip():
-        print(f"No Scrypted IP for {unit} in net sheet")
-        return False
-    ip = row[12]
-    scryptSshClient = paramiko.SSHClient()
-    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-    try:
-        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
-        errors = stderr.read().decode("utf-8")
-        output = stdout.read().decode("utf-8")
-        output = output.splitlines()
-
-        if errors:
-            print(f"errors: {errors}")
-        for line in output:
-            print(line)
-        return True
-    except Exception as e:
-        print(f"exception: {e}")
-        return False
-
-    finally:
-        scryptSshClient.close()
-        
-def _security_fix_ip_pair(unit):
-    """PVE + Scrypted IPs for the security update fix flow, via the modern netsheet helpers."""
-    row = ensure_unit_net_info(unit, needed_indexes=(11, 12))
-    if not row:
-        return None, None, f"Unit {unit} not found in net sheet"
-    pve_ip = _host_only(row[11] if len(row) > 11 else "")
-    scrypted_ip = _host_only(row[12] if len(row) > 12 else "")
-    if not pve_ip:
-        return None, None, f"No PVE IP for {unit}"
-    if not scrypted_ip:
-        return None, None, f"No Scrypted IP for {unit}"
-    return pve_ip, scrypted_ip, None
-
-def security_update_web_step1(unit):
-    """
-    Security update fix, step 1: on PVE, stop VM 101 and remove the GPU
-    passthrough (hostpci0) config, saving its value for later reassignment.
-    Web-safe counterpart of security_update_fix_part_1 (no input()).
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return False, "Missing unit", None
-    pve_ip, _scrypted_ip, err = _security_fix_ip_pair(unit)
-    if err:
-        return False, err, None
-    username, password, cred_error = _pve_ssh_credentials()
-    if cred_error:
-        return False, cred_error, None
-
-    commands = [
-        "set -e",
-        "qm stop 101",
-        "qm config 101 | grep hostpci",
-        "qm set 101 --delete hostpci0",
-        "qm set 101 --vga std",
-    ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    log_lines = []
-    version = None
-    try:
-        client.connect(
-            hostname=pve_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8").strip().splitlines()
-        errors = stderr.read().decode("utf-8").strip()
-        if errors:
-            log_lines.append(f"stderr: {errors}")
-        for line in output:
-            log_lines.append(line)
-            if "hostpci" in line and "delete" not in line:
-                version = line.split(":", 1)[1].strip()
-        if version is None:
-            return False, f"Could not find hostpci configuration for {unit}", None
-        log_lines.append(f"Saved hostpci0 version: {version}")
-        return True, "\n".join(log_lines), version
-    except Exception as exc:
-        return False, f"Step 1 failed: {exc}", None
-    finally:
-        client.close()
-
-def security_update_web_step2(unit):
-    """
-    Security update fix, step 2: on Scrypted, purge the vulnerable kernel
-    package, hold the previous one, update grub, and reboot.
-    Web-safe counterpart of security_update_fix_step_2 (no input()).
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return False, "Missing unit"
-    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
-    if err:
-        return False, err
-    username, password = _scrypted_ssh_credentials()
-    if not username or not password:
-        return False, "Set scryptuserssh and scryptpass in .env"
-
-    unattended_fix_cmd = f"""
-    if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
-        echo '{password}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
-    fi
-    """
-    commands = [
-        "set -e",
-        f"echo '{password}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
-        f"echo '{password}' | sudo -S apt install -f -y",
-        f"echo '{password}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
-        f"echo '{password}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
-        f"echo '{password}' | sudo -S update-grub",
-        "ls /boot/vmlinuz-* /boot/initrd.img-*",
-        f"echo '{password}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
-        f"echo '{password}' | sudo -S apt-mark showhold",
-        unattended_fix_cmd,
-        f"echo '{password}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
-        f"echo '{password}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true",
-    ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8")
-        errors = stderr.read().decode("utf-8")
-        exit_status = stdout.channel.recv_exit_status()
-        log_lines = output.splitlines()
-        if errors:
-            # apt/update-grub write normal progress messages to stderr; only a
-            # non-zero exit status (the script has `set -e`) means a command
-            # actually failed.
-            log_lines.append(f"stderr (informational unless the script failed): {errors}")
-        if exit_status != 0:
-            return False, "Step 2 error (command failed, exit status %d):\n%s" % (
-                exit_status, "\n".join(log_lines)
-            )
-        client.exec_command(f"echo '{password}' | sudo -S reboot")
-        log_lines.append(f"Rebooting {unit}...")
-        return True, "\n".join(log_lines)
-    except Exception as exc:
-        return False, f"Step 2 failed: {exc}"
-    finally:
-        client.close()
-
-def security_update_web_shutdown(unit):
-    """
-    Security update fix, checkpoint: confirm the running kernel on Scrypted
-    (after it comes back up on the held kernel from step 2), then shut it
-    down so PVE can safely reassign the GPU. The web UI waits for you to
-    confirm the unit is fully powered off before calling the finish step.
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return False, "Missing unit"
-    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
-    if err:
-        return False, err
-    username, password = _scrypted_ssh_credentials()
-    if not username or not password:
-        return False, "Set scryptuserssh and scryptpass in .env"
-
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"echo '{password}' | sudo -S uname -r")
-        output = stdout.read().decode("utf-8").strip()
-        errors = stderr.read().decode("utf-8").strip()
-        log_lines = []
-        if errors:
-            log_lines.append(f"stderr: {errors}")
-        log_lines.append(f"Running kernel: {output}")
-        log_lines.append("Shutting down...")
-        client.exec_command(f"echo '{password}' | sudo -S shutdown -h now")
-        return True, "\n".join(log_lines)
-    except Exception as exc:
-        return False, f"Shutdown step failed: {exc}"
-    finally:
-        client.close()
-
-def security_update_web_finish(unit, version):
-    """
-    Security update fix, finish: on PVE, reassign hostpci0 to the version
-    saved in step 1 and start VM 101 back up. Only call this once the unit
-    is confirmed fully shut down.
-    """
-    unit = str(unit or "").strip()
-    version = str(version or "").strip()
-    if not unit:
-        return False, "Missing unit"
-    if not version:
-        return False, "Missing saved hostpci version from step 1"
-    pve_ip, _scrypted_ip, err = _security_fix_ip_pair(unit)
-    if err:
-        return False, err
-    username, password, cred_error = _pve_ssh_credentials()
-    if cred_error:
-        return False, cred_error
-
-    commands = [
-        "set -e",
-        f"qm set 101 --hostpci0 {version}",
-        "qm start 101",
-    ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(
-            hostname=pve_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8").splitlines()
-        errors = stderr.read().decode("utf-8").strip()
-        exit_status = stdout.channel.recv_exit_status()
-        if errors:
-            output.append(f"stderr (informational unless the script failed): {errors}")
-        if exit_status != 0:
-            return False, "Finish step error (command failed, exit status %d):\n%s" % (
-                exit_status, "\n".join(output)
-            )
-        message = "\n".join(output) if output else f"Set hostpci0 to {version} and started VM 101"
-        return True, message
-    except Exception as exc:
-        return False, f"Finish step failed: {exc}"
-    finally:
-        client.close()
-
-def security_update_web_verify(unit):
-    """
-    Security update fix, verify: confirm the VGA/i915 passthrough drivers
-    loaded after VM 101 is back up. Web-safe counterpart of
-    security_update_step4 (returns a message instead of printing).
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return False, "Missing unit", False
-    _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
-    if err:
-        return False, err, False
-    username, password = _scrypted_ssh_credentials()
-    if not username or not password:
-        return False, "Set scryptuserssh and scryptpass in .env", False
-
-    commands = [
-        f"echo '{password}' | sudo -S lspci -nn | grep -i VGA",
-        f"echo '{password}' | sudo -S lsmod | grep i915",
-    ]
-    cmd2 = f"echo '{password}' | sudo -S dmesg | grep -i i915 | tail -20"
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    vga_counter = 0
-    i915_counter = 0
-    log_lines = []
-    try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        primary_output = stdout.read().decode("utf-8")
-        primary_errors = stderr.read().decode("utf-8")
-        if primary_errors:
-            log_lines.append(f"stderr: {primary_errors}")
-        for line in primary_output.splitlines():
-            if "VGA compatible controller" in line:
-                vga_counter += 1
-            if "i915" in line:
-                i915_counter += 1
-        stdin2, stdout2, stderr2 = client.exec_command(cmd2)
-        secondary_output = stdout2.read().decode("utf-8")
-        secondary_errors = stderr2.read().decode("utf-8")
-        if secondary_errors:
-            log_lines.append(f"stderr: {secondary_errors}")
-        log_lines.extend(secondary_output.splitlines())
-        log_lines.append(f"VGA controllers: {vga_counter}")
-        log_lines.append(f"i915 entries: {i915_counter}")
-        drivers_loaded = vga_counter == 2 and i915_counter == 7
-        if not drivers_loaded:
-            log_lines.append("Some drivers did not load")
-        return True, "\n".join(log_lines), drivers_loaded
-    except Exception as exc:
-        return False, f"Verify step failed: {exc}", False
-    finally:
-        client.close()
-
-def restart_platform_services(unit):
-    """Web-safe wrapper: restart all Scrypted platform services for unit, return (ok, message)."""
-    unit = str(unit or "").strip()
-    if not unit:
-        return False, "Missing unit"
-    ok = refresh_platform_services(unit)
-    if ok:
-        return True, f"Restarted all platform services on {unit}"
-    return False, f"Failed to restart services on {unit}"
-
-
-# ---------------------------------------------------------------------------
-# Per-unit busy/lock registry.
-#
-# Guards against two people (or two tabs) running conflicting actions
-# (Security Update Fix, Reboot Scrypted, Reboot PVE, Restart All Services)
-# against the same unit at the same time, and doubles as the server-side
-# job store for the multi-step Security Update Fix wizard so its state
-# (phase / saved hostpci version / log) survives a page refresh. No history
-# is kept once a job ends — this is a live lock, not an audit trail.
-# ---------------------------------------------------------------------------
-
-_unit_busy = {}
-_unit_busy_lock = threading.Lock()
-_UNIT_BUSY_LOG_MAX = 200
-
-
-def unit_busy_status(unit):
-    """Return a copy of the current busy-state dict for a unit, or None if free."""
-    unit = str(unit or "").strip()
-    with _unit_busy_lock:
-        info = _unit_busy.get(unit)
-        return dict(info) if info else None
-
-
-def unit_busy_start(unit, action, version=None):
-    """
-    Try to mark a unit busy with the given action.
-    Returns (ok, token_or_None, existing_info_or_None). On success the caller
-    gets an ownership token that must be presented to touch/end the job.
-    """
-    unit = str(unit or "").strip()
-    with _unit_busy_lock:
-        existing = _unit_busy.get(unit)
-        if existing:
-            return False, None, dict(existing)
-        token = uuid.uuid4().hex
-        _unit_busy[unit] = {
-            "unit": unit,
-            "action": action,
-            "token": token,
-            "phase": "start",
-            "version": version,
-            "log": [],
-            "started_at": time.time(),
-        }
-        return True, token, None
-
-
-def unit_busy_touch(unit, token, phase=None, version=None, log_line=None):
-    """Update phase/version and optionally append a log line. Returns True if applied."""
-    unit = str(unit or "").strip()
-    with _unit_busy_lock:
-        info = _unit_busy.get(unit)
-        if not info or info.get("token") != token:
-            return False
-        if phase is not None:
-            info["phase"] = phase
-        if version is not None:
-            info["version"] = version
-        if log_line:
-            info.setdefault("log", []).append(str(log_line))
-            info["log"] = info["log"][-_UNIT_BUSY_LOG_MAX:]
-        return True
-
-
-def unit_busy_end(unit, token):
-    """Release a unit's busy state if the token matches. Returns True if cleared."""
-    unit = str(unit or "").strip()
-    with _unit_busy_lock:
-        info = _unit_busy.get(unit)
-        if not info or info.get("token") != token:
-            return False
-        del _unit_busy[unit]
-        return True
-
-
-def unit_busy_force_clear(unit):
-    """Force-clear a unit's busy state regardless of token — escape hatch for a stuck lock."""
-    unit = str(unit or "").strip()
-    with _unit_busy_lock:
-        return _unit_busy.pop(unit, None) is not None
-
-
-def list_busy_units():
-    """Return a list of {unit, action, phase, started_at} for every currently busy unit."""
-    with _unit_busy_lock:
-        return [
-            {
-                "unit": info.get("unit"),
-                "action": info.get("action"),
-                "phase": info.get("phase"),
-                "started_at": info.get("started_at"),
-            }
-            for info in _unit_busy.values()
-        ]
-
-
-# ---------------------------------------------------------------------------
-# Per-unit persistent notes — a small free-text note per unit, visible to
-# everyone using the dashboard, saved to a JSON file so it survives restarts.
-# ---------------------------------------------------------------------------
-
-_unit_notes_lock = threading.Lock()
-
-
-def _unit_notes_path():
-    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
-    if not data_dir:
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
-    os.makedirs(data_dir, exist_ok=True)
-    return os.path.join(data_dir, "unit_notes.json")
-
-
-def _load_unit_notes():
-    try:
-        with open(_unit_notes_path(), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def get_unit_note(unit):
-    """Return (text, updated_at) for a unit's saved note (empty strings if none)."""
-    unit = str(unit or "").strip()
-    with _unit_notes_lock:
-        notes = _load_unit_notes()
-    entry = notes.get(unit) or {}
-    return entry.get("text", ""), entry.get("updated_at", "")
-
-
-def set_unit_note(unit, text):
-    """Save (or clear, if text is blank) a unit's note. Returns the new updated_at."""
-    unit = str(unit or "").strip()
-    text = str(text or "")
-    with _unit_notes_lock:
-        path = _unit_notes_path()
-        notes = _load_unit_notes()
-        if text.strip():
-            notes[unit] = {
-                "text": text,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        else:
-            notes.pop(unit, None)
-        tmp_path = path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(notes, f, indent=2, sort_keys=True)
-        os.replace(tmp_path, path)
-        return notes.get(unit, {}).get("updated_at", "")
-
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
     session, error = _open_switch_session(unit)
@@ -2011,7 +1189,6 @@ def get_robofiber_uptime(unit):
         return None, msg
     finally:
         _close_switch_session(session)
-
 def get_robofiber_logs_last_month(unit):
     """Return filtered switch syslog/log lines from the last 30 days."""
     session, error = _open_switch_session(unit)
@@ -2065,7 +1242,6 @@ def get_robofiber_logs_last_month(unit):
         "output": "\n".join(lines),
         "count": len(lines),
     }, None
-
 def get_robofiber_logs_link_events(unit):
     """Return switch link up/down lines from the last 30 days."""
     session, error = _open_switch_session(unit)
@@ -2116,7 +1292,6 @@ def get_robofiber_logs_link_events(unit):
         "output": "\n".join(lines),
         "count": len(lines),
     }, None
-
 CAMERA_ENDPOINTS = {
     "fisheye": (5, "Fisheye"),
     "camera1": (6, "Camera 1"),
@@ -2129,7 +1304,6 @@ HIGH_UNIT_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2"})
 ACRD_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2", "camera3"})
 _RD_MU_PARENT_CACHE = {}
 _RD_MU_PARENT_CACHE_TTL_SEC = 300
-
 def ping_camera(unit, target):
     endpoint = CAMERA_ENDPOINTS.get(target)
     if not endpoint:
@@ -2142,28 +1316,23 @@ def ping_camera(unit, target):
     if target == "fisheye":
         host = _host_only(host)
     return _ping_host(host)
-    
 def ping_switch(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(2,))
     if not row or len(row) <= 2 or not str(row[2]).strip():
         return None
     return _ping_host(row[2])
-    
 def ping_nuc(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(3,))
     if not row or len(row) <= 3 or not str(row[3]).strip():
         return None
     return _ping_host(row[3])
-
 def uses_pve(unit):
     try:
         return int(unit[-4:]) >= 3300
     except ValueError:
         return False
-
 def is_fd_unit(unit):
     return str(unit or "").strip().upper().startswith("FD")
-
 def is_hikvision_unit(unit, cameras=None):
     """
     MU sites (no RD prefix) with C1–C4 and no fisheye are Hikvision in the netsheet.
@@ -2184,13 +1353,11 @@ def is_hikvision_unit(unit, cameras=None):
     if any(item.get("target") == "fisheye" for item in cameras):
         return False
     return True
-
 def unit_number(unit):
     try:
         return int(str(unit).strip()[-4:])
     except (TypeError, ValueError):
         return None
-
 def _mu_code_from_parent_component(parent_component):
     """Extract MU#### from an ERP parent_component value like SC-MU8088."""
     text = str(parent_component or "").strip().upper()
@@ -2198,8 +1365,6 @@ def _mu_code_from_parent_component(parent_component):
     if not match:
         return ""
     return f"MU{match.group(1)}"
-
-
 def _erp_parent_mu_code(unit):
     """Return attached MU#### from ERP parent_component for an RD/FD unit (cached)."""
     code = _normalize_netsheet_unit(unit)
@@ -2225,8 +1390,6 @@ def _erp_parent_mu_code(unit):
         now + _RD_MU_PARENT_CACHE_TTL_SEC,
     )
     return mu_code
-
-
 def _rd_has_mu_parent(unit):
     """True when ERP Component.parent_component points at an MU trailer (e.g. SC-MU6004)."""
     code = _normalize_netsheet_unit(unit)
@@ -2237,8 +1400,6 @@ def _rd_has_mu_parent(unit):
     if cached and len(cached) >= 3 and cached[2] > now:
         return bool(cached[0])
     return bool(_erp_parent_mu_code(code))
-
-
 def resolve_attached_mu_code(unit, subject=""):
     """
     Resolve the MU trailer code attached to a unit.
@@ -2259,7 +1420,6 @@ def resolve_attached_mu_code(unit, subject=""):
             return f"MU{match.group(1)}"
         return _erp_parent_mu_code(code)
     return ""
-
 def is_acrd_unit(unit):
     """
     ACRD units are RD/FD heads with no MU trailer attached in ERP.
@@ -2272,7 +1432,6 @@ def is_acrd_unit(unit):
     if n is not None and n > 3300:
         return False
     return not _rd_has_mu_parent(code)
-
 def open_camera_targets_for_unit(unit):
     """Open Cameras targets for a unit.
 
@@ -2286,54 +1445,44 @@ def open_camera_targets_for_unit(unit):
     if is_acrd_unit(unit):
         return ACRD_OPEN_CAMERA_TARGETS
     return frozenset(CAMERA_ENDPOINTS.keys())
-
 def in_potential_stale_vpn_range(unit):
     """Units 3000-3199 inclusive may be potentially stale VPN when both router and NUC are down."""
     n = unit_number(unit)
     return n is not None and 3000 <= n <= 3199
-
 def ping_compute(unit):
     return ping_pve(unit) if uses_pve(unit) else ping_nuc(unit)
-
 def compute_host_label(unit):
     return "PVE" if uses_pve(unit) else "NUC"
-
 def _nuc_ip(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(3,))
     if not row or len(row) <= 3:
         return ""
     return _host_only(row[3])
-
 def _scrypted_ip(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(12,))
     if not row or len(row) <= 12:
         return ""
     return _host_only(row[12])
-
 def nuc_scrypted_same_ip(unit):
     """True when net-sheet NUC and Scrypted columns share the same host IP."""
     nuc = _nuc_ip(unit)
     scrypted = _scrypted_ip(unit)
     return bool(nuc and scrypted and nuc == scrypted)
-
 def ping_pve(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(11,))
     if not row or len(row) <= 11 or not str(row[11]).strip():
         return None
     return _ping_host(row[11])
-
 def ping_scrypted(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(12,))
     if not row or len(row) <= 12 or not str(row[12]).strip():
         return None
     return _ping_host(row[12]) 
-
 EXPECTED_PATCH_DATE = "20260728"
 PATCH_VERSION_COMMAND = (
     "sudo -S sed -nE 's/.*Version:[[:space:]]*(sentracam-watch-[0-9]{8}-[0-9]{6}\\.tar\\.gz).*/\\1/p' "
     "$(ls -t /var/log/sentracam/install-*.log | head -1) | head -1"
 )
-
 def _scrypted_ssh_target(unit):
     ensure_net_array()
     unit = str(unit or "").strip()
@@ -2346,7 +1495,6 @@ def _scrypted_ssh_target(unit):
     if not host:
         return None, "", f"No Scrypted IP configured for {unit}"
     return row, host, None
-
 def _looks_like_sudo_password_prompt(text):
     """True when the remote PTY is waiting for a sudo password."""
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
@@ -2355,7 +1503,6 @@ def _looks_like_sudo_password_prompt(text):
         if "[sudo] password" in lower and lower.endswith(":"):
             return True
     return False
-
 def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_prompts=25):
     """
     Run a remote command on a PTY and feed sudo passwords whenever prompted.
@@ -2410,7 +1557,6 @@ def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_pro
 
     exit_status = channel.recv_exit_status()
     return "".join(chunks), exit_status
-
 def _parse_patch_version(raw):
     text = str(raw or "").strip()
     match = re.search(
@@ -2438,7 +1584,6 @@ def _parse_patch_version(raw):
         "time": "",
         "raw": text,
     }
-
 def get_unit_patch_version(unit):
     """SSH to Scrypted and read the latest sentracam-watch install package version."""
     row, host, error = _scrypted_ssh_target(unit)
@@ -2490,7 +1635,6 @@ def get_unit_patch_version(unit):
             client.close()
         except Exception:
             pass
-
 def update_unit_patch_version(unit):
     """SSH to Scrypted and run the install command from .env to update the patch."""
     row, host, error = _scrypted_ssh_target(unit)
@@ -2544,7 +1688,6 @@ def update_unit_patch_version(unit):
             client.close()
         except Exception:
             pass
-
 def check_patch_version(unit):
     info, error = get_unit_patch_version(unit)
     if error:
@@ -2564,7 +1707,6 @@ def check_patch_version(unit):
         print(update_error)
         return
     print(f"Update result: {result.get('output') or ''}")
-
 def check_all_patches():
     patch_array = []
     ensure_net_array()
@@ -2588,7 +1730,6 @@ def check_all_patches():
     for line in patch_array:
         print(f"{line} is not up to date")
     return patch_array
-
 def validate_reports_zab():
         false_positives = []
     # zabbix_array = []
@@ -2674,12 +1815,10 @@ def validate_reports_zab():
             print('False positives: ')
             for line in false_positives:
                 print(line)
-
 def _safe_ping_result(result, missing_message=""):
     if result is None:
         return None, str(missing_message or "")
     return result
-
 def _validate_unit_connectivity(
     unit,
     false_positives,
@@ -2776,12 +1915,10 @@ def _validate_unit_connectivity(
     else:
         log(f"{host} and router are offline. {code}")
     truly_down.append(result_value)
-
 def _issue_ticket_url(issue_id):
     if not issue_id:
         return ""
     return f"{erp_base_url()}/app/issue/{issue_id}"
-
 def _net_row_for_unit(unit):
     if not unit:
         return None
@@ -2791,7 +1928,6 @@ def _net_row_for_unit(unit):
         if row and str(row[0]).strip().upper() == unit_up:
             return row
     return None
-
 def _host_only(value):
     text = (value or "").strip()
     if not text:
@@ -2800,7 +1936,6 @@ def _host_only(value):
     if ":" in text:
         return text.rsplit(":", 1)[0]
     return text
-
 # Netsheet column layout + ERP/v19 backfill.
 # Swap fetch_unit_inventory() later for a native ERP client; keep the exe path for now.
 NETSHEET_HEADER = [
@@ -2824,7 +1959,6 @@ V19_INVENTORY_TIMEOUT_SEC = 45
 _netsheet_file_lock = threading.Lock()
 _v19_inventory_cache = {}
 _v19_inventory_cache_lock = threading.Lock()
-
 def _normalize_netsheet_unit(unit):
     text = str(unit or "").strip().upper()
     if text.startswith("SC-"):
@@ -2833,18 +1967,15 @@ def _normalize_netsheet_unit(unit):
     if not match:
         return ""
     return f"{match.group(1)}{match.group(2)}"
-
 def _blank_netsheet_row(unit):
     row = [""] * NETSHEET_COL_COUNT
     row[0] = _normalize_netsheet_unit(unit)
     return row
-
 def _pad_netsheet_row(row):
     cells = [str(cell) if cell is not None else "" for cell in (row or [])]
     if len(cells) < NETSHEET_COL_COUNT:
         cells.extend([""] * (NETSHEET_COL_COUNT - len(cells)))
     return cells[:NETSHEET_COL_COUNT]
-
 def _netsheet_row_is_sparse(row, needed_indexes=None):
     if not row:
         return True
@@ -2856,7 +1987,6 @@ def _netsheet_row_is_sparse(row, needed_indexes=None):
         if not str(padded[index] or "").strip():
             return True
     return False
-
 def _map_v19_role_to_netsheet_index(role):
     text = re.sub(r"\s+", " ", str(role or "").strip())
     if not text:
@@ -2880,7 +2010,6 @@ def _map_v19_role_to_netsheet_index(role):
         "scripted": 12,
     }
     return role_map.get(lower)
-
 def parse_v19_inventory_output(text):
     """Parse Sentra_Network_toolv19 show/inventory text into netsheet column -> host."""
     inventory = {}
@@ -2926,7 +2055,6 @@ def parse_v19_inventory_output(text):
         if index not in inventory:
             inventory[index] = host
     return inventory
-
 def run_v19_commands(unit, commands, timeout=None):
     """
     Run one or more stdin commands against Sentra_Network_toolv19.exe.
@@ -2979,7 +2107,6 @@ def run_v19_commands(unit, commands, timeout=None):
     if process.returncode not in (0, None) and not output.strip():
         return output, f"v19 exited with code {process.returncode} for {unit_key}"
     return output, None
-
 def fetch_unit_inventory_via_v19_exe(unit):
     """
     Query unit IPs through Sentra_Network_toolv19.exe (stdin protocol).
@@ -3017,16 +2144,12 @@ def fetch_unit_inventory_via_v19_exe(unit):
     with _v19_inventory_cache_lock:
         _v19_inventory_cache[unit_key] = (dict(inventory), None, time.time())
     return inventory, None
-
-
 # ICCID issuer prefixes observed on Sentra SIMs (first 6 digits).
 ICCID_CARRIER_PREFIXES = (
     ("891480", "Verizon Wireless"),
     ("890124", "TMOBILE"),
     ("890103", "AT&T"),
 )
-
-
 def carrier_from_iccid(iccid):
     """Map an ICCID to AT&T / TMOBILE / Verizon Wireless via Cell carrier prefix."""
     digits = re.sub(r"\D", "", str(iccid or ""))
@@ -3036,8 +2159,6 @@ def carrier_from_iccid(iccid):
         if digits.startswith(prefix):
             return name
     return None
-
-
 def parse_v19_sim_rows(text):
     """Parse unique SIM rows from Sentra_Network_toolv19 inventory output."""
     sims = []
@@ -3077,8 +2198,6 @@ def parse_v19_sim_rows(text):
             }
         )
     return sims
-
-
 def get_unit_carriers(unit):
     """
     Query v19 inventory SIMs and return mapped cell carriers.
@@ -3115,12 +2234,9 @@ def get_unit_carriers(unit):
         "sims": sims,
         "unknown_iccids": unknown,
     }, None
-
-
 def fetch_unit_inventory(unit):
     """Unit inventory provider. Currently v19.exe; swap to native ERP later."""
     return fetch_unit_inventory_via_v19_exe(unit)
-
 def merge_sparse_net_row(existing_row, unit, inventory):
     """Fill blank netsheet cells from inventory; never overwrite non-empty values."""
     unit_key = _normalize_netsheet_unit(unit)
@@ -3145,7 +2261,6 @@ def merge_sparse_net_row(existing_row, unit, inventory):
         row[index] = value
         changed = True
     return row, changed
-
 def _read_netsheet_rows_from_disk():
     path = netsheet
     if not os.path.isfile(path):
@@ -3161,7 +2276,6 @@ def _read_netsheet_rows_from_disk():
     if str(header[0] or "").strip().lower() in ("unit/site", "unit"):
         return header, body
     return list(NETSHEET_HEADER), rows
-
 def persist_net_sheet_updates(updated_by_unit):
     """
     Apply sparse row updates to net_sheet.csv under a lock.
@@ -3213,7 +2327,6 @@ def persist_net_sheet_updates(updated_by_unit):
             raise
         generate_net_array()
     return len(updated_by_unit)
-
 def _missing_netsheet_ip_message(unit, needed_indexes):
     """Explain when a netsheet IP column is still empty after v19 backfill."""
     unit_key = _normalize_netsheet_unit(unit)
@@ -3232,7 +2345,6 @@ def _missing_netsheet_ip_message(unit, needed_indexes):
     return (
         f"No {'/'.join(missing_labels)} in net sheet or ERP/v19 inventory for {unit_key}"
     )
-
 def ensure_unit_net_info(unit, needed_indexes=None):
     """
     Ensure netsheet has a row for unit; backfill blank cells via v19/ERP when sparse.
@@ -3267,7 +2379,6 @@ def ensure_unit_net_info(unit, needed_indexes=None):
         if missing_msg:
             print(f"[netsheet] {missing_msg}")
     return row
-
 def sync_netsheet_from_erp(units=None, include_sparse_sheet_rows=True, max_units=200):
     """
     Bulk backfill missing/sparse netsheet rows via v19.
@@ -3358,7 +2469,6 @@ def sync_netsheet_from_erp(units=None, include_sparse_sheet_rows=True, max_units
             stats["updated_units"] = []
 
     return stats
-
 def _unit_device_info(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(2, 5, 10, 11, 12))
     switch_url = ""
@@ -3387,7 +2497,6 @@ def _unit_device_info(unit):
     platform_url = f"https://{scrypted_ip}:5000/system/" if has_platform and scrypted_ip else ""
     scrypted_url = scrypted_open_url(unit) if has_scrypted else ""
     return switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url, has_scrypted, scrypted_url
-
 def unit_context_for_ui(unit):
     """Build device context for ad-hoc unit tools (netsheet backfill included)."""
     raw = str(unit or "").strip().upper()
@@ -3431,13 +2540,11 @@ def unit_context_for_ui(unit):
         "vrm_url": vrm_url,
         "backfilled": backfilled,
     }, None
-
 def authenticated_switch_url(unit):
     info, error = switch_login_info(unit)
     if error:
         return None, error
     return info["url"], None
-
 def switch_login_info(unit):
     """Return switch login details. Units above 3080 use /dologin.asp."""
     load_dotenv(env_path)
@@ -3468,7 +2575,6 @@ def switch_login_info(unit):
         "use_dologin": use_dologin,
         "url": url,
     }, None
-
 def _normalize_mu_code(mu):
     text = str(mu or "").strip().upper()
     if text.startswith("SC-"):
@@ -3477,8 +2583,6 @@ def _normalize_mu_code(mu):
     if re.fullmatch(r"MU\d{3,6}", text):
         return text
     return ""
-
-
 def mu_trailer_from_subject(subject, unit=None):
     """Return MU trailer code (e.g. MU7027) from a termination project/issue subject."""
     parent = _parent_mu_from_subject(subject)
@@ -3494,8 +2598,6 @@ def mu_trailer_from_subject(subject, unit=None):
     if match:
         return f"MU{match.group(1)}"
     return ""
-
-
 def clear_mu_coordinates(mu):
     """
     Clear latitude/longitude on SC-{MU} Component in ERP.
@@ -3521,16 +2623,12 @@ def clear_mu_coordinates(mu):
         "latitude": patch_doc.get("latitude", 0),
         "longitude": patch_doc.get("longitude", 0),
     }, None
-
-
 def clear_mu_coordinates_from_subject(subject, unit=None):
     """Resolve MU from subject/unit and clear its ERP coordinates."""
     mu_code = mu_trailer_from_subject(subject, unit=unit)
     if not mu_code:
         return None, "Could not determine MU trailer from subject"
     return clear_mu_coordinates(mu_code)
-
-
 def _get_erp_component_doc(component_name):
     """Load Component by name. Returns (doc, error)."""
     name = str(component_name or "").strip()
@@ -3555,8 +2653,6 @@ def _get_erp_component_doc(component_name):
     if not isinstance(doc, dict):
         return None, f"ERP did not return Component {name}"
     return doc, None
-
-
 def _fetch_mu_component_doc(mu):
     """Load and validate SC-{MU} Component. Returns (doc, component_name, error)."""
     mu_code = _normalize_mu_code(mu)
@@ -3573,8 +2669,6 @@ def _fetch_mu_component_doc(mu):
         return None, "", f"{component_name} is type {comp_type}, not MU"
 
     return doc, component_name, None
-
-
 def _patch_mu_component(component_name, update_payload):
     """PATCH Component fields. Returns (patched_doc, error)."""
     name = str(component_name or "").strip()
@@ -3603,8 +2697,6 @@ def _patch_mu_component(component_name, update_payload):
 
     patch_doc = (patch_resp.json() or {}).get("data") or {}
     return patch_doc, None
-
-
 def clear_mu_site(mu):
     """
     Clear Site link on SC-{MU} Component in ERP.
@@ -3658,15 +2750,12 @@ def clear_mu_site(mu):
         "site": new_site,
         "unchanged": False,
     }, None
-
-
 def clear_mu_site_from_subject(subject, unit=None):
     """Resolve MU from subject/unit and clear its ERP Site link."""
     mu_code = mu_trailer_from_subject(subject, unit=unit)
     if not mu_code:
         return None, "Could not determine MU trailer from subject"
     return clear_mu_site(mu_code)
-
 def relay_login_info(unit):
     """Open the relay with fishuser/fishpass basic auth. Units 3100+ only."""
     load_dotenv(env_path)
@@ -3694,7 +2783,6 @@ def relay_login_info(unit):
         "password": fishpass,
         "url": f"http://{user}:{password}@{ip}/",
     }, None
-
 def _pve_ssh_credentials():
     """
     SSH credentials for the PVE host shell (qm commands).
@@ -3712,7 +2800,6 @@ def _pve_ssh_credentials():
     if "@" in username:
         username = username.split("@", 1)[0]
     return username, password, None
-
 def pve_login_info(unit):
     """Open PVE on port 8006 with pveuser/pvepass. Units above 3300 only."""
     load_dotenv(env_path)
@@ -3740,7 +2827,6 @@ def pve_login_info(unit):
         "url": f"https://{ip}:8006/",
         "auth_url": f"https://{user}:{password}@{ip}:8006/",
     }, None
-
 _pve_proxy_lock = threading.Lock()
 _pve_proxies = {}
 _PVE_HOP_HEADERS = {
@@ -3764,7 +2850,6 @@ _PVE_SKIP_RESP_HEADERS = {
     "content-length",
     "set-cookie",
 }
-
 def fetch_pve_ticket(ip, username, password):
     username = (username or "").strip()
     password = password or ""
@@ -3807,7 +2892,6 @@ def fetch_pve_ticket(ip, username, password):
                     last_error = f"PVE login failed: {e}"
                     continue
     return None, None, last_error
-
 class _PVEProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -3900,7 +2984,6 @@ class _PVEProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if include_body and self.command != "HEAD":
             self.wfile.write(content)
-
 def start_pve_local_proxy(unit):
     """Log into PVE and expose it on localhost HTTP so the cert warning is avoided."""
     info, error = pve_login_info(unit)
@@ -3936,7 +3019,6 @@ def start_pve_local_proxy(unit):
         state["server"] = server
         _pve_proxies[unit] = state
         return f"http://127.0.0.1:{state['port']}/", None
-
 def fetch_fisheye_snapshot(unit):
     """Return (image_bytes, error). Tries Dahua snapshot CGI on ports 10080 then 80."""
     load_dotenv(env_path)
@@ -3976,22 +3058,17 @@ def fetch_fisheye_snapshot(unit):
                 last_error = f"{ip}:{port} {e}"
                 continue
     return None, last_error
-
 _camera_port_cache = {}
 _camera_port_lock = threading.Lock()
 _camera_login_cache = {}
 _camera_login_cache_lock = threading.Lock()
 _CAMERA_LOGIN_CACHE_TTL_SEC = 120
-
-
 def _camera_port_open(host, port, timeout=2.0):
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except OSError:
         return False
-
-
 def _resolve_camera_port(host, port):
     """Netsheet cells often omit the port; fall back to the other common web port."""
     if not host or not port:
@@ -4010,8 +3087,6 @@ def _resolve_camera_port(host, port):
     with _camera_port_lock:
         _camera_port_cache[key] = resolved
     return resolved
-
-
 def _camera_host_port(value, target):
     """Parse host and port from a netsheet camera cell."""
     text = (value or "").strip()
@@ -4031,7 +3106,6 @@ def _camera_host_port(value, target):
     if not host:
         return host, None
     return host, _resolve_camera_port(host, parsed_port or default_port)
-
 def list_unit_cameras(unit):
     """Return configured cameras for a unit (target, label, host, port — no credentials)."""
     load_dotenv(env_path)
@@ -4061,7 +3135,6 @@ def list_unit_cameras(unit):
     # filled 2x2; alone on the bottom row when the count is odd).
     cameras.sort(key=lambda item: 1 if item.get("target") == "fisheye" else 0)
     return cameras, None
-
 def camera_login_info(unit, target):
     """Return camera web UI launch info (Flask Digest proxy URL)."""
     load_dotenv(env_path)
@@ -4109,8 +3182,6 @@ def camera_login_info(unit, target):
     with _camera_login_cache_lock:
         _camera_login_cache[cache_key] = (dict(info), now + _CAMERA_LOGIN_CACHE_TTL_SEC)
     return info, None
-
-
 _camera_session_lock = threading.Lock()
 _camera_sessions = {}
 # requests.Session is not thread-safe. Keep one session per camera *per worker
@@ -4136,10 +3207,7 @@ _CAMERA_SKIP_RESP_HEADERS = {
     "content-encoding",
     "content-length",
 }
-
-
 _CAMERA_SHIM_VERSION = "41"
-
 # Injected as early as possible on Hikvision HTML so "download plugin/addon" never flashes.
 _HIKVISION_PLUGIN_HIDE_CSS = (
     "<style id=\"worktool-hik-hide-plugin-early\">"
@@ -4159,8 +3227,6 @@ _HIKVISION_PLUGIN_HIDE_CSS = (
     "border-radius:4px;padding:6px 10px;cursor:pointer;font:12px Segoe UI,Arial,sans-serif}"
     "</style>"
 )
-
-
 def _rewrite_camera_css(content, content_type, proxy_prefix):
     """Point root-relative url(/...) assets in camera CSS back through the proxy."""
     if "css" not in str(content_type or "").lower():
@@ -4177,8 +3243,6 @@ def _rewrite_camera_css(content, content_type, proxy_prefix):
         text,
     )
     return rewritten.encode("utf-8") if rewritten != text else raw
-
-
 def _looks_like_html_document(raw):
     """True only for real HTML pages — Hikvision serves JSON i18n as text/html."""
     start = (raw or b"").lstrip()
@@ -4186,8 +3250,6 @@ def _looks_like_html_document(raw):
         start = start[3:]
     head = start[:64].lower()
     return head.startswith((b"<!doctype", b"<html", b"<head", b"<body"))
-
-
 def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, username, password, vendor="dahua"):
     """Rewrite root-relative URLs and load the camera shim (storage split + auto-login)."""
     ctype = str(content_type or "").lower()
@@ -4232,8 +3294,6 @@ def _inject_camera_shim(content, content_type, proxy_prefix, camera_origin, user
     )
     idx = opening.end() if opening else 0
     return (text[:idx] + snippet + text[idx:]).encode("utf-8")
-
-
 def _inject_camera_worker_prelude(content, content_type, path, proxy_prefix, camera_origin):
     """Prepend URL rewrites to camera decoder workers so they stay on the proxy."""
     name = str(path or "").rsplit("/", 1)[-1].lower()
@@ -4291,8 +3351,6 @@ def _inject_camera_worker_prelude(content, content_type, path, proxy_prefix, cam
         "})(" + config + ");\n"
     )
     return (prelude + text).encode("utf-8")
-
-
 def camera_snapshot(unit, target, channel=1, timeout=20):
     """Return (jpeg_bytes, error) for one camera using the authenticated proxy path."""
     status, _headers, content, error = proxy_camera_http(
@@ -4312,8 +3370,6 @@ def camera_snapshot(unit, target, channel=1, timeout=20):
     if not content.startswith(b"\xff\xd8"):
         return None, "Camera returned a non-image response"
     return content, None
-
-
 def cameras_launch_info(unit):
     """Build Open All Cameras launcher payload with proxy URLs."""
     cameras, error = list_unit_cameras(unit)
@@ -4343,8 +3399,6 @@ def cameras_launch_info(unit):
         "count": len(rows),
         "vendor": vendor,
     }, None
-
-
 def open_camera_urls(urls, ie_mode=True):
     """
     Open camera web UIs on the Flask host.
@@ -4398,8 +3452,6 @@ def open_camera_urls(urls, ie_mode=True):
         "errors": errors,
         "message": f"Opened {len(opened)} camera tab(s) in IE mode on the server",
     }, None
-
-
 def _camera_proxy_session(unit, target, host, port, username, password, force_auth=None):
     """Reuse a per-thread camera session; Digest by default, optional forced Basic.
 
@@ -4434,8 +3486,6 @@ def _camera_proxy_session(unit, target, host, port, username, password, force_au
         # Remember preferred auth mode for other threads; do not share the Session.
         _camera_sessions[key] = session
     return session
-
-
 def _camera_response_set_cookies(response):
     """Return every Set-Cookie value (requests collapses multiples by default)."""
     cookies = []
@@ -4451,8 +3501,6 @@ def _camera_response_set_cookies(response):
         if one:
             cookies = [one]
     return cookies
-
-
 def proxy_camera_http(
     unit,
     target,
@@ -4632,8 +3680,6 @@ def proxy_camera_http(
             resp_headers["Cache-Control"] = "no-store, max-age=0"
 
     return response.status_code, resp_headers, body, None
-
-
 def _parse_outage_kind(issue_type):
     text = (issue_type or "").strip()
     lower = text.lower()
@@ -4642,7 +3688,6 @@ def _parse_outage_kind(issue_type):
     if "full" in lower:
         return "Full"
     return text
-
 def _camera_targets_from_subject(subject):
     """Return camera endpoint keys explicitly referenced in a ticket subject."""
     targets = []
@@ -4657,18 +3702,14 @@ def _camera_targets_from_subject(subject):
         if re.search(pattern, subject or "", re.IGNORECASE):
             targets.append(target)
     return targets
-
 def _is_nuc_down_issue_subtype(subtype):
     """Exact ERP Issue Subtype spelling/capitalization: Nuc Down."""
     return str(subtype or "") == "Nuc Down"
-
 def _subject_implies_nuc_down(subject):
     """Subject mentions NUC Down / SNUC Down (any capitalization)."""
     return bool(re.search(r"\bS?NUC\s+Down\b", str(subject or ""), re.IGNORECASE))
-
 def _is_forced_nuc_down(subtype="", subject=""):
     return _is_nuc_down_issue_subtype(subtype) or _subject_implies_nuc_down(subject)
-
 def _vrm_info_from_subject(subject, unit=""):
     """VRM search for RD tickets only. Prefer MU from subject; else RD unit code."""
     text = str(subject or "")
@@ -4693,7 +3734,6 @@ def _vrm_info_from_subject(subject, unit=""):
     return vrm_mu, (
         f"https://vrm.victronenergy.com/installation-overview?search={search}"
     )
-
 def _is_camera_view_subject(subject):
     """Identify camera view/position work that must not run outage validation."""
     text = subject or ""
@@ -4705,19 +3745,16 @@ def _is_camera_view_subject(subject):
         r"\bcamera\s*[1-4]\b[^\r\n]*(?:shifted|adjustment)\b",
     )
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
-
 CAMERA_VIEW_ISSUE_TYPES = frozenset({
     "camera views",
     "camera adjustment",
 })
-
 CAMERA_VIEW_ISSUE_SUBTYPES = frozenset({
     "camera adjustment",
     "dark views",
     "blurry cameras",
     "dirty cameras",
 })
-
 def _is_camera_view_ticket(issue_type="", issue_subtype="", subject=""):
     """Route Camera Views work by ERP type/subtype or subject text."""
     type_l = str(issue_type or "").strip().lower()
@@ -4727,7 +3764,6 @@ def _is_camera_view_ticket(issue_type="", issue_subtype="", subject=""):
     if subtype_l in CAMERA_VIEW_ISSUE_SUBTYPES:
         return True
     return _is_camera_view_subject(subject)
-
 def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
     if unit_meta_map is None:
         unit_meta_map = {}
@@ -4783,13 +3819,11 @@ def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
         })
     linked.sort(key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or ""))
     return linked
-
 def _force_up_steady_green(linked_units):
     """Up Steady tickets always show a green status LED."""
     for item in linked_units or []:
         item["led_status"] = "green"
     return linked_units
-
 def _print_linked_units(label, linked_units):
     print(label)
     for item in linked_units:
@@ -4804,7 +3838,6 @@ def _print_linked_units(label, linked_units):
         elif item.get("issue_subtype"):
             parts.append(item["issue_subtype"])
         print(" - ".join(p for p in parts if p))
-
 ERP_ISSUES_URL = f"{erp_base_url()}/api/resource/Issue"
 ERP_PROJECTS_URL = f"{erp_base_url()}/api/resource/Project"
 ERP_ACTIVE_ISSUE_STATUSES = ("Open", "Monitoring", "On Hold")
@@ -4837,7 +3870,6 @@ TECH_CHECK_CANCEL_SUBJECTS = (
     "Verify Time Task is Enabled (Standard Dahua ONLY)",
 )
 TECH_CHECK_CANCEL_COMMENT = "n/a 180RD unit"
-
 def _erp_issue_value(issue, *field_names):
     """Return the first populated ERP field, allowing custom field prefixes."""
     for field_name in field_names:
@@ -4856,7 +3888,6 @@ def _erp_issue_value(issue, *field_names):
         ):
             return value
     return ""
-
 def _normalize_erp_issue(issue):
     return {
         "issue_id": str(_erp_issue_value(issue, "name", "id")).strip(),
@@ -4871,7 +3902,6 @@ def _normalize_erp_issue(issue):
         # Already on the Issue doc when set — lets Open Site/Shield skip ERP on click.
         "site": str(_erp_issue_value(issue, "site")).strip(),
     }
-
 def _normalize_erp_project(project):
     subject = str(
         _erp_issue_value(project, "subject", "project_name", "title", "name")
@@ -4898,7 +3928,6 @@ def _normalize_erp_project(project):
         ),
         "modified": str(_erp_issue_value(project, "modified")).strip(),
     }
-
 def _parse_project_percent_complete(value):
     if value in (None, ""):
         return None
@@ -4915,7 +3944,6 @@ def _parse_project_percent_complete(value):
     if number < 0:
         return None
     return number
-
 def _format_project_percent_complete(value):
     if value is None:
         return ""
@@ -4926,7 +3954,6 @@ def _format_project_percent_complete(value):
     if number == int(number):
         return f"{int(number)}%"
     return f"{number:g}%"
-
 def _project_ticket_url(project_id):
     if not project_id:
         return ""
@@ -4934,13 +3961,10 @@ def _project_ticket_url(project_id):
 
     query = urlencode({"project": project_id, "status": "Open"})
     return f"{erp_base_url()}/app/task/view/List?{query}"
-
 def _project_subject_has_noc(subject):
     return PROJECT_NOC_SUBJECT_TOKEN.lower() in str(subject or "").lower()
-
 def _project_subject_has_prep(subject):
     return PROJECT_PREP_SUBJECT_TOKEN in str(subject or "").lower()
-
 def _noc_deployment_name_from_prep(subject):
     text = str(subject or "").strip()
     rewritten, count = re.subn(
@@ -4960,22 +3984,18 @@ def _noc_deployment_name_from_prep(subject):
         flags=re.IGNORECASE,
     )
     return rewritten if count else text
-
 def _noc_termination_unit_token_pattern():
     return (
         r"(?:RD|FD)\s*\d+(?:\([^)]*\))?"
         r"|"
         r"MU\s*\d+(?:\([^)]*\))?"
     )
-
 def _parse_termination_issue_subject(subject):
     """Parse Region - Unit[/Unit...] - [Partial ]Termination[...] - Rest into units + rest."""
     return _parse_kind_issue_subject(subject, "Termination")
-
 def _parse_relocation_issue_subject(subject):
     """Parse Region - Unit[/Unit...] - [Partial ]Relocation[...] - Rest into units + rest."""
     return _parse_kind_issue_subject(subject, "Relocation")
-
 def _parse_kind_issue_subject(subject, kind):
     """Parse Region - Unit[/Unit...] - [Partial ]{kind}[...] - Rest into units + rest."""
     text = str(subject or "").strip()
@@ -5008,7 +4028,6 @@ def _parse_kind_issue_subject(subject, kind):
     if not units or not rest:
         return None
     return {"units": units, "rest": rest}
-
 def _noc_termination_names_from_issue(subject):
     """Build one NOC Termination project title per unit in the issue subject.
 
@@ -5029,7 +4048,6 @@ def _noc_termination_names_from_issue(subject):
         f"NOC Termination - {unit} - {parsed['rest']}"
         for unit in parsed["units"]
     ]
-
 def _noc_relocation_names_from_issue(subject):
     """Build one NOC Relocation project title per unit in the issue subject.
 
@@ -5044,11 +4062,9 @@ def _noc_relocation_names_from_issue(subject):
         f"NOC Relocation - {unit} - {parsed['rest']}"
         for unit in parsed["units"]
     ]
-
 def _noc_termination_name_from_issue(subject):
     names = _noc_termination_names_from_issue(subject)
     return names[0] if names else ""
-
 def fetch_erp_issues(statuses=None, page_size=200):
     """Fetch and normalize active ERP Issues using the configured token."""
     load_dotenv(env_path)
@@ -5105,7 +4121,6 @@ def fetch_erp_issues(statuses=None, page_size=200):
             normalized.append(issue)
             seen_ids.add(issue["issue_id"])
     return normalized
-
 def _fetch_erp_project_pages(statuses=None, page_size=200, order_by="creation asc"):
     load_dotenv(env_path)
     erp_token = (os.getenv("erp_token") or "").strip().strip('"').strip("'")
@@ -5148,7 +4163,6 @@ def _fetch_erp_project_pages(statuses=None, page_size=200, order_by="creation as
             break
         start += page_size
     return raw_projects, requested_statuses
-
 def fetch_erp_projects(statuses=None, page_size=200):
     """Fetch Open/In Progress ERP Projects whose subject contains NOC."""
     raw_projects, requested_statuses = _fetch_erp_project_pages(
@@ -5171,7 +4185,6 @@ def fetch_erp_projects(statuses=None, page_size=200):
             normalized.append(project)
             seen_ids.add(project["project_id"])
     return normalized
-
 def fetch_erp_prep_projects(statuses=None, page_size=200):
     """Fetch Open/In Progress ERP Projects whose name/subject contains Prep."""
     raw_projects, requested_statuses = _fetch_erp_project_pages(
@@ -5194,7 +4207,6 @@ def fetch_erp_prep_projects(statuses=None, page_size=200):
             normalized.append(project)
             seen_ids.add(project["project_id"])
     return normalized
-
 def build_prep_project_entries(project_records):
     """Build Prep list rows without connectivity validation."""
     ensure_net_array()
@@ -5273,7 +4285,6 @@ def build_prep_project_entries(project_records):
     )
     print(f"Prep list ready: {len(entries)}")
     return entries
-
 def create_noc_deployment_project(prep_project_id, prep_subject=None):
     """Create an NOC Deployment project from a Prep project name + template."""
     prep_project_id = str(prep_project_id or "").strip()
@@ -5332,7 +4343,6 @@ def create_noc_deployment_project(prep_project_id, prep_subject=None):
         "url": _project_ticket_url(created_id),
         "prep_project_id": prep_project_id,
     }, None
-
 def create_noc_termination_project(issue_id, issue_subject=None):
     """Create NOC Termination project(s) from a Termination issue (one per unit)."""
     issue_id = str(issue_id or "").strip()
@@ -5409,7 +4419,6 @@ def create_noc_termination_project(issue_id, issue_subject=None):
         "projects": created_projects,
         "errors": errors,
     }, None
-
 def create_noc_relocation_project(issue_id, issue_subject=None):
     """Create NOC Relocation project(s) from a Relocation issue (one per unit)."""
     issue_id = str(issue_id or "").strip()
@@ -5486,10 +4495,8 @@ def create_noc_relocation_project(issue_id, issue_subject=None):
         "projects": created_projects,
         "errors": errors,
     }, None
-
 def _refurbish_date_label():
     return _arizona_now().strftime("%m/%d/%Y")
-
 def _is_noc_termination_project_subject(subject):
     text = str(subject or "").strip()
     if not text:
@@ -5500,17 +4507,14 @@ def _is_noc_termination_project_subject(subject):
         re.search(r"\btermination\b", text, flags=re.IGNORECASE)
         and not re.search(r"\bdeployment\b", text, flags=re.IGNORECASE)
     )
-
 def _rd_unit_from_termination_project(subject, unit=None):
     rd_unit = _head_unit_from_subject(subject)
     if rd_unit:
         return rd_unit.upper(), None
     _ = unit
     return None, "Could not determine RD/FD unit from termination project subject"
-
 def _refurbish_project_name(region, unit_token, kind, date_label):
     return f"{region} - {unit_token} - Refurbish - {kind} - {date_label}"
-
 def _region_from_erp_site(site):
     site_id = str((site or {}).get("site_id") or "").strip()
     if not site_id:
@@ -5525,7 +4529,6 @@ def _region_from_erp_site(site):
     if not region:
         return None, f"Site {site_id} has no region set"
     return region, None
-
 def _refurbish_project_specs(subject, unit=None):
     subject = str(subject or "").strip()
     if not subject:
@@ -5578,11 +4581,9 @@ def _refurbish_project_specs(subject, unit=None):
         "date": date_label,
         "specs": specs,
     }, None
-
 def preview_refurbish_projects_from_termination(subject, unit=None):
     """Resolve refurbish project names without creating them."""
     return _refurbish_project_specs(subject, unit=unit)
-
 def create_refurbish_projects_from_termination(subject, unit=None):
     """Create Digital RD, Physical RD, and optional Physical Trailer refurb projects."""
     preview, error = _refurbish_project_specs(subject, unit=unit)
@@ -5641,10 +4642,8 @@ def create_refurbish_projects_from_termination(subject, unit=None):
         "projects": created_projects,
         "errors": errors,
     }, None
-
 def _today_erp_date():
     return _arizona_now().date().isoformat()
-
 def _project_title_rest_after_unit(subject):
     """Return the project title tail after NOC Termination/Deployment - Unit - ."""
     text = str(subject or "").strip()
@@ -5667,7 +4666,6 @@ def _project_title_rest_after_unit(subject):
     if match:
         return " ".join(match.group("rest").split())
     return text
-
 def _site_name_candidates_from_project_subject(subject):
     rest = _project_title_rest_after_unit(subject)
     if not rest:
@@ -5692,7 +4690,6 @@ def _site_name_candidates_from_project_subject(subject):
         add_candidate(" - ".join(parts[-2:]))
     add_candidate(rest)
     return candidates
-
 def _normalize_erp_site(doc):
     return {
         "site_id": str(_erp_issue_value(doc, "name", "id")).strip(),
@@ -5702,7 +4699,6 @@ def _normalize_erp_site(doc):
         "contract_start": str(_erp_issue_value(doc, "contract_start") or "").strip() or None,
         "contract_end": str(_erp_issue_value(doc, "contract_end") or "").strip() or None,
     }
-
 def _search_erp_sites(filters, limit=20):
     response = requests.get(
         ERP_SITES_URL,
@@ -5727,7 +4723,6 @@ def _search_erp_sites(filters, limit=20):
     if not isinstance(rows, list):
         return None, "ERP Site response did not contain a data list"
     return [_normalize_erp_site(row) for row in rows if isinstance(row, dict)], None
-
 def find_erp_site_by_project_subject(subject, prefer_status=None):
     """Resolve a Site from a project title using the planned name cascade."""
     subject = str(subject or "").strip()
@@ -5789,7 +4784,6 @@ def find_erp_site_by_project_subject(subject, prefer_status=None):
         return None, "Multiple Sites matched: " + "; ".join(labels)
 
     return matches[0], None
-
 def _fetch_erp_site_doc_raw(site_id):
     """Fetch full ERP Site document (includes addresses child table)."""
     site_id = str(site_id or "").strip()
@@ -5808,355 +4802,11 @@ def _fetch_erp_site_doc_raw(site_id):
     if not isinstance(doc, dict):
         return None, f"ERP did not return Site {site_id}"
     return doc, None
-
-
 def _fetch_erp_site_doc(site_id):
     doc, error = _fetch_erp_site_doc_raw(site_id)
     if error:
         return None, error
     return _normalize_erp_site(doc), None
-
-
-def _parse_nonzero_coords(lat, lon):
-    try:
-        lat_f = float(lat)
-        lon_f = float(lon)
-    except (TypeError, ValueError):
-        return None
-    if lat_f == 0.0 and lon_f == 0.0:
-        return None
-    return lat_f, lon_f
-
-
-def _coords_from_site_addresses(site_doc):
-    """Primary weather coords: main Site Address, else first address with GPS."""
-    addresses = (site_doc or {}).get("addresses") or []
-    if not isinstance(addresses, list):
-        return None
-    ordered = [row for row in addresses if isinstance(row, dict)]
-    if not ordered:
-        return None
-    mains = [row for row in ordered if row.get("main_address")]
-    for row in (mains + ordered):
-        coords = _parse_nonzero_coords(row.get("latitude"), row.get("longitude"))
-        if coords:
-            return coords
-    return None
-
-
-def _coords_from_trailer_component(unit, subject=""):
-    """Fallback weather coords: attached trailer (MU) Component lat/lon."""
-    mu_code = resolve_attached_mu_code(unit, subject)
-    if not mu_code:
-        return None, ""
-    doc, component_name, error = _fetch_mu_component_doc(mu_code)
-    if error or not doc:
-        return None, mu_code
-    coords = _parse_nonzero_coords(doc.get("latitude"), doc.get("longitude"))
-    if not coords:
-        return None, mu_code or component_name
-    return coords, mu_code or component_name
-
-
-_WMO_WEATHER_LABELS = {
-    0: "Clear",
-    1: "Mainly clear",
-    2: "Partly cloudy",
-    3: "Overcast",
-    45: "Fog",
-    48: "Depositing rime fog",
-    51: "Light drizzle",
-    53: "Drizzle",
-    55: "Dense drizzle",
-    56: "Light freezing drizzle",
-    57: "Freezing drizzle",
-    61: "Slight rain",
-    63: "Rain",
-    65: "Heavy rain",
-    66: "Light freezing rain",
-    67: "Freezing rain",
-    71: "Slight snow",
-    73: "Snow",
-    75: "Heavy snow",
-    77: "Snow grains",
-    80: "Slight rain showers",
-    81: "Rain showers",
-    82: "Violent rain showers",
-    85: "Slight snow showers",
-    86: "Heavy snow showers",
-    95: "Thunderstorm",
-    96: "Thunderstorm with slight hail",
-    99: "Thunderstorm with heavy hail",
-}
-
-
-def _wmo_weather_label(code):
-    try:
-        key = int(code)
-    except (TypeError, ValueError):
-        return "Unknown"
-    return _WMO_WEATHER_LABELS.get(key, f"Code {key}")
-
-
-def _wmo_icon_class(code, cloud_cover=None):
-    try:
-        value = int(code)
-    except (TypeError, ValueError):
-        value = None
-    if value is None:
-        icon = "cloud"
-    elif value in (0, 1):
-        icon = "sun"
-    elif value == 2:
-        icon = "sun-cloud"  # partly cloudy
-    elif value == 3:
-        icon = "cloud"  # overcast
-    elif value in (45, 48):
-        icon = "fog"
-    elif value in (71, 73, 75, 77, 85, 86):
-        icon = "cloud-snow"
-    elif value in (95, 96, 99):
-        icon = "cloud-lightning"
-    elif value >= 50:
-        icon = "cloud-rain"
-    else:
-        icon = "cloud"
-
-    # Prefer cloud cover for Google-style partly / mostly cloudy.
-    try:
-        cover = float(cloud_cover)
-    except (TypeError, ValueError):
-        return icon
-    if cover >= 85 and icon in ("sun", "sun-cloud"):
-        return "cloud-mostly"
-    if cover >= 50 and icon == "sun":
-        return "sun-cloud"
-    return icon
-
-
-def _fetch_open_meteo_current(lat, lon):
-    response = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "current": (
-                "temperature_2m,weather_code,wind_speed_10m,"
-                "relative_humidity_2m,cloud_cover"
-            ),
-            "temperature_unit": "fahrenheit",
-            "wind_speed_unit": "mph",
-            "timezone": "auto",
-        },
-        timeout=20,
-    )
-    if not response.ok:
-        return None, f"Open-Meteo HTTP {response.status_code}"
-    payload = response.json() or {}
-    current = payload.get("current")
-    if not isinstance(current, dict):
-        return None, "Open-Meteo response missing current conditions"
-    weather_code = current.get("weather_code")
-    cloud_cover = current.get("cloud_cover")
-    temp = current.get("temperature_2m")
-    wind = current.get("wind_speed_10m")
-    humidity = current.get("relative_humidity_2m")
-    conditions = _wmo_weather_label(weather_code)
-    try:
-        cover_f = float(cloud_cover)
-        if cover_f >= 85 and weather_code in (0, 1, 2):
-            conditions = "Mostly cloudy"
-        elif cover_f >= 50 and weather_code in (0, 1):
-            conditions = "Partly cloudy"
-    except (TypeError, ValueError):
-        pass
-    try:
-        temp_label = f"{round(float(temp))}°F"
-    except (TypeError, ValueError):
-        temp_label = "?°F"
-    try:
-        wind_label = f"{round(float(wind))} mph"
-    except (TypeError, ValueError):
-        wind_label = "? mph"
-    try:
-        humidity_label = f"{int(round(float(humidity)))}%"
-    except (TypeError, ValueError):
-        humidity_label = "?%"
-    return {
-        "temperature_f": temp,
-        "temperature_label": temp_label,
-        "weather_code": weather_code,
-        "cloud_cover": cloud_cover,
-        "conditions": conditions,
-        "icon": _wmo_icon_class(weather_code, cloud_cover),
-        "wind_mph": wind,
-        "wind_label": wind_label,
-        "humidity": humidity,
-        "humidity_label": humidity_label,
-        "timezone": payload.get("timezone") or "",
-        "observed_at": current.get("time") or "",
-    }, None
-
-
-def get_unit_weather(unit, subject=""):
-    """
-    Resolve site/trailer GPS and fetch current weather from Open-Meteo.
-    Returns (payload_dict, error_message).
-    """
-    unit_key = _normalize_netsheet_unit(unit)
-    if not unit_key:
-        return None, f"Invalid unit: {unit}"
-
-    subject_text = str(subject or "").strip()
-    site_id = ""
-    site_name = ""
-    site_error = ""
-    resolved_site_id, resolve_error = resolve_dashboard_site_id(unit_key, subject_text)
-    if resolve_error:
-        site_error = resolve_error
-    elif resolved_site_id:
-        site_id = str(resolved_site_id).strip()
-
-    lat = lon = None
-    coord_source = ""
-    trailer = ""
-
-    if site_id:
-        raw_site, raw_error = _fetch_erp_site_doc_raw(site_id)
-        if raw_error:
-            site_error = raw_error
-        elif raw_site:
-            site_name = str(raw_site.get("site_name") or "").strip()
-            coords = _coords_from_site_addresses(raw_site)
-            if coords:
-                lat, lon = coords
-                coord_source = "site"
-
-    if lat is None:
-        trailer_coords, trailer = _coords_from_trailer_component(unit_key, subject_text)
-        if trailer_coords:
-            lat, lon = trailer_coords
-            coord_source = "trailer"
-
-    if lat is None:
-        bits = ["No GPS on site address or trailer"]
-        if site_id:
-            bits.append(f"site {site_id}")
-        if trailer:
-            bits.append(f"trailer {trailer}")
-        if site_error:
-            bits.append(site_error)
-        return None, " — ".join(bits)
-
-    weather, weather_error = _fetch_open_meteo_current(lat, lon)
-    if weather_error:
-        return None, weather_error
-
-    place = site_name or (f"site {site_id}" if site_id else unit_key)
-    coord_label = f"{lat:.3f},{lon:.3f}"
-    message = (
-        f"{unit_key} weather @ {place} [{coord_source} {coord_label}]: "
-        f"{weather['temperature_label']}, {weather['conditions']}, "
-        f"wind {weather['wind_label']}, humidity {weather['humidity_label']}"
-    )
-    return {
-        "unit": unit_key,
-        "site_id": site_id,
-        "site_name": site_name,
-        "trailer": trailer,
-        "coord_source": coord_source,
-        "latitude": lat,
-        "longitude": lon,
-        **weather,
-        "message": message,
-    }, None
-
-
-# Metro coords for subject region codes (airport-metro centers). Zero ERP.
-REGION_WEATHER_COORDS = {
-    "LAX": (33.9425, -118.4081),
-    "OAK": (37.80437, -122.2708),
-    "HOU": (29.76328, -95.36327),
-    "PHX": (33.44838, -112.07404),
-    "SLC": (40.76078, -111.89105),
-    "DEN": (39.73915, -104.9847),
-}
-
-_REGION_WEATHER_CACHE = {}
-_REGION_WEATHER_CACHE_TTL_SEC = 30 * 60
-_REGION_WEATHER_CACHE_LOCK = threading.Lock()
-
-
-def region_code_from_subject(subject):
-    """Parse leading region code from subjects like 'PHX - RD...' or 'PHX-RD...'."""
-    text = str(subject or "").strip().upper()
-    if not text:
-        return ""
-    codes = "|".join(sorted(REGION_WEATHER_COORDS.keys(), key=len, reverse=True))
-    match = re.match(rf"^({codes})\b", text)
-    if match:
-        return match.group(1)
-    return ""
-
-
-def get_weather_for_regions(regions, force=False):
-    """
-    Current weather for unique subject region codes (LAX/OAK/HOU/PHX/SLC/DEN).
-    Open-Meteo only — no ERP. Returns (regions_map, error_message).
-    """
-    wanted = []
-    seen = set()
-    for raw in regions or []:
-        code = str(raw or "").strip().upper()
-        if code in REGION_WEATHER_COORDS and code not in seen:
-            seen.add(code)
-            wanted.append(code)
-    if not wanted:
-        return {}, None
-
-    now = time.time()
-    out = {}
-    missing = []
-    with _REGION_WEATHER_CACHE_LOCK:
-        for code in wanted:
-            cached = _REGION_WEATHER_CACHE.get(code)
-            if (
-                not force
-                and cached
-                and cached.get("expires_at", 0) > now
-            ):
-                payload = dict(cached.get("payload") or {})
-                payload["cached"] = True
-                out[code] = payload
-            else:
-                missing.append(code)
-
-    for code in missing:
-        lat, lon = REGION_WEATHER_COORDS[code]
-        weather, error = _fetch_open_meteo_current(lat, lon)
-        if error:
-            continue
-        payload = {
-            "region": code,
-            "latitude": lat,
-            "longitude": lon,
-            "coord_source": "region",
-            **weather,
-            "message": (
-                f"{code}: {weather['temperature_label']}, {weather['conditions']}"
-            ),
-            "cached": False,
-        }
-        with _REGION_WEATHER_CACHE_LOCK:
-            _REGION_WEATHER_CACHE[code] = {
-                "expires_at": now + _REGION_WEATHER_CACHE_TTL_SEC,
-                "payload": dict(payload),
-            }
-        out[code] = payload
-
-    return out, None
-
-
 def _update_erp_site_fields(site_id, fields):
     site_id = str(site_id or "").strip()
     if not site_id:
@@ -6173,7 +4823,6 @@ def _update_erp_site_fields(site_id, fields):
     if isinstance(doc, dict):
         return _normalize_erp_site(doc), None
     return _fetch_erp_site_doc(site_id)
-
 def terminate_erp_site_from_project(subject, site_id=None):
     """Set Site status Active->Inactive and contract_end to today."""
     site = None
@@ -6204,7 +4853,6 @@ def terminate_erp_site_from_project(subject, site_id=None):
         "contract_end": today,
         "action": "terminate",
     }, None
-
 def activate_erp_site_from_project(subject, site_id=None):
     """Set Site status Inactive->Active and contract_start to today."""
     site = None
@@ -6235,15 +4883,12 @@ def activate_erp_site_from_project(subject, site_id=None):
         "contract_start": today,
         "action": "activate",
     }, None
-
 def lookup_erp_site_for_project_action(subject, action):
     """Preview Site resolution for confirm dialogs."""
     prefer = "Active" if action == "terminate" else "Inactive"
     return find_erp_site_by_project_subject(subject, prefer_status=prefer)
-
 def _is_noc_deployment_project_subject(subject):
     return bool(re.search(r"\bnoc\s+deployment\b", str(subject or ""), re.IGNORECASE))
-
 def _unit_from_deployment_project_subject(subject):
     text = str(subject or "").strip()
     if not text:
@@ -6264,7 +4909,6 @@ def _unit_from_deployment_project_subject(subject):
     # Raindance subjects use the head unit (RD/FD/MU), not RD####(MU####).
     head = _head_unit_from_subject(raw)
     return head or raw
-
 def find_open_raindance_issue(unit):
     """Find exactly one Open Issue whose subject looks like sc-{unit}-Raindance..."""
     unit = str(unit or "").strip()
@@ -6356,7 +5000,6 @@ def find_open_raindance_issue(unit):
         )
         return None, f"Multiple Open Raindance issues for {unit}: {labels}"
     return unique[0], None
-
 def get_project_task(project_id, subject):
     """Return the single Task for project_id + exact subject, or an error."""
     project_id = str(project_id or "").strip()
@@ -6419,7 +5062,6 @@ def get_project_task(project_id, subject):
             f"Multiple Tasks named '{subject}' on project {project_id}"
         )
     return matches[0], None
-
 def add_task_comment(task_id, content, project_id=None):
     """Post a Comment on a single Task. Optionally re-verify project ownership."""
     task_id = str(task_id or "").strip()
@@ -6463,7 +5105,6 @@ def add_task_comment(task_id, content, project_id=None):
     if isinstance(created, dict):
         comment_id = str(created.get("name") or "").strip()
     return {"comment_id": comment_id, "task_id": task_id}, None
-
 def _complete_single_tech_task(project_id, subject, comment_text):
     task, error = get_project_task(project_id, subject)
     if error:
@@ -6515,7 +5156,6 @@ def _complete_single_tech_task(project_id, subject, comment_text):
         "already_completed": already_done,
         "ok": True,
     }, None
-
 def _cancel_single_tech_task(project_id, subject, comment_text):
     """Cancel one task on this project only. Already-Cancelled tasks are ignored."""
     task, error = get_project_task(project_id, subject)
@@ -6602,7 +5242,6 @@ def _cancel_single_tech_task(project_id, subject, comment_text):
         "ok": True,
         "skipped": False,
     }, None
-
 def preview_project_tech_checks(project_id, project_subject):
     """Read-only preview for the Tech Checks (180 Unit) confirm modal."""
     project_id = str(project_id or "").strip()
@@ -6662,7 +5301,6 @@ def preview_project_tech_checks(project_id, project_subject):
         "cancel_subjects": list(TECH_CHECK_CANCEL_SUBJECTS),
         "cancel_comment": TECH_CHECK_CANCEL_COMMENT,
     }, None
-
 def complete_project_tech_checks(project_id, project_subject):
     """Complete Tech Checks, then cancel 180-unit N/A tasks on one project only."""
     preview, error = preview_project_tech_checks(project_id, project_subject)
@@ -6742,7 +5380,6 @@ def complete_project_tech_checks(project_id, project_subject):
         "partial": partial,
         "error": error_text,
     }, None
-
 def _subject_mentions_unit(subject, unit):
     """True when subject contains unit (MU3003 or MU 3003)."""
     subject_text = str(subject or "")
@@ -6762,7 +5399,6 @@ def _subject_mentions_unit(subject, unit):
             flags=re.IGNORECASE,
         )
     )
-
 def _match_unit_from_subject(subject):
     """Return the first net-sheet unit found in subject (same rules as issues)."""
     text = str(subject or "").strip()
@@ -6789,7 +5425,6 @@ def _match_unit_from_subject(subject):
             return unit
     fallback = _normalize_netsheet_unit(_head_unit_from_subject(text))
     return fallback or ""
-
 def _connectivity_category_led(category):
     if category == "false_positives":
         return "green"
@@ -6798,7 +5433,6 @@ def _connectivity_category_led(category):
     if category in ("truly_down", "stale_vpn"):
         return "red"
     return None
-
 def validate_project_records(project_records):
     """Run connectivity-only validation for NOC projects; return Projects list entries."""
     ensure_net_array()
@@ -6877,9 +5511,7 @@ def validate_project_records(project_records):
     )
     print(f"Projects list ready: {len(entries)} validated")
     return entries
-
 ARIZONA_TZ = timezone(timedelta(hours=-7))
-
 # Named ERP field presets for list command-menu buttons.
 # Add another entry here, then attach it to a list in issues_results.html.
 ISSUE_FIELD_PRESETS = {
@@ -7019,21 +5651,18 @@ ISSUE_FIELD_PRESETS = {
         "assign_user_group": False,
     },
 }
-
 def _erp_headers():
     load_dotenv(env_path)
     erp_token = (os.getenv("erp_token") or "").strip().strip('"').strip("'")
     if not erp_token:
         raise RuntimeError("erp_token is not set in .env")
     return {"Authorization": f"token {erp_token}"}
-
 def _erp_field_empty(value):
     if value is None:
         return True
     if isinstance(value, str) and not value.strip():
         return True
     return False
-
 def _sc_component_name(unit):
     raw = str(unit or "").strip()
     if not raw:
@@ -7041,8 +5670,6 @@ def _sc_component_name(unit):
     if raw.upper().startswith("SC-"):
         raw = raw[3:]
     return f"SC-{raw}"
-
-
 def _parent_mu_from_subject(subject):
     match = re.search(
         r"\bRD\s*\d+\s*\(\s*MU\s*(\d+)\s*\)",
@@ -7052,8 +5679,6 @@ def _parent_mu_from_subject(subject):
     if not match:
         return ""
     return f"MU{match.group(1)}"
-
-
 def _parent_component_from_erp(unit, cache):
     """Return ERP parent Component link (e.g. SC-MU7027) for unit, or '' if none."""
     doc, _found_name, error = _lookup_component_doc(unit, cache)
@@ -7062,8 +5687,6 @@ def _parent_component_from_erp(unit, cache):
     if not doc:
         return "", None
     return str(doc.get("parent_component") or "").strip(), None
-
-
 def _head_unit_from_subject(subject):
     text = str(subject or "")
     rd_fd = re.search(r"\b(RD|FD)\s*(\d+)\b", text, flags=re.IGNORECASE)
@@ -7073,10 +5696,8 @@ def _head_unit_from_subject(subject):
     if mu:
         return f"{mu.group(1).upper()}{mu.group(2)}"
     return ""
-
 def _arizona_now():
     return datetime.now(ARIZONA_TZ)
-
 def _erp_response_error(response):
     try:
         payload = response.json()
@@ -7099,7 +5720,6 @@ def _erp_response_error(response):
         or payload.get("exc_type")
         or (response.text or f"HTTP {response.status_code}")[:400]
     )
-
 def _fetch_erp_issue_doc(issue_id):
     response = requests.get(
         f"{erp_base_url()}/api/resource/Issue/{issue_id}",
@@ -7114,8 +5734,6 @@ def _fetch_erp_issue_doc(issue_id):
     if not isinstance(doc, dict):
         return None, f"ERP did not return Issue {issue_id}"
     return doc, None
-
-
 def _fetch_erp_issue_component_site_map(issue_ids):
     ids = []
     seen = set()
@@ -7150,11 +5768,8 @@ def _fetch_erp_issue_component_site_map(issue_ids):
             if name:
                 found[name] = row
     return found
-
 ADD_MISSING_ERP_CHUNK = 200
 ADD_MISSING_PUT_WORKERS = 4
-
-
 def _component_lookup_names(name, try_bare=False):
     candidates = []
     sc_name = _sc_component_name(name)
@@ -7164,8 +5779,6 @@ def _component_lookup_names(name, try_bare=False):
     if try_bare and raw and sc_name.upper() != raw.upper():
         candidates.append(raw)
     return candidates
-
-
 def _fetch_erp_component_site_map(names, cache, headers=None, quiet=False):
     """Batch-load Component name/site into cache. Missing names are cached as None."""
     headers = headers or _erp_headers()
@@ -7207,8 +5820,6 @@ def _fetch_erp_component_site_map(names, cache, headers=None, quiet=False):
         for name in chunk:
             if name not in found_in_chunk:
                 cache[name] = None
-
-
 def resolve_shield_site_id(unit, subject=""):
     """Resolve Shield site ID from the unit's Component, or parent MU for RD(MU) subjects.
 
@@ -7248,8 +5859,6 @@ def resolve_shield_site_id(unit, subject=""):
         return "", f"Component {found_name or site_source} has no Site"
     _store_site_id_cache(unit_name, subject_text, site)
     return site, None
-
-
 def _site_from_prefetched_component(name, cache, try_bare=False):
     candidates = _component_lookup_names(name, try_bare=try_bare)
     for candidate in candidates:
@@ -7260,8 +5869,6 @@ def _site_from_prefetched_component(name, cache, try_bare=False):
                 return site, candidate
             return "", candidate
     return "", (candidates[0] if candidates else str(name or "").strip())
-
-
 def _put_issue_component_site(issue_id, payload, headers):
     response = requests.put(
         f"{erp_base_url()}/api/resource/Issue/{issue_id}",
@@ -7272,8 +5879,6 @@ def _put_issue_component_site(issue_id, payload, headers):
     if not response.ok:
         return issue_id, None, _erp_response_error(response)
     return issue_id, payload, None
-
-
 def _component_exists(component):
     response = requests.get(
         f"{erp_base_url()}/api/resource/Component/{component}",
@@ -7281,8 +5886,6 @@ def _component_exists(component):
         timeout=30,
     )
     return response.ok
-
-
 def _fetch_erp_component_doc(name, cache):
     key = str(name or "").strip()
     if not key:
@@ -7304,8 +5907,6 @@ def _fetch_erp_component_doc(name, cache):
         return None, f"ERP did not return Component {key}"
     cache[key] = doc
     return doc, None
-
-
 def _lookup_component_doc(name, cache, try_bare=False):
     sc_name = _sc_component_name(name)
     candidates = []
@@ -7323,7 +5924,6 @@ def _lookup_component_doc(name, cache, try_bare=False):
         if doc:
             return doc, candidate, None
     return None, (candidates[0] if candidates else raw), last_error
-
 def _user_group_member_names(group_name):
     response = requests.get(
         f"{erp_base_url()}/api/resource/User Group Member",
@@ -7343,7 +5943,6 @@ def _user_group_member_names(group_name):
         if user and user not in users:
             users.append(user)
     return users, None
-
 def _issue_already_assigned(doc):
     raw = (doc or {}).get("_assign")
     if not raw:
@@ -7362,7 +5961,6 @@ def _issue_already_assigned(doc):
             return any(str(item).strip() for item in parsed)
         return bool(parsed)
     return True
-
 def _assign_issue_to_user_group(issue_id, users):
     response = requests.post(
         f"{erp_base_url()}/api/method/frappe.desk.form.assign_to.add",
@@ -7378,7 +5976,6 @@ def _assign_issue_to_user_group(issue_id, users):
     if not response.ok:
         return _erp_response_error(response)
     return None
-
 def set_issue_preset_fields(preset_id, issue_id, unit, subject=""):
     """Fill empty ERP Issue fields from a named preset. Never overwrites set values."""
     preset = ISSUE_FIELD_PRESETS.get(str(preset_id or "").strip())
@@ -7516,7 +6113,6 @@ def set_issue_preset_fields(preset_id, issue_id, unit, subject=""):
         "outage_type": _parse_outage_kind(current_type),
         "undiagnosed": not bool(current_subtype),
     }, None
-
 def add_missing_issue_components(tickets):
     """Fill empty Issue.component and/or Issue.site. Never overwrite existing values."""
     updated = []
@@ -7708,7 +6304,6 @@ def add_missing_issue_components(tickets):
         "skipped": skipped,
         "errors": errors,
     }
-
 def validate_issue_records(issue_records):
     """Validate normalized ERP issue records through the established pipeline."""
     site_by_issue = {}
@@ -7762,7 +6357,6 @@ def validate_issue_records(issue_records):
                 if unit:
                     _store_site_id_cache(unit, subject, site)
     return result
-
 def validate_issues_report(issue_path=None):
     if issue_path is None:
         issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
@@ -8518,7 +7112,6 @@ def validate_issues_report(issue_path=None):
         relocation_tickets,
         discarded_tickets,
     )
-
 def ping_speaker_status(unit):
     """Ping a unit's speaker and return its current status plus raw output."""
     ensure_net_array()
@@ -8528,7 +7121,6 @@ def ping_speaker_status(unit):
     if code is None and not output:
         return None, "", f"No speaker endpoint configured for {unit}"
     return _ping_reachable(output), output, None
-
 def _start_bounce_tool(unit, executable_name, row_index, endpoint_label):
     """Launch a trusted network utility with one endpoint IP argument."""
     ensure_net_array()
@@ -8561,15 +7153,12 @@ def _start_bounce_tool(unit, executable_name, row_index, endpoint_label):
         "pid": process.pid,
         "process": process,
     }, None
-
 def bounce_switch(unit):
     """Start bounceswitch.exe with the unit relay IP from net-sheet row[10]."""
     return _start_bounce_tool(unit, "bounceswitch.exe", 10, "relay")
-
 def bounce_speaker(unit):
     """Start speaker_reboot.exe with the speaker IP from net-sheet row[4]."""
     return _start_bounce_tool(unit, "speaker_reboot.exe", 4, "speaker")
-
 def ping_camera_status(unit, target):
     """Ping one camera endpoint and return its current status plus raw output."""
     ensure_net_array()
@@ -8582,7 +7171,6 @@ def ping_camera_status(unit, target):
     if code is None and not output:
         return None, "", f"No {endpoint[1]} endpoint configured for {unit}"
     return _ping_reachable(output), output, None
-
 def ping_compute_status(unit):
     """Ping the unit's NUC/PVE endpoint and return its current status."""
     ensure_net_array()
@@ -8594,7 +7182,6 @@ def ping_compute_status(unit):
     if code is None and not output:
         return None, label, "", f"No {label} endpoint configured for {unit}"
     return _ping_reachable(output), label, output, None
-
 def ping_scrypted_status(unit):
     """Ping the unit's Scrypted endpoint and return its current status."""
     ensure_net_array()
@@ -8604,7 +7191,6 @@ def ping_scrypted_status(unit):
     if code is None and not output:
         return None, "", f"No Scrypted endpoint configured for {unit}"
     return _ping_reachable(output), output, None
-
 def ping_pve_status(unit):
     """Ping the unit's PVE endpoint and return its current status."""
     ensure_net_array()
@@ -8614,7 +7200,6 @@ def ping_pve_status(unit):
     if code is None and not output:
         return None, "", f"No PVE endpoint configured for {unit}"
     return _ping_reachable(output), output, None
-
 def _validate_unit_status_impl(unit):
     """Run standard validation and return its list key plus console output."""
     ensure_net_array()
@@ -8648,7 +7233,6 @@ def _validate_unit_status_impl(unit):
         if items:
             return category, output, None
     return None, output, f"Validation produced no result for {unit}"
-
 def _validate_unit_full_impl(unit):
     """Full ping of router, compute, speaker, cameras, and Scrypted (if IP exists)."""
     ensure_net_array()
@@ -8851,24 +7435,12 @@ def _validate_unit_full_impl(unit):
             "camera_up": False,
         })
     return result, None
-
-
-# ---------------------------------------------------------------------------
-# Validation wrappers that record history.
-#
-# Every validation the dashboard already runs is written to unit_history, so
-# flap detection costs no extra packets. Recording never raises and never
-# changes the return value — the implementations above are unchanged.
-# ---------------------------------------------------------------------------
-
 def validate_unit_status(unit):
     """Quick validation; records the result to unit history. Returns (category, output, error)."""
     category, output, error = _validate_unit_status_impl(unit)
     if not error:
         unit_history.record(unit, "validate_quick", category=category)
     return category, output, error
-
-
 def validate_unit_full(unit):
     """Full validation; records the result to unit history. Returns (result, error)."""
     result, error = _validate_unit_full_impl(unit)
@@ -8881,13 +7453,9 @@ def validate_unit_full(unit):
             detail=result.get("summary") or result.get("move_to"),
         )
     return result, error
-
-
 def unit_flap_summary(unit, days=7):
     """How often a unit has flipped between up and down recently."""
     return unit_history.flap_summary(unit, days=days), None
-
-
 def unit_history_entries(unit, days=30, limit=200):
     """Recent recorded validations for a unit, newest first."""
     return {
@@ -8896,8 +7464,6 @@ def unit_history_entries(unit, days=30, limit=200):
         "entries": unit_history.history(unit, days=days, limit=limit),
         "summary": unit_history.flap_summary(unit, days=min(days, 7)),
     }, None
-
-
 def fleet_flap_report(days=7, min_transitions=3):
     """Units flapping most in the window — the fleet-wide view."""
     return {
@@ -8905,8 +7471,6 @@ def fleet_flap_report(days=7, min_transitions=3):
         "min_transitions": min_transitions,
         "units": unit_history.fleet_flappers(days=days, min_transitions=min_transitions),
     }, None
-
-
 def revalidate_list_entry(list_id, item):
     """Run the list-specific check for one ticket and return its destination list."""
     unit = str((item or {}).get("unit") or "").strip()
@@ -9035,7 +7599,6 @@ def revalidate_list_entry(list_id, item):
         return "on_hold", fields, output, error
 
     return None, {}, "", f"List {list_id} cannot be revalidated"
-
 def validate_stale_vpn_status(unit):
     """Check router and the unit-appropriate compute endpoint for stale VPN status."""
     ensure_net_array()
@@ -9067,7 +7630,6 @@ def validate_stale_vpn_status(unit):
         "router_output": router_output,
         "compute_output": compute_output,
     }, None
-
 def validate_camera_view_status(unit):
     """Validate router/compute reachability for a Camera View ticket."""
     ensure_net_array()
@@ -9099,7 +7661,6 @@ def validate_camera_view_status(unit):
         "router_output": router_output,
         "compute_output": compute_output,
     }, None
-
 def _read_spreadsheet_rows(report_path):
     rows = []
     if report_path.lower().endswith(".xlsx"):
@@ -9118,8 +7679,6 @@ def _read_spreadsheet_rows(report_path):
             for line in csv.reader(csvfile):
                 rows.append(line)
     return rows
-
-
 def art_recovery_report_path():
     """Persistent path for the hourly ART NOC outage spreadsheet."""
     data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
@@ -9128,8 +7687,6 @@ def art_recovery_report_path():
     art_dir = os.path.join(data_dir, "art")
     os.makedirs(art_dir, exist_ok=True)
     return os.path.join(art_dir, "Shield_NOC_Outage_no_initial_email.xlsx")
-
-
 def _parse_html_table_rows(html_text):
     """Parse the first HTML table into a list of row lists."""
     from html.parser import HTMLParser
@@ -9172,8 +7729,6 @@ def _parse_html_table_rows(html_text):
     parser = _TableParser()
     parser.feed(html_text or "")
     return parser.rows
-
-
 def _parse_art_parameters_form(html_text):
     """Extract hidden/input/select fields from ART parametersForm."""
     from html.parser import HTMLParser
@@ -9216,8 +7771,6 @@ def _parse_art_parameters_form(html_text):
     parser = _FormParser()
     parser.feed(html_text or "")
     return parser.fields
-
-
 def download_art_noc_outage_report(dest_path=None):
     """
     Login to ART and download report 153 (NOC outage / recovery email sheet).
@@ -9317,8 +7870,6 @@ def download_art_noc_outage_report(dest_path=None):
         return None, f"ART request failed: {exc}"
     except Exception as exc:
         return None, f"ART download failed: {exc}"
-
-
 def check_missing_recovery_emails(report_path=None):
     if report_path is None:
         cached = art_recovery_report_path()
@@ -9471,7 +8022,6 @@ def check_missing_recovery_emails(report_path=None):
         email_status_up_to_date,
     )
     return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
-
 def validate_reports_mesh():
     nuc_down = []
     stale_vpn = []
@@ -9513,7 +8063,6 @@ def validate_reports_mesh():
     for line in scrypted_outage:
         print(line)
     return missing2, nuc_down, stale_vpn, scrypted_outage
-
 def compare_zabbix():
     zabbix_path = os.path.join(os.path.expanduser('~'), "Downloads", "zbx_problems_export.csv")
     mesh_outage = os.path.join(os.path.expanduser("~"), "Downloads", "filtered_mesh_vpn.csv")
@@ -9559,7 +8108,6 @@ def compare_zabbix():
 
     lenmis = len(missing)
     print(f'{lenmis} Units discovered on zabbix that werent found on mesh')
-    
 def compare_reports(issue_path, mesh_path):
     missing.clear()
     mesh_array = []
@@ -9603,13 +8151,10 @@ def compare_reports(issue_path, mesh_path):
     #clear_old_reports()
     #print('reports cleared, validating new report..')
     return missing
-    #validate_reports_mesh()
-
 def print_net_array():
     for row in net_array:
         print(row)
     print(netsheet)
-
 def generate_false_mu():
     false_mu_array.clear()
     with open(false_mu, "r", newline='') as csvfile:
@@ -9617,7 +8162,6 @@ def generate_false_mu():
         for row in linereader:
             false_mu_array.append(row[0])
         print('Loaded false positive MU list')
-
 def generate_net_array():
     net_array.clear()
     with open(netsheet, "r", newline='') as csvfile:
@@ -9627,11 +8171,6 @@ def generate_net_array():
             if len(row) >= 1 and len(row[0]) == 6:
                 net_array.append(row)
     generate_false_mu()
-        
-
-
-
-    
 def naming_conventions():
     print("Adjusting naming conventions...")
     for row in all_battery_units:
@@ -9640,7 +8179,6 @@ def naming_conventions():
 
     print('Mapping trailers to head units...')
     rd_battery_map()
-
 def get_rd_battery(unit):
     found = False
     for row in all_battery_units_mapped:
@@ -9652,8 +8190,6 @@ def get_rd_battery(unit):
             break
     if found != True:
         print('Unit not found.')
-        
-
 def low_battery_fisheye_screenshotter():
     
     if len(low_battery_units) < 1:
@@ -9707,7 +8243,6 @@ def low_battery_fisheye_screenshotter():
                     #print("Removing empty directory")
                     #os.remove(filepath)
     return
-
 def reboot_nuc(nuc):
     """SSH to the unit NUC and run shutdown /r /t 1."""
     load_dotenv(env_path)
@@ -9759,7 +8294,6 @@ def reboot_nuc(nuc):
         return False, str(exc)
     finally:
         client.close()
-
 def nuc_uptime(nuc):
     """SSH to the unit NUC and return system boot info stdout."""
     load_dotenv(env_path)
@@ -9808,7 +8342,6 @@ def nuc_uptime(nuc):
         return False, str(exc), ""
     finally:
         client.close()
-
 def reboot_scrypted(scrypted):
     """SSH to the unit PVE host and reboot VM 101 (Scrypted/NUC guest)."""
     load_dotenv(env_path)
@@ -9909,413 +8442,6 @@ def reboot_pve(pve):
         return False, str(exc)
     finally:
         client.close()
-
-# ---------------------------------------------------------------------------
-# Read-only unit diagnostics.
-#
-# Everything below reports and never changes state on the device, so none of
-# it takes the per-unit lock. The shared _ssh_read() helper keeps the paramiko
-# dance (timeouts on both connect and exec, close in a finally) in one place.
-# ---------------------------------------------------------------------------
-
-# Platform services managed on the Scrypted box, in start order. Kept in sync
-# with refresh_platform_services() — if you add a service to one, add it here.
-PLATFORM_SERVICES = (
-    "database", "watchdog", "web", "metadata", "images", "capture",
-    "smtp", "alarms", "events", "onvif", "monitor", "snmp", "cache",
-)
-
-
-def _ssh_read(host, username, password, command, timeout=60, connect_timeout=30):
-    """
-    Run one read-only command over SSH and return (stdout_text, error).
-
-    stderr is folded into the output only when stdout is empty, so a command
-    that warns but succeeds still reports its result.
-    """
-    if not host:
-        return "", "Missing host"
-    if not username or not password:
-        return "", "Missing SSH credentials in .env"
-    client = paramiko.SSHClient()
-    try:
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=host,
-            port=22,
-            username=username,
-            password=password,
-            timeout=connect_timeout,
-            allow_agent=False,
-            look_for_keys=False,
-        )
-        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        out = stdout.read().decode("utf-8", errors="replace").strip()
-        err = stderr.read().decode("utf-8", errors="replace").strip()
-    except paramiko.AuthenticationException:
-        return "", f"SSH authentication failed for {username}@{host}"
-    except Exception as exc:
-        return "", f"SSH to {host} failed: {exc}"
-    finally:
-        client.close()
-    if not out and err:
-        return err, None
-    return out, None
-
-
-def scrypted_service_status(unit):
-    """
-    Which platform services are actually running on the unit's Scrypted box.
-
-    The read that should come before "Restart All Services" — it names the
-    one service that died instead of restarting all thirteen blind.
-    Returns (info, error).
-    """
-    load_dotenv(env_path)
-    _row, host, error = _scrypted_ssh_target(unit)
-    if error:
-        return None, error
-    username, password = _scrypted_ssh_credentials()
-    company = (os.getenv("company") or "").strip().strip('"').strip("'")
-    if not company:
-        return None, "Set `company` in .env — it prefixes the platform service names"
-
-    names = [f"{company}-{svc}.service" for svc in PLATFORM_SERVICES]
-    # One call, one line per service: "<name> <active-state> <sub-state>".
-    command = (
-        "for s in " + " ".join(shlex.quote(n) for n in names) + "; do "
-        "printf '%s %s %s\\n' \"$s\" \"$(systemctl is-active \"$s\" 2>/dev/null)\" "
-        "\"$(systemctl show -p SubState --value \"$s\" 2>/dev/null)\"; done"
-    )
-    raw, error = _ssh_read(host, username, password, command, timeout=60)
-    if error:
-        return None, error
-    if not raw:
-        return None, f"No service status returned from {host}"
-
-    services = []
-    for line in raw.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        name = parts[0]
-        state = parts[1] if len(parts) > 1 else "unknown"
-        sub = parts[2] if len(parts) > 2 else ""
-        services.append({
-            "name": name,
-            "short": name.replace(f"{company}-", "").replace(".service", ""),
-            "state": state,
-            "sub_state": sub,
-            "ok": state == "active",
-        })
-
-    down = [s["short"] for s in services if not s["ok"]]
-    if not services:
-        summary = f"No platform services found on {unit}"
-        status = "warn"
-    elif not down:
-        summary = f"All {len(services)} platform services active on {unit}"
-        status = "ok"
-    else:
-        summary = (
-            f"{len(down)} of {len(services)} services not active on {unit}: "
-            + ", ".join(down)
-        )
-        status = "fail"
-
-    return {
-        "unit": unit,
-        "host": host,
-        "status": status,
-        "summary": summary,
-        "services": services,
-        "down": down,
-        "output": raw,
-    }, None
-
-
-def _parse_size_table(text, wanted_mounts=("/",)):
-    """Pull the rows we care about out of `df -h` output."""
-    rows = []
-    for line in str(text or "").splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 6:
-            continue
-        mount = parts[-1]
-        if wanted_mounts and mount not in wanted_mounts:
-            continue
-        use = parts[-2].rstrip("%")
-        try:
-            use_pct = int(use)
-        except ValueError:
-            use_pct = None
-        rows.append({
-            "filesystem": parts[0],
-            "size": parts[-5],
-            "used": parts[-4],
-            "available": parts[-3],
-            "use_percent": use_pct,
-            "mount": mount,
-        })
-    return rows
-
-
-def pve_host_resources(unit):
-    """
-    Memory, disk, load and VM state on the unit's PVE host (read-only).
-
-    Answers "is the host wedged, or is only the guest down?" in one call.
-    Returns (info, error).
-    """
-    load_dotenv(env_path)
-    unit = str(unit or "").strip()
-    if not unit:
-        return None, "Missing unit"
-    row = ensure_unit_net_info(unit, needed_indexes=(11,))
-    if not row:
-        return None, f"Unit {unit} not found in net sheet"
-    host = _host_only(row[11] if len(row) > 11 else "")
-    if not host:
-        return None, f"No PVE IP for {unit}"
-    username, password, cred_error = _pve_ssh_credentials()
-    if cred_error:
-        return None, cred_error
-
-    command = (
-        "echo '__UPTIME__'; uptime; "
-        "echo '__MEM__'; free -m; "
-        "echo '__DISK__'; df -h; "
-        "echo '__VMS__'; qm list 2>/dev/null || echo 'qm unavailable'; "
-        "echo '__VM101__'; qm status 101 2>/dev/null || echo 'no VM 101'"
-    )
-    raw, error = _ssh_read(host, username, password, command, timeout=90)
-    if error:
-        return None, error
-    if not raw:
-        return None, f"No output from PVE host {host}"
-
-    sections = {}
-    current = None
-    for line in raw.splitlines():
-        marker = re.fullmatch(r"__([A-Z0-9]+)__", line.strip())
-        if marker:
-            current = marker.group(1).lower()
-            sections[current] = []
-        elif current:
-            sections[current].append(line)
-    sections = {key: "\n".join(value).strip() for key, value in sections.items()}
-
-    info = {"unit": unit, "host": host, "output": raw, "sections": sections}
-    reasons = []
-    status = "ok"
-
-    # Memory: the "Mem:" row of free -m, in MiB.
-    mem_match = re.search(r"^Mem:\s+(\d+)\s+(\d+)\s+(\d+)", sections.get("mem", ""), re.M)
-    if mem_match:
-        total, used, free_mb = (int(mem_match.group(i)) for i in (1, 2, 3))
-        info.update({
-            "mem_total_mb": total, "mem_used_mb": used, "mem_free_mb": free_mb,
-            "mem_used_percent": round(used * 100 / total) if total else None,
-        })
-        if total and used * 100 / total >= 90:
-            status = "fail"
-            reasons.append(f"memory {round(used * 100 / total)}% used")
-
-    swap_match = re.search(r"^Swap:\s+(\d+)\s+(\d+)", sections.get("mem", ""), re.M)
-    if swap_match:
-        swap_total, swap_used = int(swap_match.group(1)), int(swap_match.group(2))
-        info.update({"swap_total_mb": swap_total, "swap_used_mb": swap_used})
-        if swap_total and swap_used * 100 / swap_total >= 50:
-            if status == "ok":
-                status = "warn"
-            reasons.append(f"swap {round(swap_used * 100 / swap_total)}% used")
-
-    disks = _parse_size_table(sections.get("disk", ""), wanted_mounts=("/",))
-    if disks:
-        info["root_disk"] = disks[0]
-        use_pct = disks[0].get("use_percent")
-        if isinstance(use_pct, int):
-            if use_pct >= 90:
-                status = "fail"
-                reasons.append(f"root filesystem {use_pct}% full")
-            elif use_pct >= 80:
-                if status == "ok":
-                    status = "warn"
-                reasons.append(f"root filesystem {use_pct}% full")
-
-    load_match = re.search(r"load average:\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)", sections.get("uptime", ""))
-    if load_match:
-        info["load_1m"] = float(load_match.group(1))
-        info["load_5m"] = float(load_match.group(2))
-        info["load_15m"] = float(load_match.group(3))
-
-    vm_state = ""
-    vm_match = re.search(r"status:\s*(\S+)", sections.get("vm101", ""))
-    if vm_match:
-        vm_state = vm_match.group(1)
-        info["vm101_status"] = vm_state
-        if vm_state != "running":
-            status = "fail"
-            reasons.append(f"VM 101 is {vm_state}")
-    elif "no VM 101" in sections.get("vm101", ""):
-        info["vm101_status"] = "missing"
-        status = "fail"
-        reasons.append("VM 101 not present")
-
-    info["status"] = status
-    info["reasons"] = reasons
-    parts = []
-    if info.get("mem_used_percent") is not None:
-        parts.append(f"mem {info['mem_used_percent']}%")
-    if info.get("root_disk", {}).get("use_percent") is not None:
-        parts.append(f"disk {info['root_disk']['use_percent']}%")
-    if info.get("load_1m") is not None:
-        parts.append(f"load {info['load_1m']}")
-    if vm_state:
-        parts.append(f"VM 101 {vm_state}")
-    detail = ", ".join(parts) if parts else "see output"
-    info["summary"] = (
-        f"PVE host for {unit} looks healthy — {detail}"
-        if status == "ok"
-        else f"PVE host for {unit} needs attention ({'; '.join(reasons)}) — {detail}"
-    )
-    return info, None
-
-
-def camera_reachability_matrix(unit):
-    """
-    Reach every camera, the fisheye and the speaker for a unit in one pass.
-
-    Pings run concurrently, so the whole matrix costs about as long as the
-    slowest single endpoint rather than the sum of them.
-    Returns (info, error).
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return None, "Missing unit"
-    cameras, error = list_unit_cameras(unit)
-    if error:
-        return None, error
-
-    targets = [
-        {"target": cam["target"], "label": cam["label"], "host": cam["host"]}
-        for cam in (cameras or [])
-    ]
-    row = _net_row_for_unit(unit)
-    speaker_ip = _host_only(row[4] if row and len(row) > 4 else "")
-    if speaker_ip:
-        targets.append({"target": "speaker", "label": "Speaker", "host": speaker_ip})
-
-    if not targets:
-        return None, f"No camera or speaker IPs in the net sheet for {unit}"
-
-    def check(item):
-        code, output = _ping_host(item["host"], max_echoes=2, stop_on_success=True)
-        return {
-            **item,
-            "reachable": _ping_reachable(output),
-            "returncode": code,
-        }
-
-    results = []
-    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
-        futures = {pool.submit(check, item): item for item in targets}
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                item = futures[future]
-                results.append({**item, "reachable": False, "error": str(exc)})
-
-    order = {"fisheye": 0, "camera1": 1, "camera2": 2, "camera3": 3, "camera4": 4, "speaker": 5}
-    results.sort(key=lambda item: order.get(item.get("target"), 99))
-
-    down = [item["label"] for item in results if not item.get("reachable")]
-    up_count = len(results) - len(down)
-    if not down:
-        status, summary = "ok", f"All {len(results)} endpoints reachable on {unit}"
-    elif up_count == 0:
-        status, summary = "fail", f"No endpoints reachable on {unit} — check the switch or router"
-    else:
-        status, summary = "warn", f"{len(down)} of {len(results)} unreachable on {unit}: " + ", ".join(down)
-
-    return {
-        "unit": unit,
-        "status": status,
-        "summary": summary,
-        "endpoints": results,
-        "down": down,
-        "reachable_count": up_count,
-        "total": len(results),
-    }, None
-
-
-def run_unit_diagnostics(unit):
-    """
-    Every read-only check that applies to a unit, in one call — the 3 AM button.
-
-    Each check is independent: one failing (no PVE, smartctl missing, SSH
-    refused) records its error and the rest still run. Returns (info, error);
-    error is only set when the unit itself cannot be resolved.
-    """
-    unit = str(unit or "").strip()
-    if not unit:
-        return None, "Missing unit"
-    row = ensure_unit_net_info(unit)
-    if not row:
-        return None, f"Unit {unit} not found in net sheet"
-
-    has_pve = uses_pve(unit)
-    checks = [
-        ("connectivity", "Connectivity", lambda: validate_unit_full(unit)),
-        ("cameras", "Camera reachability", lambda: camera_reachability_matrix(unit)),
-    ]
-    if has_pve:
-        checks.extend([
-            ("services", "Platform services", lambda: scrypted_service_status(unit)),
-            ("pve_host", "PVE host resources", lambda: pve_host_resources(unit)),
-            ("nvme", "NVMe health", lambda: pve_nvme_health(unit)),
-        ])
-
-    results = {}
-    problems = []
-    # Sequential on purpose: these SSH into the same two hosts, and a NOC
-    # box hammering one unit with five concurrent sessions is how you get
-    # sshd rate-limiting in the middle of an outage.
-    for key, label, fn in checks:
-        try:
-            info, error = fn()
-        except Exception as exc:
-            info, error = None, str(exc)
-        if error or info is None:
-            results[key] = {"label": label, "ok": False, "error": error or "no result"}
-            problems.append(f"{label}: {error or 'no result'}")
-            continue
-        status = info.get("status") if isinstance(info, dict) else None
-        entry = {"label": label, "ok": True, "result": info}
-        if status:
-            entry["status"] = status
-            if status != "ok":
-                problems.append(f"{label}: {info.get('summary') or status}")
-        results[key] = entry
-
-    if not problems:
-        summary = f"All checks passed for {unit}"
-        status = "ok"
-    else:
-        summary = f"{len(problems)} issue(s) found on {unit}"
-        status = "fail"
-
-    return {
-        "unit": unit,
-        "status": status,
-        "summary": summary,
-        "problems": problems,
-        "checks": results,
-        "has_pve": has_pve,
-    }, None
-
-
 def parse_ping_statistics(output):
     """
     Pull round-trip statistics out of Windows `ping` output we already have.
@@ -10364,216 +8490,6 @@ def parse_ping_statistics(output):
             sum(abs(t - stats["avg_ms"]) for t in times) / len(times), 1
         )
     return stats
-
-
-NVME_SMART_DEFAULT_DEVICE = "/dev/nvme0n1"
-
-# Percentage Used at or above this is worth flagging — NVMe rates endurance
-# as a percentage of rated writes, so 100% means the drive has burned through
-# its warranty life (it usually keeps working, but plan a swap).
-NVME_WEAR_WARN_PERCENT = 80
-
-
-def _parse_nvme_smart(text):
-    """
-    Pull the fields worth reading out of `smartctl -a` NVMe output.
-
-    Returns a dict with whatever was found; missing keys simply stay absent
-    so a different smartctl version or a SATA disk degrades to raw output
-    instead of raising.
-    """
-    info = {}
-    patterns = {
-        "overall_health": r"SMART overall-health self-assessment test result:\s*(\S+)",
-        "model": r"Model Number:\s*(.+)",
-        "serial": r"Serial Number:\s*(.+)",
-        "firmware": r"Firmware Version:\s*(.+)",
-        "critical_warning": r"Critical Warning:\s*(\S+)",
-        "temperature_c": r"Temperature:\s*(\d+) Celsius",
-        "available_spare": r"Available Spare:\s*(\d+)%",
-        "available_spare_threshold": r"Available Spare Threshold:\s*(\d+)%",
-        "percentage_used": r"Percentage Used:\s*(\d+)%",
-        "power_on_hours": r"Power On Hours:\s*([\d,\s]+)",
-        "power_cycles": r"Power Cycles:\s*([\d,\s]+)",
-        "unsafe_shutdowns": r"Unsafe Shutdowns:\s*([\d,\s]+)",
-        "media_errors": r"Media and Data Integrity Errors:\s*([\d,\s]+)",
-        "error_log_entries": r"Error Information Log Entries:\s*([\d,\s]+)",
-        "data_units_written": r"Data Units Written:\s*([\d,\s]+)",
-    }
-    numeric_keys = (
-        "temperature_c", "available_spare", "available_spare_threshold",
-        "percentage_used", "power_on_hours", "power_cycles",
-        "unsafe_shutdowns", "media_errors", "error_log_entries",
-    )
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if key in numeric_keys:
-            # smartctl thousand-separates counters ("15,203" / "24 551 238").
-            # Text fields like Model Number keep their internal spaces.
-            try:
-                info[key] = int(re.sub(r"[,\s]", "", value))
-            except (TypeError, ValueError):
-                info[key] = value
-        else:
-            info[key] = value
-    return info
-
-
-def _nvme_health_verdict(info):
-    """
-    Reduce parsed SMART fields to (status, [reasons]) for the dashboard LED.
-
-    status is "ok", "warn" or "fail". Deliberately conservative: anything we
-    could not read leaves the status alone rather than inventing a problem.
-    """
-    reasons = []
-    status = "ok"
-
-    health = str(info.get("overall_health") or "").upper()
-    if health and health != "PASSED":
-        status = "fail"
-        reasons.append(f"overall-health {health}")
-
-    warning = str(info.get("critical_warning") or "").strip()
-    if warning and warning not in ("0x00", "0x0000", "0"):
-        status = "fail"
-        reasons.append(f"critical warning {warning}")
-
-    media_errors = info.get("media_errors")
-    if isinstance(media_errors, int) and media_errors > 0:
-        status = "fail"
-        reasons.append(f"{media_errors} media/data integrity errors")
-
-    spare = info.get("available_spare")
-    threshold = info.get("available_spare_threshold")
-    if isinstance(spare, int) and isinstance(threshold, int) and spare <= threshold:
-        status = "fail"
-        reasons.append(f"available spare {spare}% at/below threshold {threshold}%")
-
-    used = info.get("percentage_used")
-    if isinstance(used, int) and used >= NVME_WEAR_WARN_PERCENT:
-        if status == "ok":
-            status = "warn"
-        reasons.append(f"{used}% of rated endurance used")
-
-    temp = info.get("temperature_c")
-    if isinstance(temp, int) and temp >= 70:
-        if status == "ok":
-            status = "warn"
-        reasons.append(f"{temp}C drive temperature")
-
-    return status, reasons
-
-
-def pve_nvme_health(unit, device=None):
-    """
-    SSH to the unit's PVE host and read NVMe SMART health with smartctl.
-
-    Read-only — smartctl -a only reports, it does not start a self-test.
-    Returns (info, error). info carries the parsed fields, a status of
-    "ok"/"warn"/"fail", a one-line summary, and the raw smartctl output.
-    """
-    load_dotenv(env_path)
-    unit = str(unit or "").strip()
-    if not unit:
-        return None, "Missing unit"
-    device = str(device or NVME_SMART_DEFAULT_DEVICE).strip() or NVME_SMART_DEFAULT_DEVICE
-    # Path only — this is interpolated into a remote shell command.
-    if not re.fullmatch(r"/dev/[A-Za-z0-9/_-]+", device):
-        return None, f"Refusing unexpected device path: {device}"
-
-    row = ensure_unit_net_info(unit, needed_indexes=(11,))
-    if not row:
-        return None, f"Unit {unit} not found in net sheet"
-    ip = _host_only(row[11] if len(row) > 11 else "")
-    if not ip:
-        return None, f"No PVE IP for {unit}"
-    username, password, cred_error = _pve_ssh_credentials()
-    if cred_error:
-        return None, cred_error
-
-    command = f"smartctl -a {shlex.quote(device)} 2>&1; echo __RC__=$?"
-    client = paramiko.SSHClient()
-    try:
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=ip,
-            port=22,
-            username=username,
-            password=password,
-            timeout=30,
-            allow_agent=False,
-            look_for_keys=False,
-        )
-        _stdin, stdout, stderr = client.exec_command(command, timeout=90)
-        raw = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace").strip()
-    except paramiko.AuthenticationException:
-        return None, (
-            f"PVE SSH authentication failed for {username}@{ip}. "
-            "SSH uses the Linux user only (usually root), not root@pam. "
-            "Set pvesshuser=root and pvepass in .env."
-        )
-    except Exception as exc:
-        return None, f"PVE SSH to {ip} failed: {exc}"
-    finally:
-        client.close()
-
-    returncode = None
-    match = re.search(r"__RC__=(\d+)\s*$", raw)
-    if match:
-        returncode = int(match.group(1))
-        raw = raw[:match.start()]
-    raw = raw.strip()
-
-    if "command not found" in raw.lower() or returncode == 127:
-        return None, (
-            f"smartctl is not installed on the PVE host for {unit} "
-            f"({ip}). Install it there with: apt-get install -y smartmontools"
-        )
-    if not raw:
-        return None, f"No smartctl output from {ip}{(' — ' + err) if err else ''}"
-    if re.search(r"Unable to detect device type|No such device|failed: INQUIRY", raw, re.I):
-        return None, (
-            f"smartctl could not read {device} on {unit} ({ip}). "
-            f"Run `lsblk -d -o NAME,SIZE,MODEL` there to find the right device."
-        )
-
-    info = _parse_nvme_smart(raw)
-    status, reasons = _nvme_health_verdict(info)
-
-    parts = []
-    if info.get("percentage_used") is not None:
-        parts.append(f"{info['percentage_used']}% used")
-    if info.get("available_spare") is not None:
-        parts.append(f"{info['available_spare']}% spare")
-    if info.get("temperature_c") is not None:
-        parts.append(f"{info['temperature_c']}C")
-    if info.get("power_on_hours") is not None:
-        parts.append(f"{info['power_on_hours']}h powered on")
-    detail = ", ".join(parts) if parts else (info.get("overall_health") or "see output")
-
-    if status == "ok":
-        summary = f"NVMe on {unit} looks healthy — {detail}"
-    else:
-        summary = f"NVMe on {unit} needs attention ({'; '.join(reasons)}) — {detail}"
-
-    info.update({
-        "unit": unit,
-        "host": ip,
-        "device": device,
-        "status": status,
-        "reasons": reasons,
-        "summary": summary,
-        "returncode": returncode,
-        "output": raw,
-    })
-    return info, None
-
-
 def chkdsk(nuc, drive, read_only=True):
     """
     SSH to the unit NUC and run chkdsk.
@@ -10643,7 +8559,6 @@ def chkdsk(nuc, drive, read_only=True):
         return False, str(exc), ""
     finally:
         client.close()
-
 def install_checker():
     idUser = os.getenv("idUser")
     api_token = os.getenv("victron_token")
@@ -10683,7 +8598,6 @@ def install_checker():
                 print('Unit was not found.')
     else:
         print("Response text: ", response.text)
-
 def all_unit_battery_health():
     global all_battery_units, low_battery_units, depleted_battery_units, all_battery_units_mapped
     all_battery_units.clear()
@@ -10746,8 +8660,6 @@ def all_unit_battery_health():
                                 }
                                 depleted_battery_units.append(combined)               
     naming_conventions()
-    
-
 def unit_battery_health(unit):
     if response.status_code == 200:
         #while True:
@@ -10776,7 +8688,6 @@ def unit_battery_health(unit):
 
     else:
         print("Response text:", response.text)
-
 def rd_battery_map():
     for row in all_battery_units:
         url = f"{erp_base_url()}/api/resource/Component"
@@ -10801,7 +8712,6 @@ def rd_battery_map():
             }
             all_battery_units_mapped.append(full_unit)
     return
-
 def low_battery_rd_fisheye_tool():
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     print("Low battery units: ")
@@ -10837,28 +8747,24 @@ def low_battery_rd_fisheye_tool():
     print('RD List:')
     for rd in rd_down:
         print(f"{rd['name']} - {rd['trailer']}")
-
 def low_battery_list():
     print("Low battery units: ")
     for row in low_battery_units:
         name = row["name"]
         battery = row["battery"]
         print(f"{row['name']} - {row['battery']}")
-    
 def depleted_battery_list():
     print("Depleted battery units: ")
     for row in depleted_battery_units:
         name = row["name"]
         battery = row["battery"]
         print(f"{row['name']} - {row['battery']}")
-    
 def all_battery_list():
     print("All battery units: ")
     for row in all_battery_units:
         name = row["name"]
         battery = row["battery"]
         print(f"{row['name']} - {row['battery']}")
-
 # Load the net sheet once at import time. Historically this only happened
 # lazily, behind an `if not net_array: generate_net_array()` guard that each
 # caller had to remember — and the newest SSH helpers didn't, so a fresh
@@ -10867,8 +8773,5 @@ def all_battery_list():
 # ensure_net_array() never raises, so a missing net_sheet.csv still lets the
 # app start (individual units just report "not found in net sheet").
 ensure_net_array()
-
 if __name__ == "__main__":
     main()
-    #thank you for reading
-
