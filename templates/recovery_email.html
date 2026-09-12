@@ -3,11 +3,34 @@
 <head>
     <title>Recovery Email Check</title>
     <style>
+        :root {
+            --accent: #2ad6ee;
+            --accent-hover: #5ee5f7;
+            --accent-soft: #8fe9f8;
+            --bg-panel: #0d1316;
+            --bg-sunken: #06090b;
+            --border: #1c2a30;
+            --border-strong: #31484f;
+            --caution-text: #ffbc5c;
+            --danger: #ff3b5c;
+            --info: #5aa8ff;
+            --ok-text: #5cf0ab;
+            --special: #c77dff;
+            --text: #dfe7ea;
+            --text-bright: #f4f9fa;
+            --text-muted: #93a4aa;
+            --text-on-accent: #03181c;
+            --text-secondary: #bcc9ce;
+            --radius-sm: 2px;
+            --radius: 3px;
+            --radius-pill: 3px;
+        }
+
         body {
-            font-family: Arial, sans-serif;
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
             margin: 20px;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: var(--bg-sunken);
+            color: var(--text);
             max-width: 720px;
         }
         .app-nav {
@@ -16,59 +39,59 @@
             gap: 16px;
             margin: -8px 0 16px;
             padding: 10px 14px;
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 10px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
         }
         .app-nav .nav-brand {
-            color: #f8fafc;
+            color: var(--text-bright);
             font-weight: 700;
             text-decoration: none;
             margin-right: auto;
         }
         .app-nav a.nav-link {
-            color: #e2e8f0;
+            color: var(--text);
             text-decoration: none;
-            background: #2563eb;
+            background: var(--accent);
             padding: 8px 14px;
-            border-radius: 8px;
+            border-radius: var(--radius);
             font-size: 14px;
             font-weight: 600;
         }
         h1 { margin-bottom: 8px; }
-        h2 { color: #94a3b8; font-size: 15px; font-weight: 500; }
-        ul { line-height: 1.55; color: #cbd5e1; }
+        h2 { color: var(--text-muted); font-size: 15px; font-weight: 500; }
+        ul { line-height: 1.55; color: var(--text-secondary); }
         label { display: block; margin-bottom: 6px; }
         button {
-            background: #2563eb;
-            color: #fff;
+            background: var(--accent);
+            color: var(--text-on-accent);
             border: 0;
-            border-radius: 8px;
+            border-radius: var(--radius);
             padding: 10px 16px;
             font-weight: 600;
             cursor: pointer;
         }
-        button:hover { background: #1d4ed8; }
+        button:hover { background: var(--accent-hover); }
         button.secondary {
-            background: #334155;
+            background: var(--border);
         }
-        button.secondary:hover { background: #475569; }
-        a { color: #93c5fd; }
+        button.secondary:hover { background: var(--border-strong); }
+        a { color: var(--accent-soft); }
         .panel {
             margin: 16px 0;
             padding: 14px;
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 10px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
         }
         .panel p {
             margin: 0 0 12px;
-            color: #cbd5e1;
+            color: var(--text-secondary);
             font-size: 14px;
             line-height: 1.5;
         }
         .panel .meta {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 13px;
             margin-bottom: 12px;
         }
@@ -83,8 +106,8 @@
             gap: 12px 18px;
             margin: 16px 0;
             padding: 12px;
-            background: #1e293b;
-            border-radius: 8px;
+            background: var(--bg-panel);
+            border-radius: var(--radius);
         }
         .led-legend span {
             display: inline-flex;
@@ -97,11 +120,11 @@
             height: 10px;
             border-radius: 50%;
         }
-        .is-warning { background: #fbbf24; }
-        .is-down { background: #f87171; }
-        .is-multi { background: #a78bfa; }
-        .is-info { background: #38bdf8; }
-        .is-up { background: #4ade80; }
+        .is-warning { background: var(--caution-text); }
+        .is-down { background: var(--danger); }
+        .is-multi { background: var(--special); }
+        .is-info { background: var(--info); }
+        .is-up { background: var(--ok-text); }
     </style>
 </head>
 <body>

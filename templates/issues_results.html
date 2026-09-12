@@ -2,12 +2,86 @@
 <html>
 <head>
     <title>Issues Dashboard</title>
-    <style>
+    <style>        :root {
+            /* Palette. Every colour in this file resolves through these
+               variables - change a value here, not a rule below. Names are
+               roles, not colours, so a repaint never renames anything. */
+            /* ground */
+            --bg-deepest: #000000;
+            --bg-sunken: #06090b;
+            --bg-panel: #0d1316;
+            --bg-info: #0f2630;
+            /* borders */
+            --border: #1c2a30;
+            --border-strong: #31484f;
+            --border-subtle: #547079;
+            /* idle status light: neutral grey, no phosphor cast, so the
+               'no reading yet' dot cannot be read as amber chrome */
+            --led-idle: #6e7b80;
+            /* text */
+            --text: #dfe7ea;
+            --text-secondary: #bcc9ce;
+            --text-muted: #93a4aa;
+            --text-bright: #f4f9fa;
+            --text-on-accent: #03181c;
+            /* accent */
+            --accent: #2ad6ee;
+            --accent-hover: #5ee5f7;
+            --accent-soft: #8fe9f8;
+            --accent-softer: #bff2fb;
+            --accent-softest: #e4fafd;
+            --info: #5aa8ff;
+            --spark-cyan: #2ad6ee;
+            --spark-violet: #5aa8ff;
+            /* status: ok */
+            --ok: #2ee08a;
+            --ok-text: #5cf0ab;
+            --ok-soft: #96f7cb;
+            --ok-softer: #c6fbe2;
+            --ok-deep: #0d5f3f;
+            /* status: warn */
+            --warn: #ffd426;
+            --warn-text: #ffe05c;
+            --warn-bright: #ffe97d;
+            --warn-soft: #fff0ab;
+            --warn-deep: #a88a08;
+            /* status: caution chrome */
+            --caution: #ff9a1f;
+            --caution-text: #ffbc5c;
+            --caution-border: #a8660f;
+            --caution-deep: #7d4b0a;
+            --caution-deeper: #3f2706;
+            --caution-bg: #231503;
+            --caution-soft: #ffd9ad;
+            --caution-softest: #fff4e6;
+            /* status: alert / danger */
+            --alert: #ff7a1a;
+            --danger: #ff3b5c;
+            --danger-text: #ff8fa3;
+            --danger-soft: #ffd0dd;
+            /* rgb triplets for rgba() tints of the colours above */
+            --bg-deepest-rgb: 0, 0, 0;
+            --bg-sunken-rgb: 6, 9, 11;
+            --caution-border-rgb: 168, 102, 15;
+            --ok-rgb: 46, 224, 138;
+            --warn-rgb: 255, 212, 38;
+            --alert-rgb: 255, 122, 26;
+            --danger-rgb: 255, 59, 92;
+            --warn-bright-rgb: 255, 233, 125;
+            --caution-text-rgb: 255, 188, 92;
+            --led-idle-rgb: 110, 123, 128;
+            /* corner radii. Terminal-flat by default; raise these three
+               values to soften every corner in the UI at once. */
+            --radius-sm: 2px;
+            --radius: 3px;
+            --radius-pill: 3px;
+        }
+
         body {
-            font-family: Arial, sans-serif;
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
             margin: 20px;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: var(--bg-sunken);
+            color: var(--text);
         }
         .app-nav {
             display: flex;
@@ -15,49 +89,178 @@
             gap: 16px;
             margin: -8px 0 16px;
             padding: 10px 14px;
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 10px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
         }
         .app-nav .nav-brand {
-            color: #f8fafc;
+            color: var(--text-bright);
             font-weight: 700;
             text-decoration: none;
             margin-right: auto;
         }
-        .app-nav .nav-brand:hover { color: #93c5fd; }
+        .app-nav .nav-brand:hover { color: var(--accent-soft); }
         .app-nav a.nav-link {
-            color: #e2e8f0;
+            color: var(--text);
             text-decoration: none;
-            background: #2563eb;
+            background: var(--accent);
             padding: 8px 14px;
-            border-radius: 8px;
+            border-radius: var(--radius);
             font-size: 14px;
             font-weight: 600;
         }
-        .app-nav a.nav-link:hover { background: #1d4ed8; }
+        .app-nav a.nav-link:hover { background: var(--accent-hover); }
         [hidden] { display: none !important; }
+
+        /* ---- Toasts -------------------------------------------------------
+           Replaces notifyError(). Alerts blocked the whole tab until
+           dismissed, which was painful while a long ping was streaming, and
+           every message they showed is already written to the stdout pane
+           and the status line. These are non-blocking, stack, and
+           auto-dismiss (errors stay until clicked).                        */
+        .toast-stack {
+            position: fixed;
+            right: 16px;
+            bottom: 16px;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: min(420px, calc(100vw - 32px));
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--info);
+            border-radius: var(--radius);
+            padding: 10px 34px 10px 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+            position: relative;
+            word-break: break-word;
+            animation: toast-in 140ms ease-out;
+        }
+        .toast.is-error   { border-left-color: var(--danger); }
+        .toast.is-warning { border-left-color: var(--warn); }
+        .toast.is-success { border-left-color: var(--ok); }
+        .toast .toast-close {
+            position: absolute;
+            top: 4px;
+            right: 6px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 2px 4px;
+        }
+        .toast .toast-close:hover { color: var(--text); }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .toast { animation: none; }
+            .progress-fill { animation: none !important; }
+        }
+
+        /* ---- Status light glyphs ------------------------------------------
+           Green/orange/red is the classic red-green confusion set, and the
+           state was previously carried by hue alone (the title tooltip
+           helped, but only on hover). A glyph inside the dot makes the
+           lists readable at a glance without one.                          */
+        .speaker-led {
+            position: relative;
+        }
+        .speaker-led::after {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 1;
+            color: rgba(var(--bg-sunken-rgb), 0.85);
+            pointer-events: none;
+        }
+        .speaker-led.is-up::after      { content: "\2713"; }  /* check  */
+        .speaker-led.is-warning::after { content: "!"; }
+        .speaker-led.is-multi::after   { content: "\00D7"; }  /* times  */
+        .speaker-led.is-down::after    { content: "\00D7"; font-size: 11px; }
+
+        /* ---- Busy indicator -----------------------------------------------
+           Surfaces the per-unit lock on the row, so two people don't start
+           conflicting actions on the same unit.                            */
+        .unit-busy-flag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 6px;
+            padding: 1px 7px;
+            border-radius: var(--radius-pill);
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--caution-deeper);
+            color: var(--caution-soft);
+            border: 1px solid var(--caution-deep);
+            white-space: nowrap;
+        }
+
+        /* ---- Quick actions row --------------------------------------------
+           The handful of actions used constantly, promoted out of the
+           nested command menus. Edit QUICK_ACTIONS in the script below to
+           change which appear.                                             */
+        .quick-actions {
+            display: inline-flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+        .quick-actions .quick-btn {
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            line-height: 1.6;
+        }
+        .quick-actions .quick-btn:hover:not(:disabled) {
+            background: var(--border-strong);
+            border-color: var(--border-subtle);
+        }
+        .quick-actions .quick-btn:disabled { opacity: 0.5; cursor: default; }
         h1, h2 { margin-bottom: 8px; }
         .progress-wrap {
             margin: 0 0 16px;
         }
         .progress-label {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 13px;
             margin-bottom: 6px;
         }
         .progress-track {
             height: 14px;
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 999px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-pill);
             overflow: hidden;
         }
         .progress-fill {
             height: 100%;
             width: 0%;
-            border-radius: 999px;
-            background-image: linear-gradient(90deg, #7c3aed, #2563eb, #06b6d4, #22c55e, #7c3aed);
+            border-radius: var(--radius-pill);
+            background-image: linear-gradient(90deg, var(--spark-violet), var(--accent), var(--spark-cyan), var(--ok), var(--spark-violet));
             background-size: 200% 100%;
             animation: progress-shift 2.4s linear infinite;
             transition: width 0.3s ease;
@@ -91,18 +294,18 @@
         .sandbox-banner {
             margin: 0 0 12px;
             padding: 10px 12px;
-            border-radius: 6px;
+            border-radius: var(--radius);
             font-size: 14px;
         }
         .automation-paused-banner {
-            background: #422006;
-            border: 1px solid #ca8a04;
-            color: #fde68a;
+            background: var(--caution-bg);
+            border: 1px solid var(--warn-deep);
+            color: var(--warn-soft);
         }
         .sandbox-banner {
-            background: #1e3a5f;
-            border: 1px solid #2563eb;
-            color: #bfdbfe;
+            background: var(--bg-info);
+            border: 1px solid var(--accent);
+            color: var(--accent-softer);
         }
         @media (max-width: 900px) {
             .layout { grid-template-columns: 1fr; }
@@ -116,57 +319,57 @@
         }
         .console-toolbar input[type="search"] {
             flex: 1;
-            background: #020617;
-            color: #e2e8f0;
-            border: 1px solid #334155;
-            border-radius: 6px;
+            background: var(--bg-deepest);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             padding: 8px 10px;
             font-size: 14px;
         }
         .console-toolbar input[type="search"]:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: var(--accent);
         }
         .console-match-count {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 13px;
             white-space: nowrap;
         }
         .console-toolbar button {
-            background: #1e293b;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 8px 12px;
             font-size: 13px;
             cursor: pointer;
             white-space: nowrap;
         }
         .console-toolbar button:hover {
-            background: #334155;
+            background: var(--border);
         }
         .console {
-            background: #020617;
-            color: #86efac;
-            border: 1px solid #334155;
-            border-radius: 8px;
+            background: var(--bg-deepest);
+            color: var(--ok-soft);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             padding: 12px;
             height: 60vh;
             overflow-y: auto;
-            font-family: Consolas, "Courier New", monospace;
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
             font-size: 13px;
             white-space: pre-wrap;
             word-break: break-word;
         }
         .console mark {
-            background: #ca8a04;
-            color: #020617;
-            border-radius: 2px;
+            background: var(--warn-deep);
+            color: var(--bg-deepest);
+            border-radius: var(--radius-sm);
             padding: 0 1px;
         }
         .panel {
-            background: #1e293b;
-            border-radius: 8px;
+            background: var(--bg-panel);
+            border-radius: var(--radius);
             padding: 16px;
             overflow: visible;
         }
@@ -204,16 +407,16 @@
             gap: 8px;
             flex-wrap: wrap;
             padding-bottom: 12px;
-            border-bottom: 1px solid #334155;
+            border-bottom: 1px solid var(--border);
             position: relative;
             z-index: 70;
         }
         .list-toolbar input[type="search"],
         .list-toolbar select {
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 8px 10px;
             font-size: 14px;
         }
@@ -228,10 +431,10 @@
         .list-toolbar .panel-mode-select {
             flex: 0 0 auto;
             min-width: 120px;
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 8px 10px;
             font-size: 14px;
             cursor: pointer;
@@ -240,46 +443,46 @@
         .list-toolbar select:focus,
         .list-toolbar .panel-mode-select:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: var(--accent);
         }
         .list-view-toggle {
             display: inline-flex;
         }
         .list-view-toggle button {
-            background: #0f172a;
-            color: #94a3b8;
-            border: 1px solid #475569;
+            background: var(--bg-sunken);
+            color: var(--text-muted);
+            border: 1px solid var(--border-strong);
             padding: 8px 10px;
             cursor: pointer;
         }
         .list-view-toggle button:first-child {
-            border-radius: 6px 0 0 6px;
+            border-radius: var(--radius) 0 0 var(--radius);
         }
         .list-view-toggle button:last-child {
             border-left: 0;
-            border-radius: 0 6px 6px 0;
+            border-radius: 0 var(--radius) var(--radius) 0;
         }
         .list-view-toggle button.is-active {
-            background: #2563eb;
-            border-color: #2563eb;
-            color: #ffffff;
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--text-on-accent);
         }
         .list-match-count {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 13px;
             white-space: nowrap;
         }
         .list-toolbar .toolbar-btn {
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 8px 10px;
             cursor: pointer;
             font-size: 14px;
         }
         .list-toolbar .toolbar-btn:hover {
-            border-color: #2563eb;
+            border-color: var(--accent);
         }
         .list-category-wrap {
             position: relative;
@@ -289,17 +492,17 @@
             align-items: center;
             gap: 8px;
             min-width: 220px;
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 8px 10px;
             font-size: 14px;
             cursor: pointer;
         }
         .list-category-toggle:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: var(--accent);
         }
         .list-category-toggle-text {
             flex: 1;
@@ -312,11 +515,11 @@
             left: 0;
             z-index: 80;
             min-width: 100%;
-            background: #0f172a;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 4px;
-            box-shadow: 0 12px 24px rgba(2, 6, 23, 0.55);
+            box-shadow: 0 12px 24px rgba(var(--bg-deepest-rgb), 0.55);
         }
         .list-category-wrap.is-open .list-category-options {
             display: block;
@@ -328,9 +531,9 @@
             gap: 10px;
             width: 100%;
             background: transparent;
-            color: #e2e8f0;
+            color: var(--text);
             border: 0;
-            border-radius: 4px;
+            border-radius: var(--radius-sm);
             padding: 8px 10px;
             font-size: 14px;
             text-align: left;
@@ -338,16 +541,58 @@
         }
         .list-category-option:hover,
         .list-category-option.is-selected {
-            background: #1e3a5f;
+            background: var(--bg-info);
         }
         .list-category-toggle .complete-badge,
         .list-category-option .complete-badge {
             display: inline-block;
         }
+        /* Multi-select additions: a checkbox and a live count per list. */
+        .list-category-option input[type="checkbox"] {
+            margin: 0 8px 0 0;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .list-category-option .option-label {
+            flex: 1;
+            text-align: left;
+        }
+        .list-category-option .option-count {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            background: var(--bg-panel);
+            border-radius: var(--radius-pill);
+            padding: 1px 7px;
+            min-width: 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .list-category-option.is-selected .option-count { color: var(--accent-softest); }
+        .list-category-option.is-empty { opacity: 0.5; }
+        .list-category-option.is-complete .option-count { color: var(--ok-text); }
+        .list-category-actions {
+            display: flex;
+            justify-content: space-between;
+            gap: 6px;
+            border-top: 1px solid var(--border);
+            margin-top: 4px;
+            padding-top: 6px;
+        }
+        .list-category-actions button {
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .list-category-actions button:hover { background: var(--border); }
         .confirm-modal {
             position: fixed;
             inset: 0;
-            background: rgba(2, 6, 23, 0.82);
+            background: rgba(var(--bg-deepest-rgb), 0.82);
             display: none;
             align-items: center;
             justify-content: center;
@@ -359,27 +604,27 @@
         }
         .confirm-dialog {
             width: min(440px, 100%);
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             padding: 20px;
-            box-shadow: 0 16px 40px rgba(2, 6, 23, 0.6);
+            box-shadow: 0 16px 40px rgba(var(--bg-deepest-rgb), 0.6);
         }
         .confirm-dialog h2 {
             margin: 0 0 10px;
             font-size: 18px;
-            color: #e2e8f0;
+            color: var(--text);
         }
         .confirm-dialog p {
             margin: 0 0 18px;
-            color: #cbd5e1;
+            color: var(--text-secondary);
             font-size: 14px;
             line-height: 1.45;
         }
         .tech-checks-task-list {
             margin: 0 0 18px;
             padding-left: 1.25rem;
-            color: #cbd5e1;
+            color: var(--text-secondary);
             font-size: 13px;
             line-height: 1.4;
         }
@@ -392,20 +637,20 @@
             gap: 8px;
         }
         .confirm-actions button {
-            border-radius: 6px;
+            border-radius: var(--radius);
             padding: 8px 12px;
             font-size: 14px;
             cursor: pointer;
         }
         .confirm-cancel {
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
         }
         .confirm-ok {
-            background: #2563eb;
-            color: #ffffff;
-            border: 1px solid #2563eb;
+            background: var(--accent);
+            color: var(--text-on-accent);
+            border: 1px solid var(--accent);
         }
         .confirm-ok:disabled,
         .confirm-ok.is-disabled {
@@ -428,7 +673,7 @@
             gap: 8px;
             align-items: start;
             padding: 4px 6px;
-            border-radius: 6px;
+            border-radius: var(--radius);
             border-left: 3px solid transparent;
             flex-wrap: nowrap;
         }
@@ -436,8 +681,8 @@
             grid-template-columns: auto minmax(0, 1fr);
         }
         .panel li.ticket-row.menu-open {
-            background: #1e3a5f;
-            border-left-color: #2563eb;
+            background: var(--bg-info);
+            border-left-color: var(--accent);
         }
         .ticket-row-body {
             display: flex;
@@ -464,7 +709,7 @@
             grid-column: 2;
         }
         .unit-tools-hint {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 13px;
         }
         .panel li:has(.command-menu[open]),
@@ -491,18 +736,18 @@
             line-height: 16px;
             flex-shrink: 0;
         }
-        .legend-r { color: #4ade80; }
-        .legend-w { color: #86efac; }
-        .legend-s { color: #facc15; }
+        .legend-r { color: var(--ok-text); }
+        .legend-w { color: var(--ok-soft); }
+        .legend-s { color: var(--warn-text); }
         .panel li input[type="checkbox"] {
             appearance: none;
             -webkit-appearance: none;
             width: 16px;
             height: 16px;
             margin: 0;
-            border: 2px solid #64748b;
-            border-radius: 3px;
-            background: #0f172a;
+            border: 2px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            background: var(--bg-sunken);
             cursor: pointer;
             flex-shrink: 0;
             position: relative;
@@ -514,30 +759,30 @@
             top: 0px;
             width: 4px;
             height: 8px;
-            border: solid #ffffff;
+            border: solid var(--text-on-accent);
             border-width: 0 2px 2px 0;
             transform: rotate(45deg);
         }
         .panel li input[type="checkbox"].resolve-box:checked {
-            background: #166534;
-            border-color: #166534;
+            background: var(--ok-deep);
+            border-color: var(--ok-deep);
         }
         .panel li input[type="checkbox"].worked-box:checked {
-            background: #2563eb;
-            border-color: #2563eb;
+            background: var(--accent);
+            border-color: var(--accent);
         }
         .panel li input[type="checkbox"].skip-box:checked {
-            background: #ca8a04;
-            border-color: #ca8a04;
+            background: var(--warn-deep);
+            border-color: var(--warn-deep);
         }
-        .count { color: #94a3b8; font-size: 13px; font-weight: normal; }
+        .count { color: var(--text-muted); font-size: 13px; font-weight: normal; }
         .complete-badge {
             display: none;
             margin-left: 8px;
             padding: 1px 8px;
-            border-radius: 999px;
-            background: #166534;
-            color: #bbf7d0;
+            border-radius: var(--radius-pill);
+            background: var(--ok-deep);
+            color: var(--ok-softer);
             font-size: 12px;
             font-weight: 700;
             letter-spacing: 0.03em;
@@ -549,17 +794,17 @@
         h2 .list-revalidate-btn {
             margin-left: 10px;
             vertical-align: middle;
-            background: #0f172a;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 6px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
             padding: 2px 8px;
             font-size: 12px;
             font-weight: 600;
             cursor: pointer;
         }
         h2 .list-revalidate-btn:hover:not(:disabled) {
-            border-color: #2563eb;
+            border-color: var(--accent);
         }
         h2 .list-revalidate-btn:disabled {
             opacity: 0.45;
@@ -571,20 +816,20 @@
             padding-bottom: 8px;
         }
         .resolved-counter {
-            color: #4ade80;
+            color: var(--ok-text);
             font-size: 16px;
             font-weight: 600;
             white-space: nowrap;
         }
         .worked-counter {
-            color: #86efac;
+            color: var(--ok-soft);
             font-size: 16px;
             font-weight: 600;
             white-space: nowrap;
             margin-top: 2px;
         }
         .skipped-counter {
-            color: #facc15;
+            color: var(--warn-text);
             font-size: 16px;
             font-weight: 600;
             white-space: nowrap;
@@ -603,10 +848,10 @@
             opacity: 0.75;
         }
         .action-btn {
-            background: #334155;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 4px;
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
             padding: 2px 8px;
             font-size: 12px;
             cursor: pointer;
@@ -614,12 +859,12 @@
             white-space: nowrap;
         }
         .action-btn:hover {
-            background: #475569;
+            background: var(--border-strong);
         }
         .action-btn.is-active {
-            background: #b45309;
-            border-color: #d97706;
-            color: #fff7ed;
+            background: var(--caution-deep);
+            border-color: var(--caution-border);
+            color: var(--caution-softest);
         }
         .action-btn:disabled,
         .action-btn.is-disabled {
@@ -637,10 +882,10 @@
         }
         .command-menu summary {
             list-style: none;
-            background: #334155;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 4px;
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
             padding: 4px 10px;
             font-size: 12px;
             font-weight: 600;
@@ -655,7 +900,7 @@
             font-size: 10px;
         }
         .command-menu[open] summary {
-            background: #475569;
+            background: var(--border-strong);
         }
         .command-menu-items {
             position: absolute;
@@ -668,10 +913,10 @@
             flex-direction: column;
             gap: 2px;
             padding: 6px;
-            background: #0f172a;
-            border: 1px solid #475569;
-            border-radius: 6px;
-            box-shadow: 0 8px 24px rgba(2, 6, 23, 0.65);
+            background: var(--bg-sunken);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            box-shadow: 0 8px 24px rgba(var(--bg-deepest-rgb), 0.65);
         }
         .command-menu-items .action-btn {
             display: block;
@@ -682,28 +927,64 @@
         .command-menu-context {
             padding-bottom: 6px;
             margin-bottom: 6px;
-            border-bottom: 1px solid #334155;
+            border-bottom: 1px solid var(--border);
             font-size: 12px;
             line-height: 1.35;
         }
         .command-menu-context strong {
-            color: #e2e8f0;
+            color: var(--text);
             display: block;
         }
         .command-menu-context span {
-            color: #94a3b8;
+            color: var(--text-muted);
             display: block;
             margin-top: 2px;
+        }
+        .unit-busy-banner {
+            margin-top: 6px;
+            padding: 6px 8px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            line-height: 1.4;
+            background: rgba(var(--caution-border-rgb), 0.15);
+            border: 1px solid var(--caution-border);
+            color: var(--caution-text);
+        }
+        .unit-busy-banner button {
+            margin-top: 4px;
+            font-size: 11px;
+            padding: 2px 6px;
+        }
+        .unit-notes-box {
+            margin-top: 6px;
+        }
+        .unit-notes-box textarea {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 44px;
+            resize: vertical;
+            font-size: 12px;
+            font-family: inherit;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 4px 6px;
+        }
+        .unit-notes-box .note-status {
+            font-size: 11px;
+            color: var(--border-subtle);
+            margin-left: 6px;
         }
         .command-submenu {
             position: relative;
         }
         .command-submenu > summary {
             list-style: none;
-            background: #1e293b;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 4px;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
             padding: 2px 8px;
             font-size: 12px;
             cursor: pointer;
@@ -721,7 +1002,7 @@
             float: right;
         }
         .command-submenu[open] > summary {
-            background: #334155;
+            background: var(--border);
         }
         .command-menu-items .command-submenu[open] {
             z-index: 5;
@@ -732,30 +1013,30 @@
             gap: 2px;
             margin-top: 4px;
             padding: 4px;
-            background: #020617;
-            border: 1px solid #334155;
-            border-radius: 4px;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
         }
         .command-browser-toggle {
             display: flex;
             gap: 4px;
             margin-bottom: 4px;
             padding-bottom: 4px;
-            border-bottom: 1px solid #334155;
+            border-bottom: 1px solid var(--border);
         }
         .command-browser-toggle button {
             flex: 1;
-            background: #1e293b;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 4px;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
             padding: 2px 6px;
             font-size: 11px;
             cursor: pointer;
         }
         .command-browser-toggle button.is-active {
-            background: #334155;
-            border-color: #94a3b8;
+            background: var(--border);
+            border-color: var(--text-muted);
         }
         .command-browser-toggle button:disabled {
             opacity: 0.6;
@@ -771,24 +1052,24 @@
             height: 12px;
             border-radius: 50%;
             flex-shrink: 0;
-            background: #64748b;
-            box-shadow: 0 0 6px rgba(100, 116, 139, 0.8);
+            background: var(--led-idle);
+            box-shadow: 0 0 6px rgba(var(--led-idle-rgb), 0.8);
         }
         .speaker-led.is-up {
-            background: #22c55e;
-            box-shadow: 0 0 8px rgba(34, 197, 94, 0.95);
+            background: var(--ok);
+            box-shadow: 0 0 8px rgba(var(--ok-rgb), 0.95);
         }
         .speaker-led.is-down {
-            background: #ef4444;
-            box-shadow: 0 0 8px rgba(239, 68, 68, 0.95);
+            background: var(--danger);
+            box-shadow: 0 0 8px rgba(var(--danger-rgb), 0.95);
         }
         .speaker-led.is-warning {
-            background: #eab308;
-            box-shadow: 0 0 8px rgba(234, 179, 8, 0.95);
+            background: var(--warn);
+            box-shadow: 0 0 8px rgba(var(--warn-rgb), 0.95);
         }
         .speaker-led.is-multi {
-            background: #f97316;
-            box-shadow: 0 0 8px rgba(249, 115, 22, 0.95);
+            background: var(--alert);
+            box-shadow: 0 0 8px rgba(var(--alert-rgb), 0.95);
         }
         .wx-icon {
             width: 18px;
@@ -809,13 +1090,13 @@
         }
         .wx-icon.wx-pending {
             opacity: 0.35;
-            background: #64748b;
-            border-radius: 3px;
+            background: var(--border-subtle);
+            border-radius: var(--radius-sm);
         }
         .wx-icon.wx-sun {
             background:
-                linear-gradient(#f59e0b, #f59e0b) center / 2px 100% no-repeat,
-                linear-gradient(#f59e0b, #f59e0b) center / 100% 2px no-repeat;
+                linear-gradient(var(--caution), var(--caution)) center / 2px 100% no-repeat,
+                linear-gradient(var(--caution), var(--caution)) center / 100% 2px no-repeat;
         }
         .wx-icon.wx-sun::before {
             content: "";
@@ -826,8 +1107,8 @@
             height: 6px;
             margin: -3px 0 0 -3px;
             border-radius: 50%;
-            background: #fde047;
-            box-shadow: 0 0 4px rgba(253, 224, 71, 0.95);
+            background: var(--warn-bright);
+            box-shadow: 0 0 4px rgba(var(--warn-bright-rgb), 0.95);
             z-index: 1;
         }
         .wx-icon.wx-sun::after {
@@ -835,8 +1116,8 @@
             position: absolute;
             inset: -1px;
             background:
-                linear-gradient(#f59e0b, #f59e0b) center / 2px 100% no-repeat,
-                linear-gradient(#f59e0b, #f59e0b) center / 100% 2px no-repeat;
+                linear-gradient(var(--caution), var(--caution)) center / 2px 100% no-repeat,
+                linear-gradient(var(--caution), var(--caution)) center / 100% 2px no-repeat;
             transform: rotate(45deg);
         }
         .wx-icon.wx-cloud::before,
@@ -852,9 +1133,9 @@
             right: 1px;
             top: 3px;
             height: 7px;
-            border-radius: 8px;
-            background: #cbd5e1;
-            box-shadow: 3px -2px 0 1px #94a3b8, -3px -1px 0 0 #94a3b8;
+            border-radius: var(--radius);
+            background: var(--text-secondary);
+            box-shadow: 3px -2px 0 1px var(--text-muted), -3px -1px 0 0 var(--text-muted);
         }
         /* Partly cloudy: bright sun clearly beside / behind cloud */
         .wx-icon.wx-sun-cloud::after {
@@ -865,14 +1146,14 @@
             right: -1px;
             top: -1px;
             border-radius: 50%;
-            background: #fde047;
-            box-shadow: 0 0 5px rgba(253, 224, 71, 0.95);
+            background: var(--warn-bright);
+            box-shadow: 0 0 5px rgba(var(--warn-bright-rgb), 0.95);
             z-index: -1;
         }
         /* Mostly cloudy: larger gray cloud, tiny sun barely peeking */
         .wx-icon.wx-cloud-mostly::before {
-            background: #94a3b8;
-            box-shadow: 4px -2px 0 2px #64748b, -4px -1px 0 1px #64748b;
+            background: var(--text-muted);
+            box-shadow: 4px -2px 0 2px var(--border-subtle), -4px -1px 0 1px var(--border-subtle);
             height: 8px;
             top: 2px;
         }
@@ -884,8 +1165,8 @@
             left: 1px;
             top: 0;
             border-radius: 50%;
-            background: #fbbf24;
-            box-shadow: 0 0 3px rgba(251, 191, 36, 0.7);
+            background: var(--caution-text);
+            box-shadow: 0 0 3px rgba(var(--caution-text-rgb), 0.7);
             z-index: -1;
             opacity: 0.85;
         }
@@ -898,22 +1179,22 @@
             bottom: 0;
             height: 4px;
             background:
-                radial-gradient(circle at 20% 50%, #38bdf8 1.2px, transparent 1.4px),
-                radial-gradient(circle at 50% 80%, #38bdf8 1.2px, transparent 1.4px),
-                radial-gradient(circle at 80% 40%, #38bdf8 1.2px, transparent 1.4px);
+                radial-gradient(circle at 20% 50%, var(--info) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, var(--info) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, var(--info) 1.2px, transparent 1.4px);
         }
         .wx-icon.wx-cloud-snow::after {
             background:
-                radial-gradient(circle at 20% 50%, #e2e8f0 1.2px, transparent 1.4px),
-                radial-gradient(circle at 50% 80%, #e2e8f0 1.2px, transparent 1.4px),
-                radial-gradient(circle at 80% 40%, #e2e8f0 1.2px, transparent 1.4px);
+                radial-gradient(circle at 20% 50%, var(--text) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, var(--text) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, var(--text) 1.2px, transparent 1.4px);
         }
         .wx-icon.wx-fog::before {
             height: 2px;
             top: 4px;
-            box-shadow: 0 3px 0 #94a3b8, 0 6px 0 #64748b;
-            background: #94a3b8;
-            border-radius: 2px;
+            box-shadow: 0 3px 0 var(--text-muted), 0 6px 0 var(--border-subtle);
+            background: var(--text-muted);
+            border-radius: var(--radius-sm);
         }
         .wx-icon.wx-cloud-lightning::after {
             content: "";
@@ -922,10 +1203,10 @@
             top: 7px;
             width: 4px;
             height: 7px;
-            background: #fde047;
+            background: var(--warn-bright);
             clip-path: polygon(40% 0, 100% 0, 55% 45%, 90% 45%, 0 100%, 35% 50%, 5% 50%);
             animation: wx-bolt-flash 1.2s ease-in-out infinite;
-            filter: drop-shadow(0 0 3px #facc15);
+            filter: drop-shadow(0 0 3px var(--warn-text));
         }
         .wx-icon.wx-cloud-lightning::before {
             animation: wx-cloud-drift 2.4s ease-in-out infinite;
@@ -942,7 +1223,7 @@
         .snapshot-modal {
             position: fixed;
             inset: 0;
-            background: rgba(2, 6, 23, 0.82);
+            background: rgba(var(--bg-deepest-rgb), 0.82);
             display: none;
             align-items: center;
             justify-content: center;
@@ -968,69 +1249,95 @@
         .snapshot-modal img {
             max-width: 95vw;
             max-height: calc(90vh - 48px);
-            border: 1px solid #334155;
-            border-radius: 8px;
-            background: #020617;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-deepest);
         }
         .snapshot-modal .snapshot-status {
-            color: #e2e8f0;
+            color: var(--text);
             font-size: 16px;
         }
         .nav-links {
             margin-top: 10px;
         }
-        a { color: #93c5fd; }
-        .empty { color: #94a3b8; }
+        a { color: var(--accent-soft); }
+        .empty { color: var(--text-muted); }
         .meta {
-            color: #94a3b8;
+            color: var(--text-muted);
             font-size: 12px;
         }
         .undiagnosed-row {
-            color: #fecaca;
+            color: var(--danger-soft);
         }
         .undiagnosed-badge {
-            color: #fecaca;
+            color: var(--danger-soft);
             font-weight: bold;
             font-size: 12px;
         }
         .new-ticket-badge {
-            color: #4ade80;
+            color: var(--ok-text);
             font-size: 12px;
             font-weight: 700;
             white-space: nowrap;
         }
         .discarded-list li {
             display: block;
-            color: #94a3b8;
+            color: var(--text-muted);
             padding: 4px 0;
         }
         .discarded-reason {
-            color: #fca5a5;
+            color: var(--danger-text);
             font-size: 12px;
+        }
+        .stats-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 4px 0 12px;
+        }
+        .stats-chip {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 4px 10px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .stats-chip strong {
+            color: var(--text);
+            font-size: 13px;
+        }
+        .stats-chip.is-warning {
+            border-color: var(--caution-border);
+            color: var(--caution-text);
+        }
+        .stats-chip.is-warning strong {
+            color: var(--caution-text);
         }
     </style>
 </head>
 <body>
 
     <nav class="app-nav" aria-label="Primary">
-        <a class="nav-brand" href="/">Issues Dashboard{% if is_sandbox %} <span style="font-weight:500;color:#93c5fd;">(Sandbox)</span>{% endif %}</a>
+        <a class="nav-brand" href="/">Issues Dashboard{% if is_sandbox %} <span style="font-weight:500;color:var(--accent-soft);">(Sandbox)</span>{% endif %}</a>
         <a class="nav-link" href="/recovery_email">Recovery Email Check</a>
     </nav>
 
     <div class="layout header-row">
-        <h1>Issues Dashboard{% if is_sandbox %} <span style="font-size:16px;color:#93c5fd;">(Sandbox)</span>{% endif %}</h1>
+        <h1>Issues Dashboard{% if is_sandbox %} <span style="font-size:16px;color:var(--accent-soft);">(Sandbox)</span>{% endif %}</h1>
         <div class="ticket-counters">
             <div class="resolved-counter" id="tickets_resolved">Tickets resolved today: 0</div>
             <div class="worked-counter" id="tickets_worked">Tickets worked: 0</div>
             <div class="skipped-counter" id="tickets_skipped">Tickets skipped: 0</div>
         </div>
     </div>
-    <p class="status" id="status">Running validation... live stdout below.</p>
+    <div class="stats-strip" id="stats_strip"></div>
+    <p class="status" id="status" role="status" aria-live="polite" aria-atomic="true">Running validation... live stdout below.</p>
     {% if is_sandbox %}
     <p class="sandbox-banner" id="sandbox_banner">
         Sandbox on port {{ work_tool_port }} — same ERP credentials, separate resolved/upload data,
         no 4:00 AM jobs, and no automatic ERP polling. Use Pull Issues to refresh manually.
-        Live: <a href="http://127.0.0.1:5000/" style="color:#bfdbfe;">http://127.0.0.1:5000/</a>
+        Live: <a href="http://127.0.0.1:5000/" style="color:var(--accent-softer);">http://127.0.0.1:5000/</a>
     </p>
     {% elif automation_paused %}
     <p class="automation-paused-banner" id="automation_paused_banner">
@@ -1060,7 +1367,7 @@
                 <button type="button" id="console_clear" title="Clear stdout window">Clear</button>
                 <span class="console-match-count" id="console_match_count"></span>
             </div>
-            <div class="console" id="console"></div>
+            <div class="console" id="console" role="log" aria-live="polite" aria-atomic="false" aria-label="Validation output"></div>
             <div class="nav-links">
                 <a href="/">Refresh dashboard</a>
             </div>
@@ -1078,29 +1385,15 @@
                     <button type="button" id="show_one_list" aria-pressed="false">One list</button>
                 </div>
                 <div class="list-category-wrap" id="list_category_wrap" hidden>
-                    <select id="list_category" aria-label="Select outage list" hidden>
-                        <option value="false_positives" data-label="Up Steady">Up Steady</option>
-                        <option value="nuc_down" data-label="Offline compute">Offline compute</option>
-                        <option value="scrypted_outage" data-label="Scrypted outage">Scrypted outage</option>
-                        <option value="speaker_outage" data-label="Speaker outage">Speaker outage</option>
-                        <option value="camera_outage" data-label="Camera outage">Camera outage</option>
-                        <option value="truly_down" data-label="Down Full">Down Full</option>
-                        <option value="panel_issues" data-label="Panel issues">Panel issues</option>
-                        <option value="camera_view" data-label="Camera View">Camera View</option>
-                        <option value="on_hold" data-label="On Hold">On Hold</option>
-                        <option value="monitoring_hours" data-label="Monitoring Hours">Monitoring Hours</option>
-                        <option value="termination" data-label="Termination">Termination</option>
-                        <option value="relocation" data-label="Relocation">Relocation</option>
-                        <option value="discarded_tickets" data-label="Miscellaneous">Miscellaneous</option>
-                    </select>
-                    <button type="button" class="list-category-toggle" id="list_category_toggle" aria-haspopup="listbox" aria-expanded="false">
-                        <span class="list-category-toggle-text" id="list_category_toggle_text">Up Steady</span>
+                    <button type="button" class="list-category-toggle" id="list_category_toggle" aria-haspopup="true" aria-expanded="false">
+                        <span class="list-category-toggle-text" id="list_category_toggle_text">Select lists</span>
                     </button>
-                    <div class="list-category-options" id="list_category_options" role="listbox"></div>
+                    <div class="list-category-options" id="list_category_options" role="group" aria-label="Select lists to show"></div>
                 </div>
                 <button type="button" id="clear_checkboxes" class="toolbar-btn">Clear checkboxes</button>
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
                 <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
+                <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
             <div class="list-section" id="unit_tools_section" data-panel="issues" hidden>
@@ -1295,6 +1588,28 @@
             </div>
         </div>
     </div>
+    <div class="confirm-modal" id="security_fix_modal">
+        <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="security_fix_title">
+            <h2 id="security_fix_title">Security Update Fix</h2>
+            <p id="security_fix_message">This will SSH to PVE and Scrypted and run the security update fix.</p>
+            <div id="security_fix_log" style="max-height:220px; overflow-y:auto; background:rgba(0,0,0,0.25); padding:8px; border-radius:4px; font-family:monospace; font-size:12px; white-space:pre-wrap; margin:8px 0;"></div>
+            <button type="button" id="security_fix_force_clear" class="toolbar-btn" hidden style="margin-bottom:8px;">Force Clear Lock (stuck job?)</button>
+            <div class="confirm-actions">
+                <button type="button" class="confirm-cancel" id="security_fix_cancel">Cancel</button>
+                <button type="button" class="confirm-ok" id="security_fix_action">Start</button>
+            </div>
+        </div>
+    </div>
+    <div class="confirm-modal" id="generic_confirm_modal">
+        <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="generic_confirm_title">
+            <h2 id="generic_confirm_title">Are you sure?</h2>
+            <p id="generic_confirm_message"></p>
+            <div class="confirm-actions">
+                <button type="button" class="confirm-cancel" id="generic_confirm_cancel">Cancel</button>
+                <button type="button" class="confirm-ok" id="generic_confirm_action">Confirm</button>
+            </div>
+        </div>
+    </div>
     <div class="confirm-modal" id="bounce_switch_modal">
         <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="bounce_switch_title">
             <h2 id="bounce_switch_title">Bounce switch?</h2>
@@ -1403,8 +1718,8 @@
     <script>
         const jobId = {{ job_id|tojson }};
         const workTLD = {{ work_tld|tojson }};
-        const meshBaseUrl = {{ mesh_base_url|default("https://meshcentral.sentracam.com/login?filter=")|tojson }};
-        const raindanceBaseUrl = {{ raindance_base_url|default("https://raindance.sentracam.net/unit/")|tojson }};
+        const meshBaseUrl = {{ mesh_base_url|default('https://meshcentral.sentracam.com/login?filter=')|tojson }};
+        const raindanceBaseUrl = {{ raindance_base_url|default('https://raindance.sentracam.net/unit/')|tojson }};
         const automationPaused = {{ automation_paused|default(false)|tojson }};
         const erpWritesDisabled = {{ erp_writes_disabled|default(true)|tojson }};
         const ERP_WRITES_DISABLED_TITLE =
@@ -1425,15 +1740,14 @@
         const consoleMatchCountEl = document.getElementById("console_match_count");
         const listSearchEl = document.getElementById("list_search");
         const listMatchCountEl = document.getElementById("list_match_count");
-        const panelModeEl = document.getElementById("panel_mode");
         const listViewToggle = document.getElementById("list_view_toggle");
         const showAllListsBtn = document.getElementById("show_all_lists");
         const showOneListBtn = document.getElementById("show_one_list");
-        const listCategoryEl = document.getElementById("list_category");
         const listCategoryWrap = document.getElementById("list_category_wrap");
         const listCategoryToggle = document.getElementById("list_category_toggle");
         const listCategoryToggleText = document.getElementById("list_category_toggle_text");
         const listCategoryOptions = document.getElementById("list_category_options");
+        const panelModeEl = document.getElementById("panel_mode");
         const clearCheckboxesBtn = document.getElementById("clear_checkboxes");
         const pullErpBtn = document.getElementById("pull_erp");
         const updateWeatherBtn = document.getElementById("update_weather");
@@ -1446,6 +1760,69 @@
         const patchUpdateConfirm = document.getElementById("patch_update_confirm");
         let patchUpdateUnit = "";
         let patchUpdateButton = null;
+        const genericConfirmModal = document.getElementById("generic_confirm_modal");
+        const genericConfirmTitle = document.getElementById("generic_confirm_title");
+        const genericConfirmMessage = document.getElementById("generic_confirm_message");
+        const genericConfirmCancel = document.getElementById("generic_confirm_cancel");
+        const genericConfirmAction = document.getElementById("generic_confirm_action");
+        let genericConfirmHandler = null;
+
+        function closeGenericConfirmModal() {
+            genericConfirmModal.classList.remove("is-open");
+            genericConfirmHandler = null;
+        }
+
+        function openGenericConfirmModal(title, message, actionLabel, onConfirm) {
+            genericConfirmTitle.textContent = title;
+            genericConfirmMessage.textContent = message;
+            genericConfirmAction.textContent = actionLabel;
+            genericConfirmAction.disabled = false;
+            genericConfirmHandler = onConfirm;
+            genericConfirmModal.classList.add("is-open");
+            genericConfirmCancel.focus();
+        }
+
+        genericConfirmCancel.addEventListener("click", closeGenericConfirmModal);
+        genericConfirmAction.addEventListener("click", function () {
+            const handler = genericConfirmHandler;
+            closeGenericConfirmModal();
+            if (handler) {
+                handler();
+            }
+        });
+        genericConfirmModal.addEventListener("click", function (event) {
+            if (event.target === genericConfirmModal) {
+                closeGenericConfirmModal();
+            }
+        });
+
+        const securityFixModal = document.getElementById("security_fix_modal");
+        const securityFixMessage = document.getElementById("security_fix_message");
+        const securityFixLog = document.getElementById("security_fix_log");
+        const securityFixCancel = document.getElementById("security_fix_cancel");
+        const securityFixAction = document.getElementById("security_fix_action");
+        const securityFixForceClear = document.getElementById("security_fix_force_clear");
+        let securityFixUnit = "";
+        let securityFixButton = null;
+        let securityFixVersion = null;
+        let securityFixPhase = "start";
+        let securityFixToken = null;
+        let securityFixLockedByOther = false;
+        // Maps the server-persisted job phase back to the client wizard phase
+        // that should run next, so a page refresh can resume mid-wizard.
+        const SECURITY_FIX_RESUME_PHASE = {
+            start: "start",
+            step1_done: "awaiting_webui",
+            step2_done: "awaiting_reboot",
+            step2_failed: "awaiting_webui",
+            shutdown_done: "awaiting_shutdown",
+            shutdown_failed: "awaiting_reboot",
+            finish_done: "verify",
+            finish_failed: "awaiting_shutdown",
+            verify_done: "restart",
+            verify_warning: "restart",
+            verify_failed: "verify",
+        };
         const bounceSwitchModal = document.getElementById("bounce_switch_modal");
         const bounceSwitchMessage = document.getElementById("bounce_switch_message");
         const bounceSwitchCancel = document.getElementById("bounce_switch_cancel");
@@ -1533,6 +1910,79 @@
         const progressFillEl = document.getElementById("progress_fill");
         const progressLabelEl = document.getElementById("progress_label");
         const consoleLines = [];
+
+        // The console used to grow without bound while renderConsole()
+        // re-joined the whole array on every append — a 300-second long ping
+        // plus a validation run made the pane visibly lag. Keep a bounded
+        // buffer and drop the oldest lines.
+        const CONSOLE_MAX_LINES = 5000;
+        const CONSOLE_TRIM_CHUNK = 500;
+
+        function trimConsoleLines() {
+            if (consoleLines.length > CONSOLE_MAX_LINES) {
+                // Trim in chunks so this is amortised rather than per-line.
+                const excess = consoleLines.length - CONSOLE_MAX_LINES + CONSOLE_TRIM_CHUNK;
+                consoleLines.splice(0, excess);
+                consoleLines.unshift(
+                    "… earlier output trimmed (console keeps the last "
+                    + CONSOLE_MAX_LINES.toLocaleString() + " lines) …"
+                );
+            }
+        }
+
+        // ---- Toasts ---------------------------------------------------------
+        // Replaces notifyError(). Every caller already pushes its message to
+        // the console and statusEl, so this is a third, non-blocking surface
+        // rather than a modal that freezes the tab mid-stream.
+        const TOAST_TIMEOUT_MS = 6000;
+        let toastStackEl = null;
+
+        function ensureToastStack() {
+            if (!toastStackEl) {
+                toastStackEl = document.createElement("div");
+                toastStackEl.className = "toast-stack";
+                toastStackEl.setAttribute("role", "status");
+                toastStackEl.setAttribute("aria-live", "polite");
+                document.body.appendChild(toastStackEl);
+            }
+            return toastStackEl;
+        }
+
+        function notify(message, kind) {
+            const text = String(message == null ? "" : message).trim();
+            if (!text) {
+                return null;
+            }
+            const stack = ensureToastStack();
+            const toast = document.createElement("div");
+            toast.className = "toast" + (kind ? " is-" + kind : "");
+            toast.textContent = text;
+
+            const close = document.createElement("button");
+            close.type = "button";
+            close.className = "toast-close";
+            close.setAttribute("aria-label", "Dismiss");
+            close.textContent = "×";
+            close.addEventListener("click", function () {
+                toast.remove();
+            });
+            toast.appendChild(close);
+            stack.appendChild(toast);
+
+            // Errors stay until dismissed — at 3 AM a failure that vanishes
+            // before you look up is worse than one you have to click away.
+            if (kind !== "error") {
+                window.setTimeout(function () {
+                    toast.remove();
+                }, TOAST_TIMEOUT_MS);
+            }
+            return toast;
+        }
+
+        function notifyError(message) {
+            return notify(message, "error");
+        }
+
         const workToolPort = {{ work_tool_port|default(5000)|tojson }};
         const ticketStateStorageKey = "workToolIssueCheckboxesV1_" + workToolPort;
         const unitToolsStorageKey = "workToolUnitToolsV1_" + workToolPort;
@@ -1714,7 +2164,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (isIcon) {
@@ -1924,6 +2374,7 @@
         startWeatherAutoRefresh();
 
         function renderConsole(scrollToBottom) {
+            trimConsoleLines();
             const query = (consoleSearchEl.value || "").trim();
             if (!query) {
                 consoleEl.textContent = consoleLines.join("\n") + (consoleLines.length ? "\n" : "");
@@ -2157,7 +2608,7 @@
                     if (!window.isSecureContext) {
                         message += " (This page is not on HTTPS or localhost; try opening it as http://127.0.0.1 instead of the machine name.)";
                     }
-                    window.alert("Copy failed: " + message);
+                    notifyError("Copy failed: " + message);
                 });
         }
 
@@ -2326,10 +2777,55 @@
         let unitToolsSearchTimer = null;
         let lastLoadedUnitToolsQuery = "";
         let teamResolvedIds = new Set();
+        // "Resolve Selected" toolbar action: gathers every ticket whose Resolved
+        // checkbox is checked (across all issue lists) and finalizes them —
+        // checking Resolved no longer removes a ticket from the list by itself.
+        const resolveSelectedBtn = document.getElementById("resolve_selected");
+        const resolveSelectedCountEl = document.getElementById("resolve_selected_count");
+
+        function getResolvedCheckedEntries() {
+            const entries = [];
+            issueListIds.forEach(function (id) {
+                (listState[id] || []).forEach(function (entry) {
+                    if (entry.resolved) {
+                        entries.push(entry);
+                    }
+                });
+            });
+            return entries;
+        }
+
+        function updateResolveSelectedButton() {
+            const count = getResolvedCheckedEntries().length;
+            resolveSelectedCountEl.textContent = String(count);
+            resolveSelectedBtn.disabled = count === 0;
+        }
+
+        resolveSelectedBtn.addEventListener("click", function () {
+            const entries = getResolvedCheckedEntries();
+            if (!entries.length) {
+                return;
+            }
+            resolveSelectedBtn.disabled = true;
+            entries.forEach(function (entry) {
+                markIssueResolved(entry);
+            });
+            updateResolveSelectedButton();
+        });
         let resolvedTodayCount = 0;
         const ticketsResolvedEl = document.getElementById("tickets_resolved");
         const ticketsWorkedEl = document.getElementById("tickets_worked");
         const ticketsSkippedEl = document.getElementById("tickets_skipped");
+        const statsStripEl = document.getElementById("stats_strip");
+        const DOWN_STATS_LISTS = [
+            { id: "nuc_down", label: "Offline compute" },
+            { id: "scrypted_outage", label: "Scrypted outage" },
+            { id: "speaker_outage", label: "Speaker outage" },
+            { id: "camera_outage", label: "Camera outage" },
+            { id: "truly_down", label: "Down full" },
+            { id: "panel_issues", label: "Panel issues" },
+        ];
+        let busyUnitsCount = 0;
 
         listIds.forEach(function (id) {
             listState[id] = [];
@@ -2438,79 +2934,260 @@
             { value: "projects_in_progress", label: "In Progress" },
             { value: "projects_prep", label: "Deployment Prep" },
         ];
-        let selectedIssueCategory = "false_positives";
-        let selectedProjectCategory = "projects_open";
 
-        function syncListCategoryOptions() {
-            const projectsMode = currentPanelMode() === "projects";
-            const options = projectsMode ? projectCategoryOptions : issueCategoryOptions;
-            const preferred = projectsMode
-                ? selectedProjectCategory
-                : selectedIssueCategory;
-            const previousComplete = {};
-            Array.from(listCategoryEl.options).forEach(function (option) {
-                previousComplete[option.value] =
-                    option.getAttribute("data-complete") === "true";
-            });
-            listCategoryEl.innerHTML = "";
-            options.forEach(function (item) {
-                const option = document.createElement("option");
-                option.value = item.value;
-                option.setAttribute("data-label", item.label);
-                option.textContent = item.label;
-                if (previousComplete[item.value]) {
-                    option.setAttribute("data-complete", "true");
-                    option.textContent = item.label + " — Complete";
-                } else {
-                    option.setAttribute("data-complete", "false");
-                }
-                listCategoryEl.appendChild(option);
-            });
-            const values = options.map(function (item) { return item.value; });
-            const next = values.indexOf(preferred) >= 0 ? preferred : values[0];
-            listCategoryEl.value = next;
-            if (projectsMode) {
-                selectedProjectCategory = next;
-            } else {
-                selectedIssueCategory = next;
-            }
-            listCategoryEl.setAttribute(
-                "aria-label",
-                projectsMode ? "Select project list" : "Select outage list"
-            );
-            renderListCategoryMenu();
+        // Which lists are currently selected. An empty set means "no filter"
+        // — every list shows. The stats strip at the top of the page is the
+        // filter UI: its chips are the buttons, so there is no separate row.
+        let selectedIssueLists = new Set();
+        let selectedProjectLists = new Set();
+        // Complete-state per list, previously stashed on the <option> elements
+        // the old category dropdown owned.
+        const listCompleteState = {};
+
+        function currentSelectedLists() {
+            return currentPanelMode() === "projects"
+                ? selectedProjectLists
+                : selectedIssueLists;
         }
 
-        function rememberSelectedCategory() {
-            if (currentPanelMode() === "projects") {
-                selectedProjectCategory = listCategoryEl.value;
+        function toggleListFilter(id) {
+            const selected = currentSelectedLists();
+            if (selected.has(id)) {
+                selected.delete(id);
             } else {
-                selectedIssueCategory = listCategoryEl.value;
+                selected.add(id);
             }
+            applyListFilters();
+        }
+
+        function clearListFilter() {
+            currentSelectedLists().clear();
+            applyListFilters();
+        }
+
+        // ---- All lists / One list + the multi-select category menu -----------
+        // "All lists" shows everything. "One list" filters to whatever is
+        // ticked in the dropdown — which now takes several lists at once, each
+        // with its ticket count. Selection lives in the same Sets the filter
+        // pass reads, so nothing else had to change.
+        const listCategoryInputs = {};
+
+        function filteringEnabled() {
+            return !!(showOneListBtn && showOneListBtn.classList.contains("is-active"));
+        }
+
+        function currentCategoryOptions() {
+            return currentPanelMode() === "projects"
+                ? projectCategoryOptions
+                : issueCategoryOptions;
+        }
+
+        function renderListCategoryMenu() {
+            if (!listCategoryOptions) {
+                return;
+            }
+            listCategoryOptions.innerHTML = "";
+            Object.keys(listCategoryInputs).forEach(function (key) {
+                delete listCategoryInputs[key];
+            });
+
+            currentCategoryOptions().forEach(function (item) {
+                const row = document.createElement("label");
+                row.className = "list-category-option";
+
+                const box = document.createElement("input");
+                box.type = "checkbox";
+                box.value = item.value;
+                box.addEventListener("change", function () {
+                    const selected = currentSelectedLists();
+                    if (box.checked) {
+                        selected.add(item.value);
+                    } else {
+                        selected.delete(item.value);
+                    }
+                    applyListFilters();
+                });
+
+                const label = document.createElement("span");
+                label.className = "option-label";
+                label.textContent = item.label;
+
+                const count = document.createElement("span");
+                count.className = "option-count";
+                count.textContent = "0";
+
+                row.appendChild(box);
+                row.appendChild(label);
+                row.appendChild(count);
+                listCategoryOptions.appendChild(row);
+                listCategoryInputs[item.value] = { input: box, row: row, count: count };
+            });
+
+            const actions = document.createElement("div");
+            actions.className = "list-category-actions";
+            const selectAll = document.createElement("button");
+            selectAll.type = "button";
+            selectAll.textContent = "Select all";
+            selectAll.addEventListener("click", function () {
+                const selected = currentSelectedLists();
+                currentCategoryOptions().forEach(function (item) {
+                    selected.add(item.value);
+                });
+                applyListFilters();
+            });
+            const clearBtn = document.createElement("button");
+            clearBtn.type = "button";
+            clearBtn.textContent = "Clear";
+            clearBtn.addEventListener("click", function () {
+                currentSelectedLists().clear();
+                applyListFilters();
+            });
+            const doneBtn = document.createElement("button");
+            doneBtn.type = "button";
+            doneBtn.textContent = "Done";
+            doneBtn.addEventListener("click", closeListCategoryMenu);
+            actions.appendChild(selectAll);
+            actions.appendChild(clearBtn);
+            actions.appendChild(doneBtn);
+            listCategoryOptions.appendChild(actions);
+
+            syncListControls();
+        }
+
+        // Keep the toggle buttons, the dropdown label and every checkbox in
+        // step with the selection. Safe to call on every filter pass.
+        function syncListControls() {
+            const filtering = filteringEnabled();
+            const selected = currentSelectedLists();
+
+            if (showAllListsBtn && showOneListBtn) {
+                showAllListsBtn.classList.toggle("is-active", !filtering);
+                showAllListsBtn.setAttribute("aria-pressed", filtering ? "false" : "true");
+                showOneListBtn.classList.toggle("is-active", filtering);
+                showOneListBtn.setAttribute("aria-pressed", filtering ? "true" : "false");
+            }
+            if (listCategoryWrap) {
+                listCategoryWrap.hidden = !filtering;
+            }
+
+            currentCategoryOptions().forEach(function (item) {
+                const parts = listCategoryInputs[item.value];
+                if (!parts) {
+                    return;
+                }
+                const total = (listState[item.value] || []).length;
+                const isSelected = selected.has(item.value);
+                parts.input.checked = isSelected;
+                parts.count.textContent = String(total);
+                parts.row.classList.toggle("is-selected", isSelected);
+                parts.row.classList.toggle("is-empty", total === 0 && !isSelected);
+                parts.row.classList.toggle(
+                    "is-complete", !!listCompleteState[item.value] && total > 0
+                );
+            });
+
+            if (listCategoryToggleText) {
+                const names = currentCategoryOptions()
+                    .filter(function (item) { return selected.has(item.value); })
+                    .map(function (item) { return item.label; });
+                let text;
+                if (!names.length) {
+                    text = "Select lists";
+                } else if (names.length === 1) {
+                    text = names[0];
+                } else if (names.length === currentCategoryOptions().length) {
+                    text = "All " + names.length + " lists";
+                } else {
+                    text = names.length + " lists selected";
+                }
+                listCategoryToggleText.textContent = text;
+                listCategoryToggleText.title = names.join(", ");
+            }
+        }
+
+        function openListCategoryMenu() {
+            if (!listCategoryWrap) {
+                return;
+            }
+            listCategoryWrap.classList.add("is-open");
+            listCategoryToggle.setAttribute("aria-expanded", "true");
+        }
+
+        function closeListCategoryMenu() {
+            if (!listCategoryWrap) {
+                return;
+            }
+            listCategoryWrap.classList.remove("is-open");
+            listCategoryToggle.setAttribute("aria-expanded", "false");
+        }
+
+        function setListView(filtering) {
+            if (filtering) {
+                showOneListBtn.classList.add("is-active");
+                showAllListsBtn.classList.remove("is-active");
+                // Opening "One list" with nothing ticked would blank the page,
+                // so start from the first list that actually has tickets.
+                const selected = currentSelectedLists();
+                if (!selected.size) {
+                    const firstWithTickets = currentCategoryOptions().find(function (item) {
+                        return (listState[item.value] || []).length > 0;
+                    }) || currentCategoryOptions()[0];
+                    if (firstWithTickets) {
+                        selected.add(firstWithTickets.value);
+                    }
+                }
+            } else {
+                showOneListBtn.classList.remove("is-active");
+                showAllListsBtn.classList.add("is-active");
+                closeListCategoryMenu();
+            }
+            applyListFilters();
+        }
+
+        if (showAllListsBtn && showOneListBtn) {
+            showAllListsBtn.addEventListener("click", function () {
+                setListView(false);
+            });
+            showOneListBtn.addEventListener("click", function () {
+                setListView(true);
+            });
+            listCategoryToggle.addEventListener("click", function (event) {
+                event.stopPropagation();
+                if (listCategoryWrap.classList.contains("is-open")) {
+                    closeListCategoryMenu();
+                } else {
+                    openListCategoryMenu();
+                }
+            });
+            // Ticking several boxes in a row must not close the menu.
+            listCategoryOptions.addEventListener("click", function (event) {
+                event.stopPropagation();
+            });
+            document.addEventListener("click", function (event) {
+                if (listCategoryWrap && !listCategoryWrap.contains(event.target)) {
+                    closeListCategoryMenu();
+                }
+            });
+            document.addEventListener("keydown", function (event) {
+                if (event.key === "Escape") {
+                    closeListCategoryMenu();
+                }
+            });
         }
 
         function applyPanelMode() {
             panelMode = currentPanelMode();
             const projectsMode = panelMode === "projects";
-            if (listViewToggle) {
-                listViewToggle.hidden = false;
-            }
-            if (listCategoryWrap) {
-                listCategoryWrap.hidden = !showOneListBtn.classList.contains("is-active");
-                if (listCategoryWrap.hidden) {
-                    closeListCategoryMenu();
-                }
-            }
             if (clearCheckboxesBtn) {
                 clearCheckboxesBtn.hidden = projectsMode;
             }
+            renderListCategoryMenu();
             if (pullErpBtn && initialValidationComplete && !issuePollInFlight) {
                 pullErpBtn.textContent = projectsMode ? "Pull Projects" : "Pull Issues";
                 pullErpBtn.title = projectsMode
                     ? "Refresh Open/In Progress NOC projects from ERP now"
                     : "Refresh Open/Monitoring/On Hold tickets from ERP now";
             }
-            syncListCategoryOptions();
             applyListFilters();
         }
 
@@ -2574,8 +3251,10 @@
             const query = listSearchEl.value.trim().toLowerCase();
             const rawQuery = listSearchEl.value.trim();
             const projectsMode = currentPanelMode() === "projects";
-            const singleList = showOneListBtn.classList.contains("is-active");
-            const selectedId = listCategoryEl.value;
+            // "All lists" shows everything; "One list" narrows to whatever is
+            // ticked in the dropdown (one list or several).
+            const selectedLists = currentSelectedLists();
+            const filtering = filteringEnabled() && selectedLists.size > 0;
             let matchCount = 0;
 
             filterableListIds.forEach(function (id) {
@@ -2601,7 +3280,7 @@
                     }
                 });
 
-                const selected = !singleList || id === selectedId;
+                const selected = !filtering || selectedLists.has(id);
                 const sectionVisible = inActivePanel && selected && (!query || visibleRows > 0);
                 if (sectionEl) {
                     sectionEl.hidden = !sectionVisible;
@@ -2622,128 +3301,15 @@
                 listMatchCountEl.textContent = "";
             }
 
+            renderStatsStrip();
+            syncListControls();
             scheduleUnitToolsFromSearch(rawQuery, matchCount);
-        }
-
-        function setListView(singleList) {
-            showAllListsBtn.classList.toggle("is-active", !singleList);
-            showAllListsBtn.setAttribute("aria-pressed", singleList ? "false" : "true");
-            showOneListBtn.classList.toggle("is-active", singleList);
-            showOneListBtn.setAttribute("aria-pressed", singleList ? "true" : "false");
-            listCategoryWrap.hidden = !singleList;
-            if (!singleList) {
-                closeListCategoryMenu();
-            } else {
-                syncListCategoryOptions();
-            }
-            applyListFilters();
         }
 
         listSearchEl.addEventListener("input", applyListFilters);
         if (panelModeEl) {
             panelModeEl.addEventListener("change", applyPanelMode);
         }
-        showAllListsBtn.addEventListener("click", function () {
-            setListView(false);
-        });
-        showOneListBtn.addEventListener("click", function () {
-            setListView(true);
-        });
-        listCategoryEl.addEventListener("change", function () {
-            rememberSelectedCategory();
-            applyListFilters();
-        });
-
-        function categoryOptionLabel(option) {
-            return option.getAttribute("data-label")
-                || option.textContent.replace(/\s+— Complete$/, "");
-        }
-
-        function appendCompleteBadge(parent) {
-            const badge = document.createElement("span");
-            badge.className = "complete-badge";
-            badge.textContent = "Complete";
-            parent.appendChild(badge);
-        }
-
-        function updateListCategoryToggle() {
-            const option = listCategoryEl.selectedOptions[0]
-                || listCategoryEl.options[0];
-            if (!option) {
-                return;
-            }
-            listCategoryToggleText.textContent = categoryOptionLabel(option);
-            const existingBadge = listCategoryToggle.querySelector(".complete-badge");
-            if (existingBadge) {
-                existingBadge.remove();
-            }
-            if (option.getAttribute("data-complete") === "true") {
-                appendCompleteBadge(listCategoryToggle);
-            }
-        }
-
-        function renderListCategoryMenu() {
-            const selected = listCategoryEl.value;
-            listCategoryOptions.innerHTML = "";
-            Array.from(listCategoryEl.options).forEach(function (option) {
-                const button = document.createElement("button");
-                button.type = "button";
-                button.className = "list-category-option";
-                button.setAttribute("role", "option");
-                button.dataset.value = option.value;
-                if (option.value === selected) {
-                    button.classList.add("is-selected");
-                    button.setAttribute("aria-selected", "true");
-                }
-                const label = document.createElement("span");
-                label.textContent = categoryOptionLabel(option);
-                button.appendChild(label);
-                if (option.getAttribute("data-complete") === "true") {
-                    appendCompleteBadge(button);
-                }
-                button.addEventListener("click", function () {
-                    listCategoryEl.value = option.value;
-                    rememberSelectedCategory();
-                    closeListCategoryMenu();
-                    updateListCategoryToggle();
-                    renderListCategoryMenu();
-                    applyListFilters();
-                });
-                listCategoryOptions.appendChild(button);
-            });
-            updateListCategoryToggle();
-        }
-
-        function openListCategoryMenu() {
-            listCategoryWrap.classList.add("is-open");
-            listCategoryToggle.setAttribute("aria-expanded", "true");
-        }
-
-        function closeListCategoryMenu() {
-            listCategoryWrap.classList.remove("is-open");
-            listCategoryToggle.setAttribute("aria-expanded", "false");
-        }
-
-        listCategoryToggle.addEventListener("click", function (event) {
-            event.stopPropagation();
-            if (listCategoryWrap.classList.contains("is-open")) {
-                closeListCategoryMenu();
-            } else {
-                renderListCategoryMenu();
-                openListCategoryMenu();
-            }
-        });
-        document.addEventListener("click", function (event) {
-            if (!listCategoryWrap.contains(event.target)) {
-                closeListCategoryMenu();
-            }
-        });
-        document.addEventListener("keydown", function (event) {
-            if (event.key === "Escape") {
-                closeListCategoryMenu();
-            }
-        });
-        renderListCategoryMenu();
 
         function persistLocalTicketState() {
             try {
@@ -2837,12 +3403,13 @@
             return !!(entry && entry.unit && !entry.hasPve);
         }
 
-        function appendRebootComputeButton(parent, label, endpoint, entry) {
+        function appendRebootComputeButton(parent, label, endpoint, entry, options) {
+            const confirmMessage = options && options.confirmMessage;
             const rebootBtn = document.createElement("button");
             rebootBtn.type = "button";
             rebootBtn.className = "action-btn";
             rebootBtn.textContent = label;
-            rebootBtn.addEventListener("click", function () {
+            function fireReboot() {
                 rebootBtn.disabled = true;
                 rebootBtn.textContent = "Rebooting...";
                 statusEl.textContent = label + " for " + entry.unit + "...";
@@ -2869,12 +3436,19 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         rebootBtn.disabled = false;
                         rebootBtn.textContent = label;
                     });
+            }
+            rebootBtn.addEventListener("click", function () {
+                if (confirmMessage) {
+                    openGenericConfirmModal(label + "?", confirmMessage, label, fireReboot);
+                } else {
+                    fireReboot();
+                }
             });
             parent.appendChild(rebootBtn);
             return rebootBtn;
@@ -2928,7 +3502,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         uptimeBtn.disabled = false;
@@ -2953,7 +3527,7 @@
                 let drive = String(raw || "").trim().toUpperCase();
                 drive = drive.replace(/[:\\/]/g, "");
                 if (!/^[A-Z]$/.test(drive)) {
-                    window.alert("Enter a single drive letter (A-Z).");
+                    notifyError("Enter a single drive letter (A-Z).");
                     return;
                 }
                 chkdskBtn.disabled = true;
@@ -2999,7 +3573,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         chkdskBtn.disabled = false;
@@ -3049,7 +3623,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         checkPatchBtn.disabled = false;
@@ -3057,6 +3631,77 @@
                     });
             });
             scryptedLinuxMenu.appendChild(checkPatchBtn);
+
+            // NVMe SMART health on the PVE host — read-only (smartctl -a
+            // reports, it does not start a self-test), so it sits with the
+            // diagnostics rather than under Power / Disruptive Actions.
+            if (entry && entry.hasPve) {
+                const nvmeBtn = document.createElement("button");
+                nvmeBtn.type = "button";
+                nvmeBtn.className = "action-btn";
+                nvmeBtn.textContent = "NVMe Health (PVE)";
+                nvmeBtn.title = "smartctl -a on the PVE host boot drive — wear, spare, errors, temperature";
+                nvmeBtn.addEventListener("click", function () {
+                    nvmeBtn.disabled = true;
+                    nvmeBtn.textContent = "Reading SMART...";
+                    statusEl.textContent = "Reading NVMe health for " + entry.unit + "...";
+                    fetch("/issues/pve-nvme-health/" + encodeURIComponent(entry.unit), {
+                        method: "POST",
+                    })
+                        .then(function (response) {
+                            return response.json().then(function (data) {
+                                if (!response.ok || !data.ok) {
+                                    throw new Error(data.error || ("HTTP " + response.status));
+                                }
+                                return data;
+                            });
+                        })
+                        .then(function (data) {
+                            const summary = data.summary
+                                || ("NVMe health for " + entry.unit);
+                            consoleLines.push(summary);
+                            if (data.model) {
+                                consoleLines.push(
+                                    "  Drive: " + data.model
+                                    + (data.serial ? " (" + data.serial + ")" : "")
+                                    + " on " + (data.device || "")
+                                );
+                            }
+                            const detail = [
+                                ["Overall health", data.overall_health],
+                                ["Critical warning", data.critical_warning],
+                                ["Percentage used", data.percentage_used],
+                                ["Available spare", data.available_spare],
+                                ["Temperature (C)", data.temperature_c],
+                                ["Power on hours", data.power_on_hours],
+                                ["Unsafe shutdowns", data.unsafe_shutdowns],
+                                ["Media errors", data.media_errors],
+                            ];
+                            detail.forEach(function (pair) {
+                                if (pair[1] !== undefined && pair[1] !== null && pair[1] !== "") {
+                                    consoleLines.push("  " + pair[0] + ": " + pair[1]);
+                                }
+                            });
+                            renderConsole(true);
+                            statusEl.textContent = summary;
+                            if (data.status && data.status !== "ok") {
+                                notify(summary, data.status === "fail" ? "error" : "warning");
+                            }
+                        })
+                        .catch(function (error) {
+                            const message = "NVMe Health failed: " + (error.message || error);
+                            consoleLines.push(message);
+                            renderConsole(true);
+                            statusEl.textContent = message;
+                            notifyError(message);
+                        })
+                        .finally(function () {
+                            nvmeBtn.disabled = false;
+                            nvmeBtn.textContent = "NVMe Health (PVE)";
+                        });
+                });
+                scryptedLinuxMenu.appendChild(nvmeBtn);
+            }
 
             const updatePatchBtn = document.createElement("button");
             updatePatchBtn.type = "button";
@@ -3110,7 +3755,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         noAudioBtn.disabled = false;
@@ -3119,20 +3764,86 @@
             });
             scryptedLinuxMenu.appendChild(noAudioBtn);
 
+            // Disruptive/service-interrupting actions live in their own
+            // submenu, separate from the routine diagnostic buttons above.
+            // (appendCommandSubmenu is defined locally inside the two menu
+            // builders that call into this function, so it's built inline here.)
+            const powerActionsSubmenu = document.createElement("details");
+            powerActionsSubmenu.className = "command-submenu";
+            const powerActionsSummary = document.createElement("summary");
+            powerActionsSummary.textContent = "Power / Disruptive Actions";
+            powerActionsSubmenu.appendChild(powerActionsSummary);
+            const powerActionsMenu = document.createElement("div");
+            powerActionsMenu.className = "command-submenu-items";
+            powerActionsSubmenu.appendChild(powerActionsMenu);
+            scryptedLinuxMenu.appendChild(powerActionsSubmenu);
+
             if (unitSupportsSnucReboot(entry)) {
                 appendRebootComputeButton(
-                    scryptedLinuxMenu,
+                    powerActionsMenu,
                     "Reboot Scrypted",
                     "/issues/reboot-scrypted/",
-                    entry
+                    entry,
+                    { confirmMessage: "This will reboot the Scrypted box on " + entry.unit + ", interrupting recording/streaming briefly." }
                 );
                 appendRebootComputeButton(
-                    scryptedLinuxMenu,
+                    powerActionsMenu,
                     "Reboot PVE",
                     "/issues/reboot-pve/",
-                    entry
+                    entry,
+                    { confirmMessage: "This will reboot the entire PVE host on " + entry.unit + ", taking every VM on it down briefly." }
                 );
             }
+
+            const securityFixBtn = document.createElement("button");
+            securityFixBtn.type = "button";
+            securityFixBtn.className = "action-btn";
+            securityFixBtn.textContent = "Security Update Fix";
+            securityFixBtn.title = "Guided GPU-passthrough kernel security update fix";
+            securityFixBtn.addEventListener("click", function () {
+                openSecurityFixModal(entry.unit, securityFixBtn);
+            });
+            powerActionsMenu.appendChild(securityFixBtn);
+
+            const restartServicesBtn = document.createElement("button");
+            restartServicesBtn.type = "button";
+            restartServicesBtn.className = "action-btn";
+            restartServicesBtn.textContent = "Restart All Services";
+            restartServicesBtn.title = "Restart all platform services on the Scrypted box";
+            restartServicesBtn.addEventListener("click", function () {
+                restartServicesBtn.disabled = true;
+                restartServicesBtn.textContent = "Restarting...";
+                statusEl.textContent = "Restarting all services on " + entry.unit + "...";
+                fetch("/issues/restart-services/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const message = data.message || ("Restarted all services on " + entry.unit);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                    })
+                    .catch(function (error) {
+                        const message = "Restart All Services failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        restartServicesBtn.disabled = false;
+                        restartServicesBtn.textContent = "Restart All Services";
+                    });
+            });
+            powerActionsMenu.appendChild(restartServicesBtn);
         }
 
         function appendLinuxCommandMenus(commandItems, entry) {
@@ -3207,7 +3918,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         carrierBtn.disabled = false;
@@ -3316,7 +4027,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         pingBtn.disabled = false;
@@ -3473,7 +4184,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     const state = longPingByUnit[unit];
@@ -3965,14 +4676,14 @@
 
         function launchUnitCameras(unit, target, triggerEl, allTargets) {
             if (!unit) {
-                window.alert("Open cameras failed: No unit");
+                notifyError("Open cameras failed: No unit");
                 return;
             }
             if (target === "all") {
                 const launchUrl = "/issues/cameras-launch/" + encodeURIComponent(unit);
                 const win = openBlankTab(launchUrl);
                 if (!win) {
-                    window.alert(
+                    notifyError(
                         "Pop-up blocked. Allow pop-ups for this site to open cameras."
                     );
                     return;
@@ -3991,7 +4702,7 @@
                 + encodeURIComponent(target);
             const win = openBlankTab(url);
             if (!win) {
-                window.alert(
+                notifyError(
                     "Pop-up blocked. Allow pop-ups for this site to open cameras."
                 );
                 return;
@@ -4016,6 +4727,394 @@
                 );
             });
             return button;
+        }
+
+        // ---- Quick actions ---------------------------------------------------
+        // The handful of actions worth reaching without opening Commands and
+        // walking two or three submenus. EDIT THIS ARRAY to change which
+        // appear, in what order, or to drop the row entirely (set it to []).
+        //
+        //   id      - unique key
+        //   label   - button text (keep it short; these sit on every row)
+        //   title   - tooltip
+        //   show    - optional (entry) => bool gate
+        //   run     - (entry, btn) => void, for POST-style actions
+        //   href    - (entry) => url string, for link-style actions
+        const QUICK_ACTIONS = [
+            {
+                id: "validate",
+                label: "Validate",
+                title: "Validate (Quick) — same as Commands → Validate → Validate (Quick)",
+                busyLabel: "…",
+                run: function (entry, btn) {
+                    quickFetch(btn, "Validate", "/issues/validate-unit/" + encodeURIComponent(entry.unit), function (data) {
+                        return "Validated " + entry.unit
+                            + (data.category ? (" → " + (listHeadingLabels[data.category] || data.category)) : "")
+                            + (data.output ? ("\n" + data.output) : "");
+                    });
+                },
+            },
+            {
+                id: "switch_uptime",
+                label: "Uptime",
+                title: "Switch / Robofiber uptime",
+                busyLabel: "…",
+                run: function (entry, btn) {
+                    quickFetch(btn, "Uptime", "/issues/robofiber-uptime/" + encodeURIComponent(entry.unit), function (data) {
+                        const head = "Switch uptime " + (data.unit || entry.unit)
+                            + (data.ip ? (" (" + data.ip + ")") : "");
+                        const body = (data.lines || []).filter(Boolean).join("\n") || data.output || "";
+                        return body ? (head + "\n" + body) : head;
+                    });
+                },
+            },
+            {
+                id: "vrm",
+                label: "VRM",
+                title: "Open VRM for this unit",
+                show: function (entry) {
+                    return !!quickVrmUrl(entry);
+                },
+                href: quickVrmUrl,
+            },
+            {
+                id: "mesh",
+                label: "Mesh",
+                title: "Open MeshCentral for this unit",
+                show: function (entry) {
+                    return !!entry.unit;
+                },
+                href: function (entry) {
+                    return meshBaseUrl + encodeURIComponent(entry.unit);
+                },
+            },
+            {
+                id: "snapshot",
+                label: "Snap",
+                title: "Fisheye snapshot",
+                show: function (entry) {
+                    return !!entry.unit;
+                },
+                run: function (entry) {
+                    openFisheyeSnapshot(entry.unit, entry.url || "");
+                },
+            },
+        ];
+
+        function quickVrmUrl(entry) {
+            if (!entry || !entryHasRdInSubject(entry)) {
+                return "";
+            }
+            if (entry.vrmUrl) {
+                return entry.vrmUrl;
+            }
+            const subject = String(entry.ticketSubject || "");
+            const muMatch = subject.match(/\bMU\s*(\d{4})\b/i);
+            const search = muMatch ? muMatch[1] : (entry.unit || "");
+            return search
+                ? ("https://vrm.victronenergy.com/installation-overview?search=" + encodeURIComponent(search))
+                : "";
+        }
+
+        // Shared POST-and-log used by the quick buttons. Keeps them to a few
+        // lines each and routes every outcome through the console + toasts.
+        function quickFetch(btn, label, endpoint, formatter) {
+            const original = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = "…";
+            fetch(endpoint, { method: "POST" })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    const text = formatter(data);
+                    String(text).split(/\r?\n/).forEach(function (line) {
+                        if (line) {
+                            consoleLines.push(line);
+                        }
+                    });
+                    renderConsole(true);
+                    statusEl.textContent = String(text).split(/\r?\n/)[0] || (label + " complete");
+                })
+                .catch(function (error) {
+                    const message = label + " failed: " + (error.message || error);
+                    consoleLines.push(message);
+                    renderConsole(true);
+                    statusEl.textContent = message;
+                    notifyError(message);
+                })
+                .finally(function () {
+                    btn.disabled = false;
+                    btn.textContent = original;
+                });
+        }
+
+        function appendQuickActions(parent, entry) {
+            if (!entry || !entry.unit || !QUICK_ACTIONS.length) {
+                return;
+            }
+            const wrap = document.createElement("span");
+            wrap.className = "quick-actions";
+            QUICK_ACTIONS.forEach(function (action) {
+                if (action.show && !action.show(entry)) {
+                    return;
+                }
+                let btn;
+                if (action.href) {
+                    const url = action.href(entry);
+                    if (!url) {
+                        return;
+                    }
+                    btn = document.createElement("a");
+                    btn.href = url;
+                    btn.target = "_blank";
+                    btn.rel = "noopener noreferrer";
+                } else {
+                    btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.addEventListener("click", function (event) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        action.run(entry, btn);
+                    });
+                }
+                btn.className = "quick-btn";
+                btn.textContent = action.label;
+                btn.title = action.title || action.label;
+                wrap.appendChild(btn);
+            });
+            if (wrap.childElementCount) {
+                parent.appendChild(wrap);
+            }
+        }
+
+        // ---- Busy flag -------------------------------------------------------
+        // The per-unit lock already exists server-side; this surfaces it on the
+        // row so two people don't start conflicting actions on the same unit.
+        let busyUnitsMap = {};
+
+        function appendUnitBusyFlag(parent, entry) {
+            if (!entry || !entry.unit) {
+                return;
+            }
+            const flag = document.createElement("span");
+            flag.className = "unit-busy-flag";
+            flag.dataset.busyUnit = String(entry.unit).toUpperCase();
+            flag.hidden = true;
+            parent.appendChild(flag);
+            applyBusyFlag(flag);
+        }
+
+        function applyBusyFlag(flag) {
+            const info = busyUnitsMap[flag.dataset.busyUnit];
+            if (!info) {
+                flag.hidden = true;
+                flag.textContent = "";
+                return;
+            }
+            flag.hidden = false;
+            flag.textContent = "⚠ " + (info.action || "in progress")
+                + (info.phase ? (" · " + info.phase) : "");
+            flag.title = info.action + " is running on " + flag.dataset.busyUnit
+                + " — avoid starting another action on this unit";
+        }
+
+        // ---- Read-only diagnostics ------------------------------------------
+        // One helper for the "POST, log the result, report status" pattern so
+        // each new diagnostic is a few lines of configuration rather than
+        // another forty lines of copied fetch boilerplate.
+        function appendDiagnosticButton(parent, entry, options) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "action-btn";
+            btn.textContent = options.label;
+            if (options.title) {
+                btn.title = options.title;
+            }
+            btn.addEventListener("click", function () {
+                btn.disabled = true;
+                btn.textContent = options.busyLabel || "Checking...";
+                statusEl.textContent = options.label + " for " + entry.unit + "...";
+                fetch(options.endpoint + encodeURIComponent(entry.unit), {
+                    method: options.method || "POST",
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const summary = data.summary || (options.label + " complete for " + entry.unit);
+                        consoleLines.push(summary);
+                        (options.detailLines ? options.detailLines(data) : []).forEach(function (line) {
+                            if (line) {
+                                consoleLines.push("  " + line);
+                            }
+                        });
+                        renderConsole(true);
+                        statusEl.textContent = summary;
+                        if (data.status === "fail") {
+                            notify(summary, "error");
+                        } else if (data.status === "warn") {
+                            notify(summary, "warning");
+                        }
+                    })
+                    .catch(function (error) {
+                        const message = options.label + " failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        btn.disabled = false;
+                        btn.textContent = options.label;
+                    });
+            });
+            parent.appendChild(btn);
+            return btn;
+        }
+
+        function appendDiagnosticsCommandMenu(commandItems, entry) {
+            if (!entry || !entry.unit) {
+                return;
+            }
+            const diagMenu = appendCommandSubmenu(commandItems, "Diagnostics");
+
+            appendDiagnosticButton(diagMenu, entry, {
+                label: "Run All Diagnostics",
+                busyLabel: "Running...",
+                title: "Every read-only check for this unit in one pass",
+                endpoint: "/issues/run-diagnostics/",
+                detailLines: function (data) {
+                    const lines = (data.problems || []).slice();
+                    if (!lines.length) {
+                        Object.keys(data.checks || {}).forEach(function (key) {
+                            const check = data.checks[key];
+                            lines.push(check.label + ": " + (check.ok ? (check.status || "ok") : check.error));
+                        });
+                    }
+                    return lines;
+                },
+            });
+
+            appendDiagnosticButton(diagMenu, entry, {
+                label: "Camera Reachability",
+                title: "Ping every camera, the fisheye and the speaker at once",
+                endpoint: "/issues/camera-matrix/",
+                detailLines: function (data) {
+                    return (data.endpoints || []).map(function (item) {
+                        return (item.reachable ? "✓ " : "× ")
+                            + item.label + " (" + item.host + ")";
+                    });
+                },
+            });
+
+            if (entry.hasPve) {
+                appendDiagnosticButton(diagMenu, entry, {
+                    label: "Service Status",
+                    title: "Which platform services are actually running — check this before Restart All Services",
+                    endpoint: "/issues/service-status/",
+                    detailLines: function (data) {
+                        return (data.services || []).map(function (svc) {
+                            return (svc.ok ? "✓ " : "× ")
+                                + svc.short + " — " + svc.state
+                                + (svc.sub_state ? " (" + svc.sub_state + ")" : "");
+                        });
+                    },
+                });
+
+                appendDiagnosticButton(diagMenu, entry, {
+                    label: "PVE Host Resources",
+                    title: "Memory, disk, load and VM 101 state on the PVE host",
+                    endpoint: "/issues/pve-resources/",
+                    detailLines: function (data) {
+                        const lines = [];
+                        if (data.mem_used_percent != null) {
+                            lines.push("Memory: " + data.mem_used_percent + "% used ("
+                                + data.mem_used_mb + " / " + data.mem_total_mb + " MB)");
+                        }
+                        if (data.swap_total_mb) {
+                            lines.push("Swap: " + data.swap_used_mb + " / " + data.swap_total_mb + " MB");
+                        }
+                        if (data.root_disk) {
+                            lines.push("Root disk: " + data.root_disk.use_percent + "% used ("
+                                + data.root_disk.used + " / " + data.root_disk.size
+                                + ", " + data.root_disk.available + " free)");
+                        }
+                        if (data.load_1m != null) {
+                            lines.push("Load: " + data.load_1m + " / " + data.load_5m + " / " + data.load_15m);
+                        }
+                        if (data.vm101_status) {
+                            lines.push("VM 101: " + data.vm101_status);
+                        }
+                        return lines;
+                    },
+                });
+            }
+
+            // History is a GET and has no status field, so it is wired
+            // directly rather than through appendDiagnosticButton.
+            const historyBtn = document.createElement("button");
+            historyBtn.type = "button";
+            historyBtn.className = "action-btn";
+            historyBtn.textContent = "Unit History";
+            historyBtn.title = "Recorded validation results and flap count for this unit";
+            historyBtn.addEventListener("click", function () {
+                historyBtn.disabled = true;
+                historyBtn.textContent = "Loading...";
+                fetch("/issues/unit-history/" + encodeURIComponent(entry.unit) + "?days=30&limit=40")
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const s = data.summary || {};
+                        const header = s.checks
+                            ? (entry.unit + ": " + s.checks + " checks in the last " + s.days
+                                + " days, " + s.down_checks + " down, "
+                                + s.transitions + " up/down transitions")
+                            : (entry.unit + ": no recorded history yet");
+                        consoleLines.push(header);
+                        (data.entries || []).slice(0, 40).forEach(function (item) {
+                            consoleLines.push(
+                                "  " + item.when + "  "
+                                + (item.healthy ? "✓" : "×") + "  "
+                                + (item.category || item.led || item.kind)
+                            );
+                        });
+                        renderConsole(true);
+                        statusEl.textContent = header;
+                        if (s.transitions >= 3) {
+                            notify(entry.unit + " has flapped " + s.transitions
+                                + " times in " + s.days + " days", "warning");
+                        }
+                    })
+                    .catch(function (error) {
+                        const message = "Unit History failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        historyBtn.disabled = false;
+                        historyBtn.textContent = "Unit History";
+                    });
+            });
+            diagMenu.appendChild(historyBtn);
         }
 
         function appendCamerasCommandMenu(commandItems, entry) {
@@ -4155,6 +5254,14 @@
                 if (contextEl) {
                     contextEl.remove();
                 }
+                const staleBanner = commandItems.querySelector(".unit-busy-banner");
+                if (staleBanner) {
+                    staleBanner.remove();
+                }
+                const staleNotes = commandItems.querySelector(".unit-notes-box");
+                if (staleNotes) {
+                    staleNotes.remove();
+                }
                 return;
             }
             if (!contextEl) {
@@ -4175,6 +5282,125 @@
                     : subject;
                 contextEl.appendChild(sub);
             }
+            if (unit) {
+                refreshUnitStatusPanel(commandItems, unit);
+            }
+        }
+
+        // Busy banner + per-unit notes, refreshed whenever a per-unit command
+        // menu is opened. Shared by every menu surface since they all build
+        // their menu through createCommandMenuElement/updateCommandMenuContext.
+        function refreshUnitStatusPanel(commandItems, unit) {
+            let banner = commandItems.querySelector(".unit-busy-banner");
+            let notesBox = commandItems.querySelector(".unit-notes-box");
+            const contextEl = commandItems.querySelector(".command-menu-context");
+            if (!notesBox) {
+                notesBox = document.createElement("div");
+                notesBox.className = "unit-notes-box";
+                const textarea = document.createElement("textarea");
+                textarea.placeholder = "Notes for this unit (visible to everyone)...";
+                notesBox.appendChild(textarea);
+                const row = document.createElement("div");
+                const saveBtn = document.createElement("button");
+                saveBtn.type = "button";
+                saveBtn.className = "action-btn";
+                saveBtn.textContent = "Save Note";
+                const noteStatus = document.createElement("span");
+                noteStatus.className = "note-status";
+                row.appendChild(saveBtn);
+                row.appendChild(noteStatus);
+                notesBox.appendChild(row);
+                saveBtn.addEventListener("click", function () {
+                    saveBtn.disabled = true;
+                    noteStatus.textContent = "Saving...";
+                    fetch("/issues/unit-note/" + encodeURIComponent(notesBox.dataset.unit || ""), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ text: textarea.value }),
+                    })
+                        .then(function (response) { return response.json(); })
+                        .then(function (data) {
+                            noteStatus.textContent = data.updated_at
+                                ? ("Saved " + data.updated_at)
+                                : "Cleared";
+                        })
+                        .catch(function () {
+                            noteStatus.textContent = "Save failed";
+                        })
+                        .finally(function () {
+                            saveBtn.disabled = false;
+                        });
+                });
+                if (contextEl && contextEl.nextSibling) {
+                    commandItems.insertBefore(notesBox, contextEl.nextSibling);
+                } else {
+                    commandItems.insertBefore(notesBox, commandItems.firstChild);
+                }
+            }
+            if (!banner) {
+                banner = document.createElement("div");
+                banner.className = "unit-busy-banner";
+                banner.hidden = true;
+                commandItems.insertBefore(banner, notesBox);
+            }
+
+            if (notesBox.dataset.unit !== unit) {
+                notesBox.dataset.unit = unit;
+                const textarea = notesBox.querySelector("textarea");
+                const noteStatus = notesBox.querySelector(".note-status");
+                textarea.value = "";
+                noteStatus.textContent = "";
+                fetch("/issues/unit-note/" + encodeURIComponent(unit))
+                    .then(function (response) { return response.json(); })
+                    .then(function (data) {
+                        if (notesBox.dataset.unit !== unit) {
+                            return;
+                        }
+                        textarea.value = data.text || "";
+                        if (data.updated_at) {
+                            noteStatus.textContent = "Saved " + data.updated_at;
+                        }
+                    })
+                    .catch(function () {});
+            }
+
+            banner.dataset.unit = unit;
+            fetch("/issues/unit-status/" + encodeURIComponent(unit))
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (banner.dataset.unit !== unit) {
+                        return;
+                    }
+                    if (!data.busy) {
+                        banner.hidden = true;
+                        banner.innerHTML = "";
+                        return;
+                    }
+                    banner.hidden = false;
+                    banner.innerHTML = "";
+                    const label = document.createElement("div");
+                    label.textContent = "⏳ " + (data.action || "Busy")
+                        + (data.phase ? (" — " + data.phase) : "");
+                    banner.appendChild(label);
+                    const clearBtn = document.createElement("button");
+                    clearBtn.type = "button";
+                    clearBtn.className = "action-btn";
+                    clearBtn.textContent = "Force Clear Lock";
+                    clearBtn.addEventListener("click", function () {
+                        clearBtn.disabled = true;
+                        fetch("/issues/unit-lock/" + encodeURIComponent(unit) + "/clear", { method: "POST" })
+                            .then(function (response) { return response.json(); })
+                            .then(function () {
+                                banner.hidden = true;
+                                banner.innerHTML = "";
+                            })
+                            .catch(function () {
+                                clearBtn.disabled = false;
+                            });
+                    });
+                    banner.appendChild(clearBtn);
+                })
+                .catch(function () {});
         }
 
         function createCommandMenuElement(entry, rowEl) {
@@ -4284,7 +5510,7 @@
                             propagateLedFromEntry(entry);
                         })
                         .catch(function (error) {
-                            window.alert(label + " failed: " + (error.message || error));
+                            notifyError(label + " failed: " + (error.message || error));
                         })
                         .finally(function () {
                             validateBtn.disabled = false;
@@ -4300,6 +5526,7 @@
             appendWeatherCommandMenu(commandItems, entry);
             appendRouterCommandMenu(commandItems, entry);
             appendCamerasCommandMenu(commandItems, entry);
+                    appendDiagnosticsCommandMenu(commandItems, entry);
 
             const openMenu = appendCommandSubmenu(commandItems, "Open");
             appendShieldMenu(openMenu, entry);
@@ -4443,7 +5670,7 @@
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                     })
                     .finally(function () {
                         uptimeBtn.disabled = false;
@@ -4493,7 +5720,7 @@
                             consoleLines.push(message);
                             renderConsole(true);
                             statusEl.textContent = message;
-                            window.alert(message);
+                            notifyError(message);
                         })
                         .finally(function () {
                             logBtn.disabled = false;
@@ -4694,6 +5921,298 @@
             }
         });
 
+        function securityFixLogLine(text) {
+            if (!text) {
+                return;
+            }
+            securityFixLog.textContent += (securityFixLog.textContent ? "\n" : "") + text;
+            securityFixLog.scrollTop = securityFixLog.scrollHeight;
+            consoleLines.push(text);
+        }
+
+        function securityFixStorageKey(unit) {
+            return "security_fix_token_" + unit;
+        }
+
+        function saveSecurityFixToken(unit, token) {
+            securityFixToken = token || null;
+            try {
+                if (token) {
+                    localStorage.setItem(securityFixStorageKey(unit), token);
+                } else {
+                    localStorage.removeItem(securityFixStorageKey(unit));
+                }
+            } catch (e) {
+                // Private browsing / storage disabled — the wizard still works,
+                // it just won't be able to resume after a refresh.
+            }
+        }
+
+        function loadSecurityFixToken(unit) {
+            try {
+                return localStorage.getItem(securityFixStorageKey(unit)) || null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function securityFixCall(path, body) {
+            const payload = Object.assign({}, body || {}, { token: securityFixToken });
+            return fetch(path + encodeURIComponent(securityFixUnit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            }).then(function (response) {
+                return response.json().then(function (data) {
+                    if (!response.ok || !data.ok) {
+                        throw new Error(data.error || ("HTTP " + response.status));
+                    }
+                    return data;
+                });
+            });
+        }
+
+        function setSecurityFixButton(label, disabled) {
+            securityFixAction.textContent = label;
+            securityFixAction.disabled = !!disabled;
+        }
+
+        // Sets the modal's message + button label for a given client wizard
+        // phase, without making a network call. Used both when a step just
+        // completed and when resuming an in-flight job after a refresh.
+        function applySecurityFixPhaseUI(phase, unit) {
+            securityFixPhase = phase;
+            if (phase === "start") {
+                securityFixMessage.textContent =
+                    "Step 1 of 5: stop VM 101 on PVE and remove the GPU passthrough (hostpci0) "
+                    + "config for " + unit + ". Continue?";
+                setSecurityFixButton("Run Step 1", false);
+            } else if (phase === "awaiting_webui") {
+                securityFixMessage.textContent =
+                    "Now, on the PVE host web interface: open VM 101 → Console → "
+                    + "Start Now. When the GRUB menu appears, go to Advanced Options and "
+                    + "select \"Ubuntu, with Linux 6.8.0-138-generic\" (or any kernel that "
+                    + "is not 139) so the VM boots. Once it's booted, click Continue.";
+                setSecurityFixButton("Continue to Step 2", false);
+            } else if (phase === "awaiting_reboot") {
+                securityFixMessage.textContent =
+                    unit + " is rebooting onto the held kernel. Once it's back up and "
+                    + "reachable over SSH, click Continue to confirm the kernel and shut "
+                    + "it down for the GPU reassignment.";
+                setSecurityFixButton("Confirm Kernel & Shut Down", false);
+            } else if (phase === "awaiting_shutdown") {
+                securityFixMessage.textContent =
+                    unit + " is shutting down. Confirm on PVE (or via ping) that it is "
+                    + "fully powered off, then click Continue to reassign the GPU and "
+                    + "start the VM back up. Do not continue before it is fully off.";
+                setSecurityFixButton("Confirm Shutdown & Finish", false);
+            } else if (phase === "verify") {
+                securityFixMessage.textContent =
+                    "VM 101 is starting back up. Once " + unit + " is reachable again, "
+                    + "click Continue to verify the passthrough drivers loaded.";
+                setSecurityFixButton("Verify Drivers", false);
+            } else if (phase === "restart") {
+                securityFixMessage.textContent =
+                    "Click Continue to restart all platform services on " + unit + ".";
+                setSecurityFixButton("Restart Services", false);
+            } else if (phase === "done") {
+                securityFixMessage.textContent = "Security update fix complete for " + unit + ".";
+                setSecurityFixButton("Done", false);
+            }
+        }
+
+        function closeSecurityFixModal() {
+            securityFixModal.classList.remove("is-open");
+            securityFixUnit = "";
+            securityFixButton = null;
+            securityFixVersion = null;
+            securityFixPhase = "start";
+            securityFixToken = null;
+            securityFixLockedByOther = false;
+            securityFixLog.textContent = "";
+            securityFixForceClear.hidden = true;
+            securityFixAction.hidden = false;
+        }
+
+        function openSecurityFixModal(unit, button) {
+            securityFixUnit = unit || "";
+            securityFixButton = button || null;
+            securityFixVersion = null;
+            securityFixLog.textContent = "";
+            securityFixForceClear.hidden = true;
+            securityFixAction.hidden = false;
+            securityFixLockedByOther = false;
+            securityFixModal.classList.add("is-open");
+
+            const savedToken = loadSecurityFixToken(securityFixUnit);
+            applySecurityFixPhaseUI("start", securityFixUnit);
+            securityFixMessage.textContent = "Checking " + securityFixUnit + "'s status...";
+            setSecurityFixButton("Checking...", true);
+
+            const statusUrl = "/issues/unit-status/" + encodeURIComponent(securityFixUnit)
+                + (savedToken ? ("?token=" + encodeURIComponent(savedToken)) : "");
+            fetch(statusUrl)
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (!data.busy) {
+                        // Nothing in flight — fresh start. Clear any stale token.
+                        saveSecurityFixToken(securityFixUnit, null);
+                        applySecurityFixPhaseUI("start", securityFixUnit);
+                        return;
+                    }
+                    if (data.is_owner && savedToken) {
+                        // Resume our own in-flight job where it left off.
+                        securityFixToken = savedToken;
+                        securityFixVersion = data.version || null;
+                        (data.log || []).forEach(function (line) {
+                            securityFixLogLine(line);
+                        });
+                        const resumePhase = SECURITY_FIX_RESUME_PHASE[data.phase] || "start";
+                        applySecurityFixPhaseUI(resumePhase, securityFixUnit);
+                        securityFixLogLine(
+                            "(Resumed in-progress security fix from a previous session.)"
+                        );
+                    } else if (data.action === "Security Update Fix") {
+                        // Someone else's wizard is running against this unit.
+                        securityFixLockedByOther = true;
+                        securityFixMessage.textContent =
+                            "A security update fix is already in progress on " + securityFixUnit
+                            + " (phase: " + (data.phase || "unknown") + "). If that session is "
+                            + "gone or stuck, use Force Clear Lock below to release it.";
+                        securityFixAction.hidden = true;
+                        securityFixForceClear.hidden = false;
+                    } else {
+                        // Busy with a different quick action (reboot, restart services).
+                        securityFixLockedByOther = true;
+                        securityFixMessage.textContent =
+                            securityFixUnit + " is busy: " + (data.action || "another action")
+                            + ". Wait for it to finish, or use Force Clear Lock if it's stuck.";
+                        securityFixAction.hidden = true;
+                        securityFixForceClear.hidden = false;
+                    }
+                })
+                .catch(function () {
+                    // Status check failed — fall back to a plain fresh start.
+                    applySecurityFixPhaseUI("start", securityFixUnit);
+                });
+            securityFixCancel.focus();
+        }
+
+        function runSecurityFixPhase() {
+            const unit = securityFixUnit;
+            if (!unit) {
+                return;
+            }
+            if (securityFixPhase === "start") {
+                setSecurityFixButton("Running step 1...", true);
+                securityFixCall("/issues/security-update-fix/step1/")
+                    .then(function (data) {
+                        securityFixVersion = data.version;
+                        saveSecurityFixToken(unit, data.token);
+                        securityFixLogLine(data.message || "Step 1 complete.");
+                        applySecurityFixPhaseUI("awaiting_webui", unit);
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Step 1 failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Step 1", false);
+                    });
+            } else if (securityFixPhase === "awaiting_webui") {
+                setSecurityFixButton("Running step 2...", true);
+                securityFixCall("/issues/security-update-fix/step2/")
+                    .then(function (data) {
+                        securityFixLogLine(data.message || "Step 2 complete.");
+                        applySecurityFixPhaseUI("awaiting_reboot", unit);
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Step 2 failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Step 2", false);
+                    });
+            } else if (securityFixPhase === "awaiting_reboot") {
+                setSecurityFixButton("Shutting down...", true);
+                securityFixMessage.textContent = unit + " is shutting down. Please wait...";
+                securityFixCall("/issues/security-update-fix/shutdown/")
+                    .then(function (data) {
+                        securityFixLogLine(data.message || "Shutdown triggered.");
+                        applySecurityFixPhaseUI("awaiting_shutdown", unit);
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Shutdown step failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Shutdown", false);
+                    });
+            } else if (securityFixPhase === "awaiting_shutdown") {
+                setSecurityFixButton("Finishing...", true);
+                securityFixCall("/issues/security-update-fix/finish/", { version: securityFixVersion })
+                    .then(function (data) {
+                        securityFixLogLine(data.message || "GPU reassigned, VM starting.");
+                        applySecurityFixPhaseUI("verify", unit);
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Finish step failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Finish", false);
+                    });
+            } else if (securityFixPhase === "verify") {
+                setSecurityFixButton("Verifying...", true);
+                securityFixCall("/issues/security-update-fix/verify/")
+                    .then(function (data) {
+                        securityFixLogLine(data.message || "Verification complete.");
+                        applySecurityFixPhaseUI("restart", unit);
+                        if (!data.drivers_loaded) {
+                            securityFixMessage.textContent =
+                                "Some drivers did not load — check the log above. You can still "
+                                + "continue to restart services, or Cancel to investigate first.";
+                        }
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Verify step failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Verify", false);
+                    });
+            } else if (securityFixPhase === "restart") {
+                setSecurityFixButton("Restarting...", true);
+                securityFixCall("/issues/restart-services/")
+                    .then(function (data) {
+                        securityFixLogLine(data.message || "Services restarted.");
+                        saveSecurityFixToken(unit, null);
+                        applySecurityFixPhaseUI("done", unit);
+                        renderConsole(true);
+                        statusEl.textContent = "Security update fix complete for " + unit + ".";
+                    })
+                    .catch(function (error) {
+                        securityFixLogLine("Restart step failed: " + (error.message || error));
+                        setSecurityFixButton("Retry Restart", false);
+                    });
+            } else {
+                closeSecurityFixModal();
+            }
+        }
+
+        securityFixCancel.addEventListener("click", closeSecurityFixModal);
+        securityFixAction.addEventListener("click", runSecurityFixPhase);
+        securityFixForceClear.addEventListener("click", function () {
+            const unit = securityFixUnit;
+            if (!unit) {
+                return;
+            }
+            securityFixForceClear.disabled = true;
+            fetch("/issues/unit-lock/" + encodeURIComponent(unit) + "/clear", { method: "POST" })
+                .then(function (response) { return response.json(); })
+                .then(function () {
+                    saveSecurityFixToken(unit, null);
+                    securityFixLockedByOther = false;
+                    securityFixForceClear.hidden = true;
+                    securityFixForceClear.disabled = false;
+                    securityFixAction.hidden = false;
+                    applySecurityFixPhaseUI("start", unit);
+                })
+                .catch(function () {
+                    securityFixForceClear.disabled = false;
+                });
+        });
+        securityFixModal.addEventListener("click", function (event) {
+            if (event.target === securityFixModal) {
+                closeSecurityFixModal();
+            }
+        });
+
         function executeBounceAction(unit, label, endpoint, bounceBtn) {
             if (!unit || !endpoint) {
                 return;
@@ -4766,7 +6285,7 @@
                     }
                 })
                 .catch(function (error) {
-                    window.alert(label + " failed: " + (error.message || error));
+                    notifyError(label + " failed: " + (error.message || error));
                     if (bounceBtn) {
                         bounceBtn.disabled = false;
                         bounceBtn.textContent = label;
@@ -4907,7 +6426,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5046,7 +6565,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5147,7 +6666,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5193,7 +6712,7 @@
         function openClearMuCoordinatesModal(subject, unit, button) {
             const mu = muTrailerFromSubject(subject, unit);
             if (!mu) {
-                window.alert("Could not determine MU trailer from this project subject.");
+                notifyError("Could not determine MU trailer from this project subject.");
                 return;
             }
             clearMuCoordinatesSubject = subject || "";
@@ -5268,7 +6787,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5289,7 +6808,7 @@
         function openClearMuSiteModal(subject, unit, button) {
             const mu = muTrailerFromSubject(subject, unit);
             if (!mu) {
-                window.alert("Could not determine MU trailer from this project subject.");
+                notifyError("Could not determine MU trailer from this project subject.");
                 return;
             }
             clearMuSiteSubject = subject || "";
@@ -5362,7 +6881,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5420,7 +6939,7 @@
 
         function beginCreateRefurbishProjects(subject, unit, button) {
             if (!subject) {
-                window.alert("This project has no subject/title.");
+                notifyError("This project has no subject/title.");
                 return;
             }
             if (button) {
@@ -5454,7 +6973,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button && !createRefurbishModal.classList.contains("is-open")) {
@@ -5513,7 +7032,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5558,7 +7077,7 @@
 
         function beginSiteAction(action, subject, button) {
             if (!subject) {
-                window.alert("This project has no subject/title.");
+                notifyError("This project has no subject/title.");
                 return;
             }
             const label = action === "terminate" ? "Terminate Site" : "Activate Site";
@@ -5588,7 +7107,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button && !siteActionModal.classList.contains("is-open")) {
@@ -5658,7 +7177,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5731,11 +7250,11 @@
 
         function beginTechChecks(projectId, subject, button) {
             if (!projectId) {
-                window.alert("This project has no project id.");
+                notifyError("This project has no project id.");
                 return;
             }
             if (!subject) {
-                window.alert("This project has no subject/title.");
+                notifyError("This project has no subject/title.");
                 return;
             }
             if (button) {
@@ -5768,7 +7287,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5857,7 +7376,7 @@
                         const message = data.error
                             || "Tech Checks (180 Unit) stopped with a partial failure.";
                         statusEl.textContent = message;
-                        window.alert(message);
+                        notifyError(message);
                         return;
                     }
                     const summary =
@@ -5880,7 +7399,7 @@
                     consoleLines.push(message);
                     renderConsole(true);
                     statusEl.textContent = message;
-                    window.alert(message);
+                    notifyError(message);
                 })
                 .finally(function () {
                     if (button) {
@@ -5921,7 +7440,59 @@
                 ? "Tickets skipped: " + skipped + " / " + total
                 : "Tickets skipped: 0";
             updateListCompleteStatus();
+            renderStatsStrip();
         }
+
+        function renderStatsStrip() {
+            if (!statsStripEl) {
+                return;
+            }
+            statsStripEl.innerHTML = "";
+            let downTotal = 0;
+            DOWN_STATS_LISTS.forEach(function (item) {
+                const count = (listState[item.id] || []).length;
+                downTotal += count;
+                const chip = document.createElement("div");
+                chip.className = "stats-chip" + (count ? " is-warning" : "");
+                chip.innerHTML = "<strong>" + count + "</strong> " + item.label;
+                statsStripEl.appendChild(chip);
+            });
+            const totalChip = document.createElement("div");
+            totalChip.className = "stats-chip" + (downTotal ? " is-warning" : "");
+            totalChip.innerHTML = "<strong>" + downTotal + "</strong> units down/degraded";
+            statsStripEl.insertBefore(totalChip, statsStripEl.firstChild);
+
+            const busyChip = document.createElement("div");
+            busyChip.className = "stats-chip" + (busyUnitsCount ? " is-warning" : "");
+            busyChip.innerHTML = "<strong>" + busyUnitsCount + "</strong> mid-maintenance";
+            statsStripEl.appendChild(busyChip);
+        }
+
+        // One poll feeds both the mid-maintenance count and the per-row busy
+        // flags. (There were briefly two separate 20s polls hitting the same
+        // endpoint; this is the single one.)
+        function pollBusyUnits() {
+            fetch("/issues/busy-units")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const units = (data && data.units) || [];
+                    busyUnitsCount = units.length;
+                    const next = {};
+                    units.forEach(function (item) {
+                        if (item && item.unit) {
+                            next[String(item.unit).toUpperCase()] = item;
+                        }
+                    });
+                    busyUnitsMap = next;
+                    document.querySelectorAll("[data-busy-unit]").forEach(applyBusyFlag);
+                    renderStatsStrip();
+                })
+                .catch(function () {})
+                .finally(function () {
+                    setTimeout(pollBusyUnits, 20000);
+                });
+        }
+        pollBusyUnits();
 
         function isListComplete(entries) {
             if (!entries || !entries.length) {
@@ -5940,7 +7511,6 @@
                 setListComplete(id, isListComplete(listState[id] || []));
             });
             setListComplete("discarded_tickets", false);
-            renderListCategoryMenu();
         }
 
         function setListComplete(id, complete) {
@@ -5949,12 +7519,7 @@
             if (sectionEl) {
                 sectionEl.classList.toggle("is-complete", complete);
             }
-            const option = listCategoryEl.querySelector('option[value="' + id + '"]');
-            if (option) {
-                const label = categoryOptionLabel(option);
-                option.setAttribute("data-complete", complete ? "true" : "false");
-                option.textContent = complete ? label + " — Complete" : label;
-            }
+            listCompleteState[id] = !!complete;
         }
 
         function listCountText(entries) {
@@ -6679,15 +8244,19 @@
                     const resolveBox = document.createElement("input");
                     resolveBox.type = "checkbox";
                     resolveBox.className = "resolve-box";
-                    resolveBox.title = "Mark ticket as resolved";
+                    resolveBox.title = "Mark ticket as resolved (stays in list until Resolve Selected is clicked)";
                     resolveBox.checked = !!entry.resolved;
                     resolveBox.addEventListener("change", function () {
-                        if (resolveBox.checked) {
-                            markIssueResolved(entry);
-                            return;
+                        entry.resolved = resolveBox.checked;
+                        if (entry.resolved) {
+                            entry.worked = false;
+                            entry.skipped = false;
+                            entry.isNew = false;
+                            workedBox.checked = false;
+                            skipBox.checked = false;
                         }
-                        entry.resolved = false;
                         refreshRow();
+                        updateResolveSelectedButton();
                     });
                     rowRws.appendChild(resolveBox);
 
@@ -6706,6 +8275,7 @@
                             skipBox.checked = false;
                         }
                         refreshRow();
+                        updateResolveSelectedButton();
                     });
                     rowRws.appendChild(workedBox);
 
@@ -6724,6 +8294,7 @@
                             workedBox.checked = false;
                         }
                         refreshRow();
+                        updateResolveSelectedButton();
                     });
                     rowRws.appendChild(skipBox);
                 }
@@ -6895,6 +8466,8 @@
                 }
 
                 rowBody.appendChild(label);
+                appendUnitBusyFlag(rowBody, entry);
+                appendQuickActions(rowBody, entry);
 
                 const menuParts = createCommandMenuElement(entry, li);
                 const commandItems = menuParts.commandItems;
@@ -6944,6 +8517,7 @@
                     disableErpWriteControl(createBtn);
                     commandItems.appendChild(createBtn);
                     appendCamerasCommandMenu(commandItems, entry);
+                    appendDiagnosticsCommandMenu(commandItems, entry);
                     const openMenu = appendCommandSubmenu(commandItems, "Open");
                     appendShieldMenu(openMenu, entry);
                     appendErpMenu(openMenu, entry);
@@ -7251,7 +8825,7 @@
                                     moveEntryToList(entry, id, category);
                                 })
                                 .catch(function (error) {
-                                    window.alert(
+                                    notifyError(
                                         label + " failed: " + (error.message || error)
                                     );
                                 })
@@ -7278,6 +8852,7 @@
                 appendWeatherCommandMenu(commandItems, entry);
                 appendRouterCommandMenu(commandItems, entry);
                 appendCamerasCommandMenu(commandItems, entry);
+                    appendDiagnosticsCommandMenu(commandItems, entry);
 
                 const openMenu = appendCommandSubmenu(commandItems, "Open");
                 appendShieldMenu(openMenu, entry);
@@ -7575,7 +9150,7 @@
                                 consoleLines.push(message);
                                 renderConsole(true);
                                 statusEl.textContent = message;
-                                window.alert(message);
+                                notifyError(message);
                             })
                             .finally(function () {
                                 uptimeBtn.disabled = false;
@@ -7642,7 +9217,7 @@
                                     consoleLines.push(message);
                                     renderConsole(true);
                                     statusEl.textContent = message;
-                                    window.alert(message);
+                                    notifyError(message);
                                 })
                                 .finally(function () {
                                     logBtn.disabled = false;
@@ -7774,7 +9349,7 @@
                                 renderConsole(true);
                             })
                             .catch(function (error) {
-                                window.alert(label + " failed: " + (error.message || error));
+                                notifyError(label + " failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 setFieldsBtn.textContent = label;
@@ -7993,7 +9568,7 @@
                                 renderConsole(true);
                             })
                             .catch(function (error) {
-                                window.alert("Compute ping failed: " + (error.message || error));
+                                notifyError("Compute ping failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 pingComputeBtn.disabled = false;
@@ -8051,7 +9626,7 @@
                                 renderConsole(true);
                             })
                             .catch(function (error) {
-                                window.alert("Scrypted ping failed: " + (error.message || error));
+                                notifyError("Scrypted ping failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 pingScryptedBtn.disabled = false;
@@ -8097,7 +9672,7 @@
                                     renderConsole(true);
                                 })
                                 .catch(function (error) {
-                                    window.alert("PVE ping failed: " + (error.message || error));
+                                    notifyError("PVE ping failed: " + (error.message || error));
                                 })
                                 .finally(function () {
                                     pingPveBtn.disabled = false;
@@ -8167,7 +9742,7 @@
                                 propagateLedFromEntry(entry);
                             })
                             .catch(function (error) {
-                                window.alert("Camera View validation failed: " + (error.message || error));
+                                notifyError("Camera View validation failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 validateCameraViewBtn.disabled = false;
@@ -8218,7 +9793,7 @@
                                 renderConsole(true);
                             })
                             .catch(function (error) {
-                                window.alert("Speaker ping failed: " + (error.message || error));
+                                notifyError("Speaker ping failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 pingSpeakerBtn.disabled = false;
@@ -8280,7 +9855,7 @@
                                 renderConsole(true);
                             })
                             .catch(function (error) {
-                                window.alert("Camera ping failed: " + (error.message || error));
+                                notifyError("Camera ping failed: " + (error.message || error));
                             })
                             .finally(function () {
                                 pingCameraBtn.disabled = false;
@@ -8301,6 +9876,9 @@
             applyListFilters();
             setListComplete(id, isListComplete(entries));
             scheduleTicketWeatherRefresh();
+            if (!isProjectsList(id)) {
+                updateResolveSelectedButton();
+            }
         }
 
         function renderDiscardedList() {

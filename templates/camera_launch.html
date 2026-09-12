@@ -4,10 +4,28 @@
     <meta charset="UTF-8">
     <title>Cameras — {{ unit }}</title>
     <style>
+        :root {
+            --accent-soft: #8fe9f8;
+            --bg-deepest: #000000;
+            --bg-panel: #0d1316;
+            --bg-sunken: #06090b;
+            --bg-sunken-alt: #040708;
+            --bg-tile: #0a1012;
+            --border: #1c2a30;
+            --border-strong: #31484f;
+            --caution-text: #ffbc5c;
+            --danger-text: #ff8fa3;
+            --text: #dfe7ea;
+            --text-muted: #93a4aa;
+            --radius-sm: 2px;
+            --radius: 3px;
+            --radius-pill: 3px;
+        }
+
         body {
             margin: 0;
-            background: #0f172a;
-            color: #e2e8f0;
+            background: var(--bg-sunken);
+            color: var(--text);
             font-family: Segoe UI, Arial, sans-serif;
         }
         .toolbar {
@@ -16,8 +34,8 @@
             gap: 8px;
             align-items: center;
             padding: 10px 12px;
-            background: #1e293b;
-            border-bottom: 1px solid #334155;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
             position: sticky;
             top: 0;
             z-index: 5;
@@ -30,15 +48,15 @@
         }
         .toolbar label {
             font-size: 12px;
-            color: #94a3b8;
+            color: var(--text-muted);
         }
         .toolbar select,
         .toolbar button,
         .toolbar a.button {
-            background: #334155;
-            color: #e2e8f0;
-            border: 1px solid #475569;
-            border-radius: 4px;
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
             padding: 6px 10px;
             font-size: 12px;
             cursor: pointer;
@@ -46,7 +64,7 @@
         }
         .toolbar button:hover,
         .toolbar a.button:hover {
-            background: #475569;
+            background: var(--border-strong);
         }
         .grid {
             display: grid;
@@ -57,24 +75,24 @@
         .card {
             display: flex;
             flex-direction: column;
-            border: 1px solid #334155;
-            border-radius: 6px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
             overflow: hidden;
-            background: #020617;
+            background: var(--bg-deepest);
         }
         .card-head {
             display: flex;
             gap: 8px;
             align-items: center;
             padding: 6px 8px;
-            background: #1e293b;
+            background: var(--bg-panel);
             font-size: 12px;
         }
         .card-head strong { margin-right: auto; }
-        .card-head span.host { color: #94a3b8; }
+        .card-head span.host { color: var(--text-muted); }
         .card-head a,
         .card-head button {
-            color: #93c5fd;
+            color: var(--accent-soft);
             background: none;
             border: 0;
             padding: 0;
@@ -87,13 +105,13 @@
         .frame-wrap {
             position: relative;
             overflow: hidden;
-            background: #111827;
+            background: var(--bg-tile);
         }
         .frame-wrap iframe {
             border: 0;
             display: block;
             transform-origin: top left;
-            background: #111827;
+            background: var(--bg-tile);
         }
         .signed-out {
             position: absolute;
@@ -102,19 +120,19 @@
             align-items: center;
             justify-content: center;
             font-size: 12px;
-            color: #94a3b8;
-            background: #0b1220;
+            color: var(--text-muted);
+            background: var(--bg-sunken-alt);
         }
         .signed-out.is-hidden { display: none; }
         .toolbar .hint {
             font-size: 12px;
-            color: #fbbf24;
+            color: var(--caution-text);
             max-width: 420px;
             line-height: 1.3;
         }
         .empty {
             padding: 24px;
-            color: #fca5a5;
+            color: var(--danger-text);
         }
     </style>
 </head>
