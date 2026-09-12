@@ -10,10 +10,12 @@ import subprocess
 import tempfile
 import shlex
 import zabbix_tool
+import unit_history
 import multiprocessing
 import paramiko
 import threading
 import socket
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
@@ -108,8 +110,7 @@ def scrypted_web_url(unit):
 
 def scrypted_open_url(unit):
     """Return a Scrypted web UI URL when the unit has a Scrypted IP in the net sheet."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     row = ensure_unit_net_info(unit, needed_indexes=(12,))
     if not row:
         return ""
@@ -385,7 +386,32 @@ headers = {
     "X-Authorization": f"Token {api_token}"
 }
 
-response = requests.get(url, headers=headers)
+# NOTE: there used to be a module-level `requests.get(url, headers=headers)`
+# here — a blocking, un-timed call to the Victron VRM API that ran on every
+# `import work_tool`, i.e. before flask_endpoints.py could even bind a port.
+# Its result was never read (every later `response` is a local), and the
+# Victron UI is retired, so it was pure startup latency and a hard dependency
+# on VRM being reachable. The battery/install-checker CLI helpers below build
+# their own url/headers locally and are unaffected.
+
+
+def ensure_net_array():
+    """
+    Make sure net_sheet.csv has been loaded into net_array.
+
+    Safe to call from anywhere and cheap once loaded. Returns True when
+    net_array has rows. Never raises: a missing or unreadable net sheet
+    degrades to an empty array (callers report "not found in net sheet")
+    rather than taking the whole dashboard down.
+    """
+    if net_array:
+        return True
+    try:
+        generate_net_array()
+    except Exception as exc:
+        print(f"Could not load net sheet ({netsheet}): {exc}")
+    return bool(net_array)
+
 
 def main():
     while True:
@@ -662,7 +688,7 @@ def ping_router_status(unit, mode="quick"):
         return None, f"No router IP for {unit_key}"
     code, output = result
     reachable = _ping_reachable(output)
-    return {
+    payload = {
         "unit": unit_key,
         "ip": router_ip_for_unit(unit_key),
         "mode": "quick" if stop_on_success else "fixed",
@@ -670,7 +696,19 @@ def ping_router_status(unit, mode="quick"):
         "reachable": reachable,
         "returncode": code,
         "output": output or "",
-    }, None
+    }
+    # Free statistics: fixed mode already sent four echoes and kept every
+    # reply, so min/avg/max/jitter/loss come out of text we already have.
+    # Quick mode stops at the first reply and stays exactly as fast as before.
+    stats = parse_ping_statistics(output)
+    if stats.get("samples", 0) > 1:
+        payload["stats"] = stats
+        payload["stats_line"] = (
+            f"{stats['replies']}/{stats.get('sent', stats['replies'])} replies, "
+            f"min {stats['min_ms']}ms / avg {stats['avg_ms']}ms / max {stats['max_ms']}ms, "
+            f"jitter {stats['jitter_ms']}ms"
+        )
+    return payload, None
 
 _LONG_PING_MAX_SEC = 30 * 60
 _long_ping_lock = threading.Lock()
@@ -999,8 +1037,7 @@ def _open_switch_session(unit):
     unit = str(unit or "").strip()
     if not unit:
         return None, "Missing unit"
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     load_dotenv(env_path)
     row = ensure_unit_net_info(unit, needed_indexes=(2,))
     if not row:
@@ -1177,11 +1214,11 @@ def security_update_fix_part_1(unit):
 
     pvescript = "\n".join(commands)
 
-
-    for row in net_array:
-        if unit.upper() == row[0].upper():
-            ip = row[11]
-            break
+    row = _net_row_for_unit(unit)
+    if row is None or len(row) <= 11 or not str(row[11]).strip():
+        print(f"No PVE IP for {unit} in net sheet")
+        return None, unit
+    ip = row[11]
 
     pveSshClient = paramiko.SSHClient()
     pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1228,18 +1265,19 @@ def security_update_fix_step_2(unit):
             f"echo '{scryptSshPass}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
             f"echo '{scryptSshPass}' | sudo -S update-grub",
             "ls /boot/vmlinuz-* /boot/initrd.img-*",
-            f"echo '{scryptSshPass}' | sudo -S dpkg -l | grep -E '^i[^i]'",
+            f"echo '{scryptSshPass}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
             f"echo '{scryptSshPass}' | sudo -S apt-mark showhold",
             unattended_fix_cmd,
-            f"echo '{scryptSshPass}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades",
+            f"echo '{scryptSshPass}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
             f"echo '{scryptSshPass}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true"
         ]
     scryptedscript = "\n".join(commands)
 
-    for row in net_array:
-        if unit.upper() == row[0].upper():
-            ip = row[12]
-            break
+    row = _net_row_for_unit(unit)
+    if row is None or len(row) <= 12 or not str(row[12]).strip():
+        print(f"No Scrypted IP for {unit} in net sheet")
+        return unit
+    ip = row[12]
 
     scryptedSshClient = paramiko.SSHClient()
     scryptedSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1252,7 +1290,7 @@ def security_update_fix_step_2(unit):
 
         if errors:
             print(f"errors: {errors}")
-            return
+            
 
         output = output.splitlines()
         for line in output:
@@ -1290,11 +1328,15 @@ def security_update_fix_step_3(unit, version):
     ]
     cmdscript = "\n".join(commands)
     cmdscript2 = "\n".join(commands2)
-    for row in net_array:
-        if unit.upper() == row[0].upper():
-            scrypt_ip = row[12]
-            pve_ip = row[11]
-            break
+    row = _net_row_for_unit(unit)
+    if row is None or len(row) <= 12:
+        print(f"Unit {unit} not found in net sheet")
+        return None, unit
+    scrypt_ip = row[12]
+    pve_ip = row[11]
+    if not str(scrypt_ip).strip() or not str(pve_ip).strip():
+        print(f"Missing Scrypted or PVE IP for {unit} in net sheet")
+        return None, unit
 
     scryptSshClient = paramiko.SSHClient()
     scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1367,10 +1409,11 @@ def security_update_step_4(unit):
     vga_counter = 0
     i915_counter = 0
 
-    for row in net_array:
-        if unit.upper() == row[0].upper():
-            ip = row[12]
-            break
+    row = _net_row_for_unit(unit)
+    if row is None or len(row) <= 12 or not str(row[12]).strip():
+        print(f"No Scrypted IP for {unit} in net sheet")
+        return False
+    ip = row[12]
     try:
         scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
         stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
@@ -1434,10 +1477,11 @@ def refresh_platform_services(unit):
     ]
 
     cmdscript = "\n".join(commands)
-    for row in net_array:
-        if unit.upper() == row[0].upper():
-            ip = row[12]
-            break
+    row = _net_row_for_unit(unit)
+    if row is None or len(row) <= 12 or not str(row[12]).strip():
+        print(f"No Scrypted IP for {unit} in net sheet")
+        return False
+    ip = row[12]
     scryptSshClient = paramiko.SSHClient()
     scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
@@ -1745,6 +1789,157 @@ def restart_platform_services(unit):
     if ok:
         return True, f"Restarted all platform services on {unit}"
     return False, f"Failed to restart services on {unit}"
+
+
+# ---------------------------------------------------------------------------
+# Per-unit busy/lock registry.
+#
+# Guards against two people (or two tabs) running conflicting actions
+# (Security Update Fix, Reboot Scrypted, Reboot PVE, Restart All Services)
+# against the same unit at the same time, and doubles as the server-side
+# job store for the multi-step Security Update Fix wizard so its state
+# (phase / saved hostpci version / log) survives a page refresh. No history
+# is kept once a job ends — this is a live lock, not an audit trail.
+# ---------------------------------------------------------------------------
+
+_unit_busy = {}
+_unit_busy_lock = threading.Lock()
+_UNIT_BUSY_LOG_MAX = 200
+
+
+def unit_busy_status(unit):
+    """Return a copy of the current busy-state dict for a unit, or None if free."""
+    unit = str(unit or "").strip()
+    with _unit_busy_lock:
+        info = _unit_busy.get(unit)
+        return dict(info) if info else None
+
+
+def unit_busy_start(unit, action, version=None):
+    """
+    Try to mark a unit busy with the given action.
+    Returns (ok, token_or_None, existing_info_or_None). On success the caller
+    gets an ownership token that must be presented to touch/end the job.
+    """
+    unit = str(unit or "").strip()
+    with _unit_busy_lock:
+        existing = _unit_busy.get(unit)
+        if existing:
+            return False, None, dict(existing)
+        token = uuid.uuid4().hex
+        _unit_busy[unit] = {
+            "unit": unit,
+            "action": action,
+            "token": token,
+            "phase": "start",
+            "version": version,
+            "log": [],
+            "started_at": time.time(),
+        }
+        return True, token, None
+
+
+def unit_busy_touch(unit, token, phase=None, version=None, log_line=None):
+    """Update phase/version and optionally append a log line. Returns True if applied."""
+    unit = str(unit or "").strip()
+    with _unit_busy_lock:
+        info = _unit_busy.get(unit)
+        if not info or info.get("token") != token:
+            return False
+        if phase is not None:
+            info["phase"] = phase
+        if version is not None:
+            info["version"] = version
+        if log_line:
+            info.setdefault("log", []).append(str(log_line))
+            info["log"] = info["log"][-_UNIT_BUSY_LOG_MAX:]
+        return True
+
+
+def unit_busy_end(unit, token):
+    """Release a unit's busy state if the token matches. Returns True if cleared."""
+    unit = str(unit or "").strip()
+    with _unit_busy_lock:
+        info = _unit_busy.get(unit)
+        if not info or info.get("token") != token:
+            return False
+        del _unit_busy[unit]
+        return True
+
+
+def unit_busy_force_clear(unit):
+    """Force-clear a unit's busy state regardless of token — escape hatch for a stuck lock."""
+    unit = str(unit or "").strip()
+    with _unit_busy_lock:
+        return _unit_busy.pop(unit, None) is not None
+
+
+def list_busy_units():
+    """Return a list of {unit, action, phase, started_at} for every currently busy unit."""
+    with _unit_busy_lock:
+        return [
+            {
+                "unit": info.get("unit"),
+                "action": info.get("action"),
+                "phase": info.get("phase"),
+                "started_at": info.get("started_at"),
+            }
+            for info in _unit_busy.values()
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Per-unit persistent notes — a small free-text note per unit, visible to
+# everyone using the dashboard, saved to a JSON file so it survives restarts.
+# ---------------------------------------------------------------------------
+
+_unit_notes_lock = threading.Lock()
+
+
+def _unit_notes_path():
+    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
+    if not data_dir:
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "unit_notes.json")
+
+
+def _load_unit_notes():
+    try:
+        with open(_unit_notes_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def get_unit_note(unit):
+    """Return (text, updated_at) for a unit's saved note (empty strings if none)."""
+    unit = str(unit or "").strip()
+    with _unit_notes_lock:
+        notes = _load_unit_notes()
+    entry = notes.get(unit) or {}
+    return entry.get("text", ""), entry.get("updated_at", "")
+
+
+def set_unit_note(unit, text):
+    """Save (or clear, if text is blank) a unit's note. Returns the new updated_at."""
+    unit = str(unit or "").strip()
+    text = str(text or "")
+    with _unit_notes_lock:
+        path = _unit_notes_path()
+        notes = _load_unit_notes()
+        if text.strip():
+            notes[unit] = {
+                "text": text,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        else:
+            notes.pop(unit, None)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(notes, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        return notes.get(unit, {}).get("updated_at", "")
 
 def get_robofiber_uptime(unit):
     """SSH to the unit switch and return uptime (Robofiber or Netonix)."""
@@ -2140,8 +2335,7 @@ PATCH_VERSION_COMMAND = (
 )
 
 def _scrypted_ssh_target(unit):
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(unit or "").strip()
     if not unit:
         return None, "", "Missing unit"
@@ -2373,8 +2567,7 @@ def check_patch_version(unit):
 
 def check_all_patches():
     patch_array = []
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     for row in net_array:
         try:
             rdnum = int(str(row[0]).strip()[-4:])
@@ -2592,6 +2785,7 @@ def _issue_ticket_url(issue_id):
 def _net_row_for_unit(unit):
     if not unit:
         return None
+    ensure_net_array()
     unit_up = str(unit).strip().upper()
     for row in net_array:
         if row and str(row[0]).strip().upper() == unit_up:
@@ -3044,8 +3238,7 @@ def ensure_unit_net_info(unit, needed_indexes=None):
     Ensure netsheet has a row for unit; backfill blank cells via v19/ERP when sparse.
     Returns the in-memory netsheet row (may still be incomplete on provider failure).
     """
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit_key = _normalize_netsheet_unit(unit)
     if not unit_key:
         return None
@@ -3080,8 +3273,7 @@ def sync_netsheet_from_erp(units=None, include_sparse_sheet_rows=True, max_units
     Bulk backfill missing/sparse netsheet rows via v19.
     units: optional iterable of unit codes (from tickets/projects).
     """
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
 
     candidates = []
     seen = set()
@@ -3249,8 +3441,7 @@ def authenticated_switch_url(unit):
 def switch_login_info(unit):
     """Return switch login details. Units above 3080 use /dologin.asp."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     row = ensure_unit_net_info(unit, needed_indexes=(2,))
     if not row:
         return None, f"Unit {unit} not found in net sheet"
@@ -3479,8 +3670,7 @@ def clear_mu_site_from_subject(subject, unit=None):
 def relay_login_info(unit):
     """Open the relay with fishuser/fishpass basic auth. Units 3100+ only."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     n = unit_number(unit)
     if n is None or n < 3100:
         return None, f"{unit} is not 3100+"
@@ -3526,8 +3716,7 @@ def _pve_ssh_credentials():
 def pve_login_info(unit):
     """Open PVE on port 8006 with pveuser/pvepass. Units above 3300 only."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     n = unit_number(unit)
     if n is None or n <= 3300:
         return None, f"{unit} is not above 3300"
@@ -3756,8 +3945,7 @@ def fetch_fisheye_snapshot(unit):
     if not fishuser or not fishpass:
         return None, "fishuser/fishpass not set in .env"
 
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     row = ensure_unit_net_info(unit, needed_indexes=(5,))
     if not row:
         return None, f"Unit {unit} not found in net sheet"
@@ -3847,8 +4035,7 @@ def _camera_host_port(value, target):
 def list_unit_cameras(unit):
     """Return configured cameras for a unit (target, label, host, port — no credentials)."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     row = ensure_unit_net_info(
         unit,
         needed_indexes=tuple(column for column, _ in CAMERA_ENDPOINTS.values()),
@@ -5010,8 +5197,7 @@ def fetch_erp_prep_projects(statuses=None, page_size=200):
 
 def build_prep_project_entries(project_records):
     """Build Prep list rows without connectivity validation."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     entries = []
     records = list(project_records or [])
     print(f"Building Prep list for {len(records)} project(s)...")
@@ -6582,8 +6768,7 @@ def _match_unit_from_subject(subject):
     text = str(subject or "").strip()
     if not text:
         return ""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     has_head_unit = bool(re.search(r"\b(?:RD|FD)\s*\d+", text, re.IGNORECASE))
     candidate_rows = sorted(
         net_array,
@@ -6616,8 +6801,7 @@ def _connectivity_category_led(category):
 
 def validate_project_records(project_records):
     """Run connectivity-only validation for NOC projects; return Projects list entries."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     entries = []
     records = list(project_records or [])
     print(f"Validating {len(records)} NOC project(s)...")
@@ -7802,8 +7986,7 @@ def validate_issues_report(issue_path=None):
                     continue
                 if "monitoring hours" in subject_lower:
                     print(f"Monitoring Hours ticket (no validation): {subject_cell}")
-                    if not net_array:
-                        generate_net_array()
+                    ensure_net_array()
                     unit = _match_unit_from_subject(subject_cell)
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
@@ -7861,8 +8044,7 @@ def validate_issues_report(issue_path=None):
                     continue
                 if "relocation" in subject_lower:
                     print(f"Relocation ticket (no validation): {subject_cell}")
-                    if not net_array:
-                        generate_net_array()
+                    ensure_net_array()
                     unit = _match_unit_from_subject(subject_cell)
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
@@ -7920,8 +8102,7 @@ def validate_issues_report(issue_path=None):
                     continue
                 if "termination" in subject_lower:
                     print(f"Termination ticket (no validation): {subject_cell}")
-                    if not net_array:
-                        generate_net_array()
+                    ensure_net_array()
                     unit = _match_unit_from_subject(subject_cell)
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
@@ -8340,8 +8521,7 @@ def validate_issues_report(issue_path=None):
 
 def ping_speaker_status(unit):
     """Ping a unit's speaker and return its current status plus raw output."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit, needed_indexes=(4,)):
         return None, "", f"Unit {unit} not found in net sheet"
     code, output = _safe_ping_result(ping_speaker(unit))
@@ -8351,8 +8531,7 @@ def ping_speaker_status(unit):
 
 def _start_bounce_tool(unit, executable_name, row_index, endpoint_label):
     """Launch a trusted network utility with one endpoint IP argument."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     row = ensure_unit_net_info(unit, needed_indexes=(row_index,))
     if not row:
         return None, f"Unit {unit} not found in net sheet"
@@ -8393,8 +8572,7 @@ def bounce_speaker(unit):
 
 def ping_camera_status(unit, target):
     """Ping one camera endpoint and return its current status plus raw output."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     endpoint = CAMERA_ENDPOINTS.get(target)
     if not endpoint:
         return None, "", f"Unknown camera target: {target}"
@@ -8407,8 +8585,7 @@ def ping_camera_status(unit, target):
 
 def ping_compute_status(unit):
     """Ping the unit's NUC/PVE endpoint and return its current status."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     needed = (11,) if uses_pve(unit) else (3,)
     if not ensure_unit_net_info(unit, needed_indexes=needed):
         return None, "", "", f"Unit {unit} not found in net sheet"
@@ -8420,8 +8597,7 @@ def ping_compute_status(unit):
 
 def ping_scrypted_status(unit):
     """Ping the unit's Scrypted endpoint and return its current status."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit, needed_indexes=(12,)):
         return None, "", f"Unit {unit} not found in net sheet"
     code, output = _safe_ping_result(ping_scrypted(unit))
@@ -8431,8 +8607,7 @@ def ping_scrypted_status(unit):
 
 def ping_pve_status(unit):
     """Ping the unit's PVE endpoint and return its current status."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit, needed_indexes=(11,)):
         return None, "", f"Unit {unit} not found in net sheet"
     code, output = _safe_ping_result(ping_pve(unit))
@@ -8440,10 +8615,9 @@ def ping_pve_status(unit):
         return None, "", f"No PVE endpoint configured for {unit}"
     return _ping_reachable(output), output, None
 
-def validate_unit_status(unit):
+def _validate_unit_status_impl(unit):
     """Run standard validation and return its list key plus console output."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit):
         return None, "", f"Unit {unit} not found in net sheet"
 
@@ -8475,10 +8649,9 @@ def validate_unit_status(unit):
             return category, output, None
     return None, output, f"Validation produced no result for {unit}"
 
-def validate_unit_full(unit):
+def _validate_unit_full_impl(unit):
     """Full ping of router, compute, speaker, cameras, and Scrypted (if IP exists)."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit):
         return None, f"Unit {unit} not found in net sheet"
 
@@ -8679,6 +8852,61 @@ def validate_unit_full(unit):
         })
     return result, None
 
+
+# ---------------------------------------------------------------------------
+# Validation wrappers that record history.
+#
+# Every validation the dashboard already runs is written to unit_history, so
+# flap detection costs no extra packets. Recording never raises and never
+# changes the return value — the implementations above are unchanged.
+# ---------------------------------------------------------------------------
+
+def validate_unit_status(unit):
+    """Quick validation; records the result to unit history. Returns (category, output, error)."""
+    category, output, error = _validate_unit_status_impl(unit)
+    if not error:
+        unit_history.record(unit, "validate_quick", category=category)
+    return category, output, error
+
+
+def validate_unit_full(unit):
+    """Full validation; records the result to unit history. Returns (result, error)."""
+    result, error = _validate_unit_full_impl(unit)
+    if not error and isinstance(result, dict):
+        unit_history.record(
+            unit,
+            "validate_full",
+            category=result.get("category"),
+            led=result.get("led_status"),
+            detail=result.get("summary") or result.get("move_to"),
+        )
+    return result, error
+
+
+def unit_flap_summary(unit, days=7):
+    """How often a unit has flipped between up and down recently."""
+    return unit_history.flap_summary(unit, days=days), None
+
+
+def unit_history_entries(unit, days=30, limit=200):
+    """Recent recorded validations for a unit, newest first."""
+    return {
+        "unit": str(unit or "").strip().upper(),
+        "days": days,
+        "entries": unit_history.history(unit, days=days, limit=limit),
+        "summary": unit_history.flap_summary(unit, days=min(days, 7)),
+    }, None
+
+
+def fleet_flap_report(days=7, min_transitions=3):
+    """Units flapping most in the window — the fleet-wide view."""
+    return {
+        "days": days,
+        "min_transitions": min_transitions,
+        "units": unit_history.fleet_flappers(days=days, min_transitions=min_transitions),
+    }, None
+
+
 def revalidate_list_entry(list_id, item):
     """Run the list-specific check for one ticket and return its destination list."""
     unit = str((item or {}).get("unit") or "").strip()
@@ -8810,8 +9038,7 @@ def revalidate_list_entry(list_id, item):
 
 def validate_stale_vpn_status(unit):
     """Check router and the unit-appropriate compute endpoint for stale VPN status."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit, needed_indexes=(1, 3, 11)):
         return None, f"Unit {unit} not found in net sheet"
 
@@ -8843,8 +9070,7 @@ def validate_stale_vpn_status(unit):
 
 def validate_camera_view_status(unit):
     """Validate router/compute reachability for a Camera View ticket."""
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     if not ensure_unit_net_info(unit, needed_indexes=(1, 3, 11)):
         return None, f"Unit {unit} not found in net sheet"
 
@@ -9485,8 +9711,7 @@ def low_battery_fisheye_screenshotter():
 def reboot_nuc(nuc):
     """SSH to the unit NUC and run shutdown /r /t 1."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(nuc or "").strip()
     if not unit:
         return False, "Missing unit"
@@ -9538,8 +9763,7 @@ def reboot_nuc(nuc):
 def nuc_uptime(nuc):
     """SSH to the unit NUC and return system boot info stdout."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(nuc or "").strip()
     if not unit:
         return False, "Missing unit", ""
@@ -9588,8 +9812,7 @@ def nuc_uptime(nuc):
 def reboot_scrypted(scrypted):
     """SSH to the unit PVE host and reboot VM 101 (Scrypted/NUC guest)."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(scrypted or "").strip()
     if not unit:
         return False, "Missing unit"
@@ -9639,8 +9862,7 @@ def reboot_scrypted(scrypted):
 def reboot_pve(pve):
     """SSH to the unit PVE host and reboot VM 101 (Scrypted/NUC guest)."""
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(pve or "").strip()
     if not unit:
         return False, "Missing unit"
@@ -9688,14 +9910,677 @@ def reboot_pve(pve):
     finally:
         client.close()
 
+# ---------------------------------------------------------------------------
+# Read-only unit diagnostics.
+#
+# Everything below reports and never changes state on the device, so none of
+# it takes the per-unit lock. The shared _ssh_read() helper keeps the paramiko
+# dance (timeouts on both connect and exec, close in a finally) in one place.
+# ---------------------------------------------------------------------------
+
+# Platform services managed on the Scrypted box, in start order. Kept in sync
+# with refresh_platform_services() — if you add a service to one, add it here.
+PLATFORM_SERVICES = (
+    "database", "watchdog", "web", "metadata", "images", "capture",
+    "smtp", "alarms", "events", "onvif", "monitor", "snmp", "cache",
+)
+
+
+def _ssh_read(host, username, password, command, timeout=60, connect_timeout=30):
+    """
+    Run one read-only command over SSH and return (stdout_text, error).
+
+    stderr is folded into the output only when stdout is empty, so a command
+    that warns but succeeds still reports its result.
+    """
+    if not host:
+        return "", "Missing host"
+    if not username or not password:
+        return "", "Missing SSH credentials in .env"
+    client = paramiko.SSHClient()
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=host,
+            port=22,
+            username=username,
+            password=password,
+            timeout=connect_timeout,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+    except paramiko.AuthenticationException:
+        return "", f"SSH authentication failed for {username}@{host}"
+    except Exception as exc:
+        return "", f"SSH to {host} failed: {exc}"
+    finally:
+        client.close()
+    if not out and err:
+        return err, None
+    return out, None
+
+
+def scrypted_service_status(unit):
+    """
+    Which platform services are actually running on the unit's Scrypted box.
+
+    The read that should come before "Restart All Services" — it names the
+    one service that died instead of restarting all thirteen blind.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    _row, host, error = _scrypted_ssh_target(unit)
+    if error:
+        return None, error
+    username, password = _scrypted_ssh_credentials()
+    company = (os.getenv("company") or "").strip().strip('"').strip("'")
+    if not company:
+        return None, "Set `company` in .env — it prefixes the platform service names"
+
+    names = [f"{company}-{svc}.service" for svc in PLATFORM_SERVICES]
+    # One call, one line per service: "<name> <active-state> <sub-state>".
+    command = (
+        "for s in " + " ".join(shlex.quote(n) for n in names) + "; do "
+        "printf '%s %s %s\\n' \"$s\" \"$(systemctl is-active \"$s\" 2>/dev/null)\" "
+        "\"$(systemctl show -p SubState --value \"$s\" 2>/dev/null)\"; done"
+    )
+    raw, error = _ssh_read(host, username, password, command, timeout=60)
+    if error:
+        return None, error
+    if not raw:
+        return None, f"No service status returned from {host}"
+
+    services = []
+    for line in raw.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        state = parts[1] if len(parts) > 1 else "unknown"
+        sub = parts[2] if len(parts) > 2 else ""
+        services.append({
+            "name": name,
+            "short": name.replace(f"{company}-", "").replace(".service", ""),
+            "state": state,
+            "sub_state": sub,
+            "ok": state == "active",
+        })
+
+    down = [s["short"] for s in services if not s["ok"]]
+    if not services:
+        summary = f"No platform services found on {unit}"
+        status = "warn"
+    elif not down:
+        summary = f"All {len(services)} platform services active on {unit}"
+        status = "ok"
+    else:
+        summary = (
+            f"{len(down)} of {len(services)} services not active on {unit}: "
+            + ", ".join(down)
+        )
+        status = "fail"
+
+    return {
+        "unit": unit,
+        "host": host,
+        "status": status,
+        "summary": summary,
+        "services": services,
+        "down": down,
+        "output": raw,
+    }, None
+
+
+def _parse_size_table(text, wanted_mounts=("/",)):
+    """Pull the rows we care about out of `df -h` output."""
+    rows = []
+    for line in str(text or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        mount = parts[-1]
+        if wanted_mounts and mount not in wanted_mounts:
+            continue
+        use = parts[-2].rstrip("%")
+        try:
+            use_pct = int(use)
+        except ValueError:
+            use_pct = None
+        rows.append({
+            "filesystem": parts[0],
+            "size": parts[-5],
+            "used": parts[-4],
+            "available": parts[-3],
+            "use_percent": use_pct,
+            "mount": mount,
+        })
+    return rows
+
+
+def pve_host_resources(unit):
+    """
+    Memory, disk, load and VM state on the unit's PVE host (read-only).
+
+    Answers "is the host wedged, or is only the guest down?" in one call.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    row = ensure_unit_net_info(unit, needed_indexes=(11,))
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    host = _host_only(row[11] if len(row) > 11 else "")
+    if not host:
+        return None, f"No PVE IP for {unit}"
+    username, password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return None, cred_error
+
+    command = (
+        "echo '__UPTIME__'; uptime; "
+        "echo '__MEM__'; free -m; "
+        "echo '__DISK__'; df -h; "
+        "echo '__VMS__'; qm list 2>/dev/null || echo 'qm unavailable'; "
+        "echo '__VM101__'; qm status 101 2>/dev/null || echo 'no VM 101'"
+    )
+    raw, error = _ssh_read(host, username, password, command, timeout=90)
+    if error:
+        return None, error
+    if not raw:
+        return None, f"No output from PVE host {host}"
+
+    sections = {}
+    current = None
+    for line in raw.splitlines():
+        marker = re.fullmatch(r"__([A-Z0-9]+)__", line.strip())
+        if marker:
+            current = marker.group(1).lower()
+            sections[current] = []
+        elif current:
+            sections[current].append(line)
+    sections = {key: "\n".join(value).strip() for key, value in sections.items()}
+
+    info = {"unit": unit, "host": host, "output": raw, "sections": sections}
+    reasons = []
+    status = "ok"
+
+    # Memory: the "Mem:" row of free -m, in MiB.
+    mem_match = re.search(r"^Mem:\s+(\d+)\s+(\d+)\s+(\d+)", sections.get("mem", ""), re.M)
+    if mem_match:
+        total, used, free_mb = (int(mem_match.group(i)) for i in (1, 2, 3))
+        info.update({
+            "mem_total_mb": total, "mem_used_mb": used, "mem_free_mb": free_mb,
+            "mem_used_percent": round(used * 100 / total) if total else None,
+        })
+        if total and used * 100 / total >= 90:
+            status = "fail"
+            reasons.append(f"memory {round(used * 100 / total)}% used")
+
+    swap_match = re.search(r"^Swap:\s+(\d+)\s+(\d+)", sections.get("mem", ""), re.M)
+    if swap_match:
+        swap_total, swap_used = int(swap_match.group(1)), int(swap_match.group(2))
+        info.update({"swap_total_mb": swap_total, "swap_used_mb": swap_used})
+        if swap_total and swap_used * 100 / swap_total >= 50:
+            if status == "ok":
+                status = "warn"
+            reasons.append(f"swap {round(swap_used * 100 / swap_total)}% used")
+
+    disks = _parse_size_table(sections.get("disk", ""), wanted_mounts=("/",))
+    if disks:
+        info["root_disk"] = disks[0]
+        use_pct = disks[0].get("use_percent")
+        if isinstance(use_pct, int):
+            if use_pct >= 90:
+                status = "fail"
+                reasons.append(f"root filesystem {use_pct}% full")
+            elif use_pct >= 80:
+                if status == "ok":
+                    status = "warn"
+                reasons.append(f"root filesystem {use_pct}% full")
+
+    load_match = re.search(r"load average:\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)", sections.get("uptime", ""))
+    if load_match:
+        info["load_1m"] = float(load_match.group(1))
+        info["load_5m"] = float(load_match.group(2))
+        info["load_15m"] = float(load_match.group(3))
+
+    vm_state = ""
+    vm_match = re.search(r"status:\s*(\S+)", sections.get("vm101", ""))
+    if vm_match:
+        vm_state = vm_match.group(1)
+        info["vm101_status"] = vm_state
+        if vm_state != "running":
+            status = "fail"
+            reasons.append(f"VM 101 is {vm_state}")
+    elif "no VM 101" in sections.get("vm101", ""):
+        info["vm101_status"] = "missing"
+        status = "fail"
+        reasons.append("VM 101 not present")
+
+    info["status"] = status
+    info["reasons"] = reasons
+    parts = []
+    if info.get("mem_used_percent") is not None:
+        parts.append(f"mem {info['mem_used_percent']}%")
+    if info.get("root_disk", {}).get("use_percent") is not None:
+        parts.append(f"disk {info['root_disk']['use_percent']}%")
+    if info.get("load_1m") is not None:
+        parts.append(f"load {info['load_1m']}")
+    if vm_state:
+        parts.append(f"VM 101 {vm_state}")
+    detail = ", ".join(parts) if parts else "see output"
+    info["summary"] = (
+        f"PVE host for {unit} looks healthy — {detail}"
+        if status == "ok"
+        else f"PVE host for {unit} needs attention ({'; '.join(reasons)}) — {detail}"
+    )
+    return info, None
+
+
+def camera_reachability_matrix(unit):
+    """
+    Reach every camera, the fisheye and the speaker for a unit in one pass.
+
+    Pings run concurrently, so the whole matrix costs about as long as the
+    slowest single endpoint rather than the sum of them.
+    Returns (info, error).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit)
+    if error:
+        return None, error
+
+    targets = [
+        {"target": cam["target"], "label": cam["label"], "host": cam["host"]}
+        for cam in (cameras or [])
+    ]
+    row = _net_row_for_unit(unit)
+    speaker_ip = _host_only(row[4] if row and len(row) > 4 else "")
+    if speaker_ip:
+        targets.append({"target": "speaker", "label": "Speaker", "host": speaker_ip})
+
+    if not targets:
+        return None, f"No camera or speaker IPs in the net sheet for {unit}"
+
+    def check(item):
+        code, output = _ping_host(item["host"], max_echoes=2, stop_on_success=True)
+        return {
+            **item,
+            "reachable": _ping_reachable(output),
+            "returncode": code,
+        }
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+        futures = {pool.submit(check, item): item for item in targets}
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                item = futures[future]
+                results.append({**item, "reachable": False, "error": str(exc)})
+
+    order = {"fisheye": 0, "camera1": 1, "camera2": 2, "camera3": 3, "camera4": 4, "speaker": 5}
+    results.sort(key=lambda item: order.get(item.get("target"), 99))
+
+    down = [item["label"] for item in results if not item.get("reachable")]
+    up_count = len(results) - len(down)
+    if not down:
+        status, summary = "ok", f"All {len(results)} endpoints reachable on {unit}"
+    elif up_count == 0:
+        status, summary = "fail", f"No endpoints reachable on {unit} — check the switch or router"
+    else:
+        status, summary = "warn", f"{len(down)} of {len(results)} unreachable on {unit}: " + ", ".join(down)
+
+    return {
+        "unit": unit,
+        "status": status,
+        "summary": summary,
+        "endpoints": results,
+        "down": down,
+        "reachable_count": up_count,
+        "total": len(results),
+    }, None
+
+
+def run_unit_diagnostics(unit):
+    """
+    Every read-only check that applies to a unit, in one call — the 3 AM button.
+
+    Each check is independent: one failing (no PVE, smartctl missing, SSH
+    refused) records its error and the rest still run. Returns (info, error);
+    error is only set when the unit itself cannot be resolved.
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    row = ensure_unit_net_info(unit)
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+
+    has_pve = uses_pve(unit)
+    checks = [
+        ("connectivity", "Connectivity", lambda: validate_unit_full(unit)),
+        ("cameras", "Camera reachability", lambda: camera_reachability_matrix(unit)),
+    ]
+    if has_pve:
+        checks.extend([
+            ("services", "Platform services", lambda: scrypted_service_status(unit)),
+            ("pve_host", "PVE host resources", lambda: pve_host_resources(unit)),
+            ("nvme", "NVMe health", lambda: pve_nvme_health(unit)),
+        ])
+
+    results = {}
+    problems = []
+    # Sequential on purpose: these SSH into the same two hosts, and a NOC
+    # box hammering one unit with five concurrent sessions is how you get
+    # sshd rate-limiting in the middle of an outage.
+    for key, label, fn in checks:
+        try:
+            info, error = fn()
+        except Exception as exc:
+            info, error = None, str(exc)
+        if error or info is None:
+            results[key] = {"label": label, "ok": False, "error": error or "no result"}
+            problems.append(f"{label}: {error or 'no result'}")
+            continue
+        status = info.get("status") if isinstance(info, dict) else None
+        entry = {"label": label, "ok": True, "result": info}
+        if status:
+            entry["status"] = status
+            if status != "ok":
+                problems.append(f"{label}: {info.get('summary') or status}")
+        results[key] = entry
+
+    if not problems:
+        summary = f"All checks passed for {unit}"
+        status = "ok"
+    else:
+        summary = f"{len(problems)} issue(s) found on {unit}"
+        status = "fail"
+
+    return {
+        "unit": unit,
+        "status": status,
+        "summary": summary,
+        "problems": problems,
+        "checks": results,
+        "has_pve": has_pve,
+    }, None
+
+
+def parse_ping_statistics(output):
+    """
+    Pull round-trip statistics out of Windows `ping` output we already have.
+
+    `_ping_host` sends up to four single pings and keeps every reply, so in
+    "fixed" mode the timing data is already sitting in the text and simply
+    being discarded. Parsing it costs no extra packets and no extra time.
+    Returns {} when there is nothing to read (e.g. quick mode, which stops
+    after the first reply).
+    """
+    text = str(output or "")
+    times = [int(match) for match in re.findall(r"time[=<](\d+)\s*ms", text, re.I)]
+
+    # _ping_host runs `ping -n 1` once per echo and concatenates the output,
+    # so each attempt contributes its own "Pinging ..." header. Count both
+    # headers and outcomes and take the larger: headers alone undercount if
+    # the text was trimmed, outcomes alone undercount attempts that printed
+    # nothing at all.
+    attempts = len(re.findall(r"^Pinging ", text, re.M))
+    outcomes = len(re.findall(
+        r"Reply from|Request timed out|Destination host unreachable|General failure",
+        text, re.I,
+    ))
+    sent = max(attempts, outcomes)
+
+    # "Reply from x: Destination host unreachable." is a reply line but not a
+    # successful echo — a real one carries TTL=, which is what _ping_reachable
+    # keys on too.
+    received = len(re.findall(r"Reply from[^\r\n]*TTL=", text, re.I))
+
+    if not times and not sent:
+        return {}
+    stats = {"samples": len(times), "replies": received}
+    if sent:
+        stats["sent"] = sent
+        # Clamp: a malformed or partial capture must never produce a negative
+        # or >100% loss figure in the UI.
+        stats["loss_percent"] = max(0, min(100, round((sent - received) * 100 / sent)))
+    if times:
+        stats["min_ms"] = min(times)
+        stats["max_ms"] = max(times)
+        stats["avg_ms"] = round(sum(times) / len(times), 1)
+        # Mean absolute deviation — a jitter figure that stays meaningful
+        # with only two or three samples, unlike a standard deviation.
+        stats["jitter_ms"] = round(
+            sum(abs(t - stats["avg_ms"]) for t in times) / len(times), 1
+        )
+    return stats
+
+
+NVME_SMART_DEFAULT_DEVICE = "/dev/nvme0n1"
+
+# Percentage Used at or above this is worth flagging — NVMe rates endurance
+# as a percentage of rated writes, so 100% means the drive has burned through
+# its warranty life (it usually keeps working, but plan a swap).
+NVME_WEAR_WARN_PERCENT = 80
+
+
+def _parse_nvme_smart(text):
+    """
+    Pull the fields worth reading out of `smartctl -a` NVMe output.
+
+    Returns a dict with whatever was found; missing keys simply stay absent
+    so a different smartctl version or a SATA disk degrades to raw output
+    instead of raising.
+    """
+    info = {}
+    patterns = {
+        "overall_health": r"SMART overall-health self-assessment test result:\s*(\S+)",
+        "model": r"Model Number:\s*(.+)",
+        "serial": r"Serial Number:\s*(.+)",
+        "firmware": r"Firmware Version:\s*(.+)",
+        "critical_warning": r"Critical Warning:\s*(\S+)",
+        "temperature_c": r"Temperature:\s*(\d+) Celsius",
+        "available_spare": r"Available Spare:\s*(\d+)%",
+        "available_spare_threshold": r"Available Spare Threshold:\s*(\d+)%",
+        "percentage_used": r"Percentage Used:\s*(\d+)%",
+        "power_on_hours": r"Power On Hours:\s*([\d,\s]+)",
+        "power_cycles": r"Power Cycles:\s*([\d,\s]+)",
+        "unsafe_shutdowns": r"Unsafe Shutdowns:\s*([\d,\s]+)",
+        "media_errors": r"Media and Data Integrity Errors:\s*([\d,\s]+)",
+        "error_log_entries": r"Error Information Log Entries:\s*([\d,\s]+)",
+        "data_units_written": r"Data Units Written:\s*([\d,\s]+)",
+    }
+    numeric_keys = (
+        "temperature_c", "available_spare", "available_spare_threshold",
+        "percentage_used", "power_on_hours", "power_cycles",
+        "unsafe_shutdowns", "media_errors", "error_log_entries",
+    )
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if key in numeric_keys:
+            # smartctl thousand-separates counters ("15,203" / "24 551 238").
+            # Text fields like Model Number keep their internal spaces.
+            try:
+                info[key] = int(re.sub(r"[,\s]", "", value))
+            except (TypeError, ValueError):
+                info[key] = value
+        else:
+            info[key] = value
+    return info
+
+
+def _nvme_health_verdict(info):
+    """
+    Reduce parsed SMART fields to (status, [reasons]) for the dashboard LED.
+
+    status is "ok", "warn" or "fail". Deliberately conservative: anything we
+    could not read leaves the status alone rather than inventing a problem.
+    """
+    reasons = []
+    status = "ok"
+
+    health = str(info.get("overall_health") or "").upper()
+    if health and health != "PASSED":
+        status = "fail"
+        reasons.append(f"overall-health {health}")
+
+    warning = str(info.get("critical_warning") or "").strip()
+    if warning and warning not in ("0x00", "0x0000", "0"):
+        status = "fail"
+        reasons.append(f"critical warning {warning}")
+
+    media_errors = info.get("media_errors")
+    if isinstance(media_errors, int) and media_errors > 0:
+        status = "fail"
+        reasons.append(f"{media_errors} media/data integrity errors")
+
+    spare = info.get("available_spare")
+    threshold = info.get("available_spare_threshold")
+    if isinstance(spare, int) and isinstance(threshold, int) and spare <= threshold:
+        status = "fail"
+        reasons.append(f"available spare {spare}% at/below threshold {threshold}%")
+
+    used = info.get("percentage_used")
+    if isinstance(used, int) and used >= NVME_WEAR_WARN_PERCENT:
+        if status == "ok":
+            status = "warn"
+        reasons.append(f"{used}% of rated endurance used")
+
+    temp = info.get("temperature_c")
+    if isinstance(temp, int) and temp >= 70:
+        if status == "ok":
+            status = "warn"
+        reasons.append(f"{temp}C drive temperature")
+
+    return status, reasons
+
+
+def pve_nvme_health(unit, device=None):
+    """
+    SSH to the unit's PVE host and read NVMe SMART health with smartctl.
+
+    Read-only — smartctl -a only reports, it does not start a self-test.
+    Returns (info, error). info carries the parsed fields, a status of
+    "ok"/"warn"/"fail", a one-line summary, and the raw smartctl output.
+    """
+    load_dotenv(env_path)
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    device = str(device or NVME_SMART_DEFAULT_DEVICE).strip() or NVME_SMART_DEFAULT_DEVICE
+    # Path only — this is interpolated into a remote shell command.
+    if not re.fullmatch(r"/dev/[A-Za-z0-9/_-]+", device):
+        return None, f"Refusing unexpected device path: {device}"
+
+    row = ensure_unit_net_info(unit, needed_indexes=(11,))
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[11] if len(row) > 11 else "")
+    if not ip:
+        return None, f"No PVE IP for {unit}"
+    username, password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return None, cred_error
+
+    command = f"smartctl -a {shlex.quote(device)} 2>&1; echo __RC__=$?"
+    client = paramiko.SSHClient()
+    try:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=ip,
+            port=22,
+            username=username,
+            password=password,
+            timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _stdin, stdout, stderr = client.exec_command(command, timeout=90)
+        raw = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+    except paramiko.AuthenticationException:
+        return None, (
+            f"PVE SSH authentication failed for {username}@{ip}. "
+            "SSH uses the Linux user only (usually root), not root@pam. "
+            "Set pvesshuser=root and pvepass in .env."
+        )
+    except Exception as exc:
+        return None, f"PVE SSH to {ip} failed: {exc}"
+    finally:
+        client.close()
+
+    returncode = None
+    match = re.search(r"__RC__=(\d+)\s*$", raw)
+    if match:
+        returncode = int(match.group(1))
+        raw = raw[:match.start()]
+    raw = raw.strip()
+
+    if "command not found" in raw.lower() or returncode == 127:
+        return None, (
+            f"smartctl is not installed on the PVE host for {unit} "
+            f"({ip}). Install it there with: apt-get install -y smartmontools"
+        )
+    if not raw:
+        return None, f"No smartctl output from {ip}{(' — ' + err) if err else ''}"
+    if re.search(r"Unable to detect device type|No such device|failed: INQUIRY", raw, re.I):
+        return None, (
+            f"smartctl could not read {device} on {unit} ({ip}). "
+            f"Run `lsblk -d -o NAME,SIZE,MODEL` there to find the right device."
+        )
+
+    info = _parse_nvme_smart(raw)
+    status, reasons = _nvme_health_verdict(info)
+
+    parts = []
+    if info.get("percentage_used") is not None:
+        parts.append(f"{info['percentage_used']}% used")
+    if info.get("available_spare") is not None:
+        parts.append(f"{info['available_spare']}% spare")
+    if info.get("temperature_c") is not None:
+        parts.append(f"{info['temperature_c']}C")
+    if info.get("power_on_hours") is not None:
+        parts.append(f"{info['power_on_hours']}h powered on")
+    detail = ", ".join(parts) if parts else (info.get("overall_health") or "see output")
+
+    if status == "ok":
+        summary = f"NVMe on {unit} looks healthy — {detail}"
+    else:
+        summary = f"NVMe on {unit} needs attention ({'; '.join(reasons)}) — {detail}"
+
+    info.update({
+        "unit": unit,
+        "host": ip,
+        "device": device,
+        "status": status,
+        "reasons": reasons,
+        "summary": summary,
+        "returncode": returncode,
+        "output": raw,
+    })
+    return info, None
+
+
 def chkdsk(nuc, drive, read_only=True):
     """
     SSH to the unit NUC and run chkdsk.
     read_only=True runs `chkdsk X:` (no /F). Returns (ok, message, output).
     """
     load_dotenv(env_path)
-    if not net_array:
-        generate_net_array()
+    ensure_net_array()
     unit = str(nuc or "").strip()
     if not unit:
         return False, "Missing unit", ""
@@ -9768,7 +10653,7 @@ def install_checker():
         "X-Authorization": f"Token {api_token}"
     }
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=30)
     if response.status_code == 200:
         while True:
             unit = str(input("Input MUXXXX or type 'quit' to exit: "))
@@ -9785,7 +10670,7 @@ def install_checker():
                     siteId = record.get('idSite')
                     exists = True        
                     url2 = f"https://vrmapi.victronenergy.com/v2/installations/{siteId}/system-overview"
-                    response2 = requests.get(url2, headers=headers)
+                    response2 = requests.get(url2, headers=headers, timeout=30)
                     data2 = response2.json()
                     for device in data2["records"]["devices"]:
                         if device["name"] == "Gateway":
@@ -9817,7 +10702,7 @@ def all_unit_battery_health():
                 "X-Authorization": f"Token {api_token}"
                 }
             try:
-                response2 = requests.get(f"https://vrmapi.victronenergy.com/v2/installations/{siteid}/diagnostics", headers=headers2)
+                response2 = requests.get(f"https://vrmapi.victronenergy.com/v2/installations/{siteid}/diagnostics", headers=headers2, timeout=30)
             except Exception as e:
                 print(f"Failed as {e}")
             data2 = response2.json()
@@ -9878,7 +10763,7 @@ def unit_battery_health(unit):
                         "X-Authorization": f"Token {api_token}"
                     }
 
-                    response2 = requests.get(f"https://vrmapi.victronenergy.com/v2/installations/{siteid}/diagnostics", headers=headers2)
+                    response2 = requests.get(f"https://vrmapi.victronenergy.com/v2/installations/{siteid}/diagnostics", headers=headers2, timeout=30)
                     data2 = response2.json()
                     records = data2.get("records", {})
                     for record in records:
@@ -9906,7 +10791,7 @@ def rd_battery_map():
             "limit_page_length": 0
         }
 
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         data = response.json()
         for doc in data.get("data", []):
             rd_unit = doc["name"]
@@ -9938,7 +10823,7 @@ def low_battery_rd_fisheye_tool():
             "limit_page_length": 0
         }
 
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         data = response.json()
         for doc in data.get("data", []):
             rd_unit = doc["name"]
@@ -9973,6 +10858,15 @@ def all_battery_list():
         name = row["name"]
         battery = row["battery"]
         print(f"{row['name']} - {row['battery']}")
+
+# Load the net sheet once at import time. Historically this only happened
+# lazily, behind an `if not net_array: generate_net_array()` guard that each
+# caller had to remember — and the newest SSH helpers didn't, so a fresh
+# process could read an empty net_array and SSH to None. Loading here means
+# net_array is populated before flask_endpoints.py serves its first request.
+# ensure_net_array() never raises, so a missing net_sheet.csv still lets the
+# app start (individual units just report "not found in net sheet").
+ensure_net_array()
 
 if __name__ == "__main__":
     main()

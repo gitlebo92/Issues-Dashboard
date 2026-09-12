@@ -1,0 +1,21 @@
+# work_tool runtime dependencies.
+#
+# Derived from the actual imports in work_tool.py, flask_endpoints.py,
+# zabbix_tool.py, page_file.py and art_get.py. Install with:
+#
+#     pip install -r requirements.txt
+#
+# Versions are lower bounds, not pins — this runs on whatever Python the
+# NOC workstations have. If a coworker hits an incompatibility, pin the
+# offending package here rather than telling everyone to downgrade.
+
+Flask>=3.0
+requests>=2.31
+paramiko>=3.4
+python-dotenv>=1.0
+urllib3>=2.0
+openpyxl>=3.1
+
+# Optional. Only needed for Linux -> Scrypted -> "Set No Audio", which
+# imports it lazily and reports a clear message when it is missing.
+# scrypted-sdk

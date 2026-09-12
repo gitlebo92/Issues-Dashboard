@@ -12,6 +12,7 @@ import sys
 import uuid
 import threading
 import queue
+import socket
 import paramiko
 from dotenv import load_dotenv
 
@@ -76,6 +77,44 @@ def _erp_writes_blocked_response():
 
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Recovery-email uploads are deleted once their job finishes, but a Windows
+# file lock (or a crash mid-job) leaves the spreadsheet behind, and those
+# accumulate silently. Sweep anything older than a day at startup.
+UPLOAD_RETENTION_SECONDS = 24 * 60 * 60
+
+
+def _sweep_stale_uploads():
+    try:
+        entries = os.listdir(UPLOAD_FOLDER)
+    except OSError:
+        return
+    cutoff = time.time() - UPLOAD_RETENTION_SECONDS
+    removed = 0
+    for name in entries:
+        path = os.path.join(UPLOAD_FOLDER, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            # Still locked, or gone already — try again next start.
+            pass
+    if removed:
+        print(f"Removed {removed} stale upload(s) from {UPLOAD_FOLDER}")
+
+
+_sweep_stale_uploads()
+
+# Validation history is append-only. Ninety days is well past what the flap
+# report needs and keeps the file to a few MB on a storage-tight workstation;
+# prune() also enforces a hard row ceiling and reclaims the freed space.
+UNIT_HISTORY_KEEP_DAYS = int((os.getenv("UNIT_HISTORY_KEEP_DAYS") or "90").strip() or "90")
+import unit_history
+try:
+    unit_history.prune(keep_days=UNIT_HISTORY_KEEP_DAYS)
+except Exception as _history_exc:  # never block startup on history
+    print(f"Unit history prune skipped: {_history_exc}")
 
 issue_jobs = {}
 stream_jobs = issue_jobs  # shared job store for streamed validations
@@ -1791,6 +1830,106 @@ def issues_check_patch(unit):
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
 
+@app.route("/issues/pve-nvme-health/<unit>", methods=["POST"])
+def issues_pve_nvme_health(unit):
+    """Read-only NVMe SMART health from the unit's PVE host (smartctl -a)."""
+    payload = request.get_json(silent=True) or {}
+    device = (payload.get("device") or request.args.get("device") or "").strip()
+    info, error = work_tool.pve_nvme_health(unit, device=device or None)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/service-status/<unit>", methods=["POST"])
+def issues_service_status(unit):
+    """Which platform services are actually active on the Scrypted box (read-only)."""
+    info, error = work_tool.scrypted_service_status(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/pve-resources/<unit>", methods=["POST"])
+def issues_pve_resources(unit):
+    """Memory, disk, load and VM 101 state on the PVE host (read-only)."""
+    info, error = work_tool.pve_host_resources(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/camera-matrix/<unit>", methods=["POST"])
+def issues_camera_matrix(unit):
+    """Reach every camera, fisheye and speaker for a unit in one pass."""
+    info, error = work_tool.camera_reachability_matrix(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/run-diagnostics/<unit>", methods=["POST"])
+def issues_run_diagnostics(unit):
+    """Every read-only check for a unit, in one call. Individual checks may fail independently."""
+    info, error = work_tool.run_unit_diagnostics(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/unit-history/<unit>", methods=["GET"])
+def issues_unit_history(unit):
+    """Recorded validation history for a unit, plus its recent flap summary."""
+    try:
+        days = int(request.args.get("days") or 30)
+        limit = int(request.args.get("limit") or 200)
+    except ValueError:
+        return jsonify({"ok": False, "error": "days and limit must be integers"}), 400
+    info, error = work_tool.unit_history_entries(unit, days=days, limit=limit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/flap-report", methods=["GET"])
+def issues_flap_report():
+    """Units flapping most in the window — fleet-wide view over recorded history."""
+    try:
+        days = int(request.args.get("days") or 7)
+        min_transitions = int(request.args.get("min_transitions") or 3)
+    except ValueError:
+        return jsonify({"ok": False, "error": "days and min_transitions must be integers"}), 400
+    info, error = work_tool.fleet_flap_report(days=days, min_transitions=min_transitions)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/history-stats", methods=["GET"])
+def issues_history_stats():
+    """Size and row count of the validation-history database."""
+    return jsonify(unit_history.stats())
+
+
+@app.route("/issues/history-compact", methods=["POST"])
+def issues_history_compact():
+    """
+    Prune history to the retention window and hand the freed disk back to the
+    OS. Runs at startup too; this is the on-demand version.
+    """
+    deleted = unit_history.prune(keep_days=UNIT_HISTORY_KEEP_DAYS)
+    result = unit_history.compact()
+    if not result.get("ok"):
+        return jsonify({"ok": False, "error": result.get("error")}), 500
+    return jsonify({
+        "ok": True,
+        "deleted": deleted,
+        "freed_bytes": result["freed_bytes"],
+        "freed_mb": round(result["freed_bytes"] / (1024 * 1024), 2),
+        **unit_history.stats(),
+    })
+
+
 @app.route("/issues/carrier/<unit>", methods=["POST"])
 def issues_carrier(unit):
     info, error = work_tool.get_unit_carriers(unit)
@@ -1823,20 +1962,184 @@ def issues_weather_bulk():
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, "regions": info})
 
+def _unit_busy_response(unit, existing):
+    existing = existing or {}
+    return jsonify({
+        "ok": False,
+        "error": "%s is busy: %s" % (unit, existing.get("action") or "another action"),
+        "busy": True,
+        "action": existing.get("action"),
+        "phase": existing.get("phase"),
+    }), 409
+
+
+def _run_locked_quick_action(unit, action_label, fn, *, token=None):
+    """
+    Run a one-shot action (reboot, restart services) under the per-unit lock.
+    If `token` is given, it must match an in-flight job (e.g. the security fix
+    wizard handing off its final step) instead of acquiring a fresh lock.
+    """
+    if token:
+        info = work_tool.unit_busy_status(unit)
+        if not info or info.get("token") != token:
+            return jsonify({
+                "ok": False,
+                "error": "Security fix session expired or unit lock lost — refresh and check unit status",
+            }), 409
+        ok, message = fn()
+        work_tool.unit_busy_end(unit, token)
+        if not ok:
+            return jsonify({"ok": False, "error": message}), 400
+        return jsonify({"ok": True, "unit": unit, "message": message})
+
+    started, new_token, existing = work_tool.unit_busy_start(unit, action_label)
+    if not started:
+        return _unit_busy_response(unit, existing)
+    try:
+        ok, message = fn()
+    finally:
+        work_tool.unit_busy_end(unit, new_token)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message})
+
+
+def _require_unit_token(unit):
+    """Validate the token in the request against the unit's in-flight job. Returns (token, error_response)."""
+    payload = request.get_json(silent=True) or {}
+    token = payload.get("token") or request.args.get("token")
+    info = work_tool.unit_busy_status(unit)
+    if not token or not info or info.get("token") != token:
+        return None, (jsonify({
+            "ok": False,
+            "error": "Security fix session expired or unit lock lost — refresh and check unit status",
+        }), 409)
+    return token, None
+
+
+@app.route("/issues/unit-status/<unit>", methods=["GET"])
+def issues_unit_status(unit):
+    info = work_tool.unit_busy_status(unit)
+    token = request.args.get("token") or ""
+    note_text, note_updated_at = work_tool.get_unit_note(unit)
+    result = {"ok": True, "busy": bool(info), "note": note_text, "note_updated_at": note_updated_at}
+    if info:
+        result.update({
+            "action": info.get("action"),
+            "phase": info.get("phase"),
+            "version": info.get("version"),
+            "started_at": info.get("started_at"),
+            "log": info.get("log", []),
+            "is_owner": bool(token) and token == info.get("token"),
+        })
+    return jsonify(result)
+
+
+@app.route("/issues/unit-lock/<unit>/clear", methods=["POST"])
+def issues_unit_lock_clear(unit):
+    cleared = work_tool.unit_busy_force_clear(unit)
+    return jsonify({"ok": True, "cleared": cleared})
+
+
+@app.route("/issues/busy-units", methods=["GET"])
+def issues_busy_units():
+    return jsonify({"ok": True, "units": work_tool.list_busy_units()})
+
+
+@app.route("/issues/unit-note/<unit>", methods=["GET"])
+def issues_unit_note_get(unit):
+    text, updated_at = work_tool.get_unit_note(unit)
+    return jsonify({"ok": True, "unit": unit, "text": text, "updated_at": updated_at})
+
+
+@app.route("/issues/unit-note/<unit>", methods=["POST"])
+def issues_unit_note_set(unit):
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text", "")
+    updated_at = work_tool.set_unit_note(unit, text)
+    return jsonify({"ok": True, "unit": unit, "updated_at": updated_at})
+
+
 @app.route("/issues/reboot-scrypted/<unit>", methods=["POST"])
 @app.route("/issues/reboot-snuc/<unit>", methods=["POST"])
 def issues_reboot_scrypted(unit):
-    ok, message = work_tool.reboot_scrypted(unit)
-    if not ok:
-        return jsonify({"ok": False, "error": message or "Reboot Scrypted failed"}), 400
-    return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
+    return _run_locked_quick_action(unit, "Reboot Scrypted", lambda: work_tool.reboot_scrypted(unit))
 
 @app.route("/issues/reboot-pve/<unit>", methods=["POST"])
 def issues_reboot_pve(unit):
-    ok, message = work_tool.reboot_pve(unit)
+    return _run_locked_quick_action(unit, "Reboot PVE", lambda: work_tool.reboot_pve(unit))
+
+@app.route("/issues/security-update-fix/step1/<unit>", methods=["POST"])
+def issues_security_fix_step1(unit):
+    started, token, existing = work_tool.unit_busy_start(unit, "Security Update Fix")
+    if not started:
+        return _unit_busy_response(unit, existing)
+    ok, message, version = work_tool.security_update_web_step1(unit)
     if not ok:
-        return jsonify({"ok": False, "error": message or "Reboot PVE failed"}), 400
-    return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
+        work_tool.unit_busy_end(unit, token)
+        return jsonify({"ok": False, "error": message}), 400
+    work_tool.unit_busy_touch(unit, token, phase="step1_done", version=version, log_line=message)
+    return jsonify({"ok": True, "unit": unit, "version": version, "message": message, "token": token})
+
+@app.route("/issues/security-update-fix/step2/<unit>", methods=["POST"])
+def issues_security_fix_step2(unit):
+    token, err = _require_unit_token(unit)
+    if err:
+        return err
+    ok, message = work_tool.security_update_web_step2(unit)
+    work_tool.unit_busy_touch(unit, token, phase="step2_done" if ok else "step2_failed", log_line=message)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message})
+
+@app.route("/issues/security-update-fix/shutdown/<unit>", methods=["POST"])
+def issues_security_fix_shutdown(unit):
+    token, err = _require_unit_token(unit)
+    if err:
+        return err
+    ok, message = work_tool.security_update_web_shutdown(unit)
+    work_tool.unit_busy_touch(unit, token, phase="shutdown_done" if ok else "shutdown_failed", log_line=message)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message})
+
+@app.route("/issues/security-update-fix/finish/<unit>", methods=["POST"])
+def issues_security_fix_finish(unit):
+    token, err = _require_unit_token(unit)
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    version = payload.get("version") or request.args.get("version")
+    if not version:
+        # Browser refresh may have lost its in-memory copy — fall back to the
+        # version step 1 saved server-side for this job.
+        info = work_tool.unit_busy_status(unit)
+        version = info.get("version") if info else None
+    ok, message = work_tool.security_update_web_finish(unit, version)
+    work_tool.unit_busy_touch(unit, token, phase="finish_done" if ok else "finish_failed", log_line=message)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message})
+
+@app.route("/issues/security-update-fix/verify/<unit>", methods=["POST"])
+def issues_security_fix_verify(unit):
+    token, err = _require_unit_token(unit)
+    if err:
+        return err
+    ok, message, drivers_loaded = work_tool.security_update_web_verify(unit)
+    phase = "verify_done" if (ok and drivers_loaded) else ("verify_warning" if ok else "verify_failed")
+    work_tool.unit_busy_touch(unit, token, phase=phase, log_line=message)
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+    return jsonify({"ok": True, "unit": unit, "message": message, "drivers_loaded": drivers_loaded, "token": token})
+
+@app.route("/issues/restart-services/<unit>", methods=["POST"])
+def issues_restart_services(unit):
+    payload = request.get_json(silent=True) or {}
+    token = payload.get("token") or request.args.get("token")
+    return _run_locked_quick_action(
+        unit, "Restart All Services", lambda: work_tool.restart_platform_services(unit), token=token
+    )
 
 @app.route("/issues/reboot-nuc/<unit>", methods=["POST"])
 def issues_reboot_nuc(unit):
@@ -2685,8 +2988,42 @@ if __name__ == "__main__":
     debug = WORK_TOOL_ENV == "sandbox"
     if not debug and WORK_TOOL_ENV != "sandbox":
         _start_arizona_validation_scheduler()
+    # Loopback by default. The dashboard has no authentication and holds
+    # switch / NUC / PVE / Scrypted credentials plus live camera proxies, so
+    # binding every interface is opt-in rather than the default it used to be.
+    # Set WORK_TOOL_BIND=0.0.0.0 in .env only when a coworker genuinely needs
+    # to reach this instance over the NOC LAN.
+    # Bind every interface by default. The live instance runs as the Windows
+    # service "IssuesDashboard", which starts flask_endpoints.py directly and
+    # therefore never sees run_live.bat — so the DEFAULT has to be the value
+    # the NOC needs, not something a .bat opts into. People reach this box at
+    # its LAN IP (http://<host>:5000); defaulting to loopback silently breaks
+    # the service and looks exactly like "the app didn't start".
+    #
+    # To narrow it, set WORK_TOOL_BIND=127.0.0.1 — put it in .env, which the
+    # service does read, rather than in a .bat, which it does not.
+    bind_host = str(os.getenv("WORK_TOOL_BIND") or "0.0.0.0").strip() or "0.0.0.0"
     print(
         f"Starting work_tool ({WORK_TOOL_ENV}) on "
         f"http://127.0.0.1:{WORK_TOOL_PORT} (data: {DATA_DIR})"
     )
-    app.run(host="0.0.0.0", port=WORK_TOOL_PORT, debug=debug, threaded=True)
+    if bind_host == "127.0.0.1":
+        print(
+            "  Bound to loopback only — this machine's LAN IP will refuse "
+            "connections. Unset WORK_TOOL_BIND (or set 0.0.0.0) to reach it "
+            "from the network."
+        )
+    else:
+        # Say the LAN address out loud: people reach this box by IP, and a
+        # silent loopback bind looks exactly like "the app didn't start".
+        try:
+            lan_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            lan_ip = ""
+        if lan_ip and not lan_ip.startswith("127."):
+            print(f"  Also reachable on http://{lan_ip}:{WORK_TOOL_PORT}")
+        print(
+            f"  NOTE: bound to {bind_host} — the dashboard is unauthenticated, "
+            "so this assumes a trusted network."
+        )
+    app.run(host=bind_host, port=WORK_TOOL_PORT, debug=debug, threaded=True)
