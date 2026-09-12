@@ -1314,6 +1314,37 @@
         .stats-chip.is-warning strong {
             color: var(--caution-text);
         }
+        /* Chips that filter the lists below. The strip keeps its summary look;
+           these only add affordance and a selected state. */
+        .stats-chip.is-filter {
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+        .stats-chip.is-filter:hover:not(:disabled) {
+            background: var(--border);
+            border-color: var(--border-subtle);
+        }
+        .stats-chip.is-filter:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .stats-chip.is-filter.is-active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--text-on-accent);
+        }
+        .stats-chip.is-filter.is-active strong { color: var(--text-on-accent); }
+        .stats-chip.is-filter.is-active:hover { background: var(--accent-hover); }
+        /* Empty lists hold their position but read as inactive. */
+        .stats-chip.is-filter.is-empty {
+            opacity: 0.45;
+            cursor: default;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .stats-chip.is-filter { transition: none; }
+        }
     </style>
 </head>
 <body>
@@ -7443,24 +7474,82 @@
             renderStatsStrip();
         }
 
+        // The stats strip is also a filter. Each chip that maps to a list is a
+        // button: click it to narrow to that list, click more to combine.
+        // "units down/degraded" clears back to everything. The chips and the
+        // Lists dropdown drive the same selection Set, and applyListFilters()
+        // re-renders both, so ticking a box lights the matching chip and
+        // clicking a chip ticks the matching box.
+        // "mid-maintenance" is a unit count, not a list, so it stays inert.
         function renderStatsStrip() {
             if (!statsStripEl) {
                 return;
             }
+            const interactive = currentPanelMode() !== "projects";
+            const selected = currentSelectedLists();
+            const filtering = filteringEnabled();
             statsStripEl.innerHTML = "";
+
             let downTotal = 0;
             DOWN_STATS_LISTS.forEach(function (item) {
-                const count = (listState[item.id] || []).length;
-                downTotal += count;
-                const chip = document.createElement("div");
-                chip.className = "stats-chip" + (count ? " is-warning" : "");
-                chip.innerHTML = "<strong>" + count + "</strong> " + item.label;
-                statsStripEl.appendChild(chip);
+                downTotal += (listState[item.id] || []).length;
             });
-            const totalChip = document.createElement("div");
+
+            // clear-the-filter chip, first in the row
+            const totalChip = document.createElement(interactive ? "button" : "div");
             totalChip.className = "stats-chip" + (downTotal ? " is-warning" : "");
             totalChip.innerHTML = "<strong>" + downTotal + "</strong> units down/degraded";
-            statsStripEl.insertBefore(totalChip, statsStripEl.firstChild);
+            if (interactive) {
+                totalChip.type = "button";
+                totalChip.classList.add("is-filter");
+                const showingAll = !filtering || selected.size === 0;
+                totalChip.classList.toggle("is-active", showingAll);
+                totalChip.setAttribute("aria-pressed", showingAll ? "true" : "false");
+                totalChip.title = showingAll ? "Showing every list" : "Show every list";
+                totalChip.addEventListener("click", function () {
+                    setListView(false);
+                });
+            }
+            statsStripEl.appendChild(totalChip);
+
+            DOWN_STATS_LISTS.forEach(function (item) {
+                const count = (listState[item.id] || []).length;
+                const el = document.createElement(interactive ? "button" : "div");
+                el.className = "stats-chip" + (count ? " is-warning" : "");
+                el.innerHTML = "<strong>" + count + "</strong> " + item.label;
+                if (interactive) {
+                    el.type = "button";
+                    const isActive = filtering && selected.has(item.id);
+                    const isEmpty = count === 0;
+                    el.classList.add("is-filter");
+                    el.classList.toggle("is-active", isActive);
+                    // Empty lists keep their place so the chips never move
+                    // position mid-shift, but cannot be selected.
+                    el.classList.toggle("is-empty", isEmpty && !isActive);
+                    el.disabled = isEmpty && !isActive;
+                    el.setAttribute("aria-pressed", isActive ? "true" : "false");
+                    el.title = isEmpty
+                        ? item.label + " — no tickets"
+                        : (isActive
+                            ? "Click to stop showing " + item.label
+                            : "Show only " + item.label + " (click more than one to combine)");
+                    el.addEventListener("click", function () {
+                        if (el.disabled) {
+                            return;
+                        }
+                        // Clicking a chip while "All lists" is active has to
+                        // turn filtering on, or nothing would appear to happen.
+                        if (!filteringEnabled()) {
+                            currentSelectedLists().clear();
+                            currentSelectedLists().add(item.id);
+                            setListView(true);
+                            return;
+                        }
+                        toggleListFilter(item.id);
+                    });
+                }
+                statsStripEl.appendChild(el);
+            });
 
             const busyChip = document.createElement("div");
             busyChip.className = "stats-chip" + (busyUnitsCount ? " is-warning" : "");
