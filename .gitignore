@@ -36,3 +36,7 @@ nuc_memory.csv
 # OS junk
 Thumbs.db
 .DS_Store
+
+# run_sandbox.bat's redirected stdout/stderr — local runtime output, not app code
+sandbox_stdout.log
+sandbox_stderr.log

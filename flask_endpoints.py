@@ -116,6 +116,16 @@ try:
 except Exception as _history_exc:  # never block startup on history
     print(f"Unit history prune skipped: {_history_exc}")
 
+# Same retention window as unit_history, same reasoning — see
+# alarm_history.py's module docstring for why its row growth is nowhere
+# near unit_history's despite tracking a much larger live alarm count.
+ALARM_HISTORY_KEEP_DAYS = int((os.getenv("ALARM_HISTORY_KEEP_DAYS") or "90").strip() or "90")
+import alarm_history
+try:
+    alarm_history.prune(keep_days=ALARM_HISTORY_KEEP_DAYS)
+except Exception as _alarm_history_exc:  # never block startup on history
+    print(f"Alarm history prune skipped: {_alarm_history_exc}")
+
 issue_jobs = {}
 stream_jobs = issue_jobs  # shared job store for streamed validations
 issues_validation_lock = threading.Lock()
@@ -1946,11 +1956,19 @@ def issues_power_infra_alerts():
     info, error = work_tool.combined_power_infra_alerts()
     if error:
         return jsonify({"ok": False, "error": error}), 400
+    rows = info.get("rows") or []
     with _power_infra_cache_lock:
-        _power_infra_cache["rows"] = info.get("rows") or []
+        _power_infra_cache["rows"] = rows
         _power_infra_cache["fetched_at"] = time.time()
         _power_infra_cache["zabbix_error"] = info.get("zabbix_error")
         _power_infra_cache["vrm_error"] = info.get("vrm_error")
+    # Recorded here too, not just from the scheduled poll below — a manual
+    # Refresh is a real data point and costs nothing extra to keep, same as
+    # unit_history piggybacking on validations that were happening anyway.
+    try:
+        alarm_history.record_snapshot(rows)
+    except Exception as exc:
+        print(f"Alarm history record (manual refresh) skipped: {exc}")
     return jsonify({"ok": True, **info})
 
 
@@ -2023,6 +2041,73 @@ def issues_history_compact():
     })
 
 
+@app.route("/issues/alarm-history-stats", methods=["GET"])
+def issues_alarm_history_stats():
+    """Size, episode count, and open/closed split of the alarm-history database."""
+    return jsonify(alarm_history.stats())
+
+
+@app.route("/issues/alarm-history-compact", methods=["POST"])
+def issues_alarm_history_compact():
+    """Prune alarm history to the retention window and reclaim disk. On-demand
+    version of the startup prune — see unit_history's identical sibling route."""
+    deleted = alarm_history.prune(keep_days=ALARM_HISTORY_KEEP_DAYS)
+    result = alarm_history.compact()
+    if not result.get("ok"):
+        return jsonify({"ok": False, "error": result.get("error")}), 500
+    return jsonify({
+        "ok": True,
+        "deleted": deleted,
+        "freed_bytes": result["freed_bytes"],
+        "freed_mb": round(result["freed_bytes"] / (1024 * 1024), 2),
+        **alarm_history.stats(),
+    })
+
+
+@app.route("/issues/alarm-history/<unit>", methods=["GET"])
+def issues_alarm_history(unit):
+    """
+    Every recorded Zabbix/VRM alarm episode for a unit — "has this happened
+    before," not just "is something active right now." days defaults to 30;
+    pass ?days= to widen it (bounded by ALARM_HISTORY_KEEP_DAYS regardless,
+    since nothing older survives pruning).
+    """
+    try:
+        days = int(request.args.get("days") or 30)
+    except (TypeError, ValueError):
+        days = 30
+    days = max(1, min(days, ALARM_HISTORY_KEEP_DAYS))
+    unit = str(unit or "").strip().upper()
+    episodes = alarm_history.unit_alarm_history(unit, days=days)
+    recurrence = alarm_history.unit_alarm_recurrence(unit, days=days)
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "days": days,
+        "episodes": episodes,
+        "recurrence": recurrence,
+    })
+
+
+@app.route("/issues/alarm-frequency", methods=["GET"])
+def issues_alarm_frequency():
+    """
+    Fleet-wide "repeat offenders" — units with the most alarm episodes in
+    the window, the alarm-history equivalent of unit_history's flap report.
+    """
+    try:
+        days = int(request.args.get("days") or 7)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, ALARM_HISTORY_KEEP_DAYS))
+    try:
+        min_episodes = int(request.args.get("min_episodes") or 2)
+    except (TypeError, ValueError):
+        min_episodes = 2
+    rows = alarm_history.fleet_alarm_frequency(days=days, min_episodes=min_episodes)
+    return jsonify({"ok": True, "days": days, "min_episodes": min_episodes, "rows": rows})
+
+
 @app.route("/issues/carrier/<unit>", methods=["POST"])
 def issues_carrier(unit):
     info, error = work_tool.get_unit_carriers(unit)
@@ -2069,6 +2154,25 @@ def issues_power_status(unit):
         or ""
     ).strip()
     info, error = work_tool.unit_power_status(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/shading-status/<unit>", methods=["POST"])
+def issues_shading_status(unit):
+    """
+    Experimental: is this trailer's solar being shaded — built from a real
+    ERP "shaded" ticket pattern (see work_tool.detect_solar_shading).
+    Read-only against VRM.
+    """
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.unit_shading_status(unit, subject)
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
@@ -3185,6 +3289,15 @@ def _run_scheduled_power_infra_alerts():
         print(f"[{when}] Power & Infra Alerts: cleared — {', '.join(sorted(cleared_units))}")
     if not new_units and not cleared_units:
         print(f"[{when}] Power & Infra Alerts: no change ({len(rows)} unit(s) flagged)")
+
+    # Per-alarm (not just per-unit) episode tracking — see alarm_history.py.
+    # This is the persistent version of the new/cleared diff just above;
+    # that diff only ever lived in a print statement and reset to nothing
+    # on every service restart.
+    try:
+        alarm_history.record_snapshot(rows)
+    except Exception as exc:
+        print(f"[{when}] Alarm history record failed: {exc}")
 
 
 def _power_infra_alerts_loop():

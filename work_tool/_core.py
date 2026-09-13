@@ -1400,6 +1400,69 @@ def _rd_has_mu_parent(unit):
     if cached and len(cached) >= 3 and cached[2] > now:
         return bool(cached[0])
     return bool(_erp_parent_mu_code(code))
+def _erp_heads_for_mu_trailers(mu_units):
+    """
+    Reverse of _erp_parent_mu_code: given MU#### trailer codes, find which
+    RD/FD head Component(s) have each as their parent_component. One bulk
+    ERP call per chunk (Component.parent_component "in" filter) rather than
+    one per unit — the forward lookup is a per-unit ERP GET, so doing this
+    direction one unit at a time would mean querying every RD/FD in the
+    fleet just to find the handful that happen to point at an alarmed
+    trailer.
+
+    Chunked at 100 codes per request — checked live (2026-09-13): a single
+    GET with 226 "in"-filter values came back HTTP 400 (the query string is
+    long enough to hit a server-side limit; Component names are short, but
+    226 of them plus JSON-filter syntax still adds up). This went unnoticed
+    at first because the caller treats a failure here as non-fatal and the
+    fleet only recently grew past ~200 alarmed MU units in one poll (see
+    zabbix_active_problems_by_unit's problem.get fix) — a good reminder
+    that "non-fatal" and "silent" are not the same thing; the caller now
+    logs when this comes back empty on a non-empty input.
+    Returns ({mu_code: [head_unit, ...]}, error).
+    """
+    codes = sorted({str(u or "").strip().upper() for u in (mu_units or []) if u})
+    if not codes:
+        return {}, None
+    try:
+        headers = _erp_headers()
+    except RuntimeError as exc:
+        return {}, str(exc)
+    url = f"{erp_base_url()}/api/resource/Component"
+
+    # An MU's ERP children aren't only its RD/FD head — sub-devices like an
+    # LPR camera Component also point their parent_component at the same
+    # trailer (seen live: MU8050-LPR1, MU8051-LPR1). Only RD####/FD#### is a
+    # "head unit" for this crosswalk's purposes.
+    head_shape_re = re.compile(r"^(?:RD|FD)\d+$")
+    by_mu = {}
+    chunk_size = 100
+    for start in range(0, len(codes), chunk_size):
+        chunk = codes[start:start + chunk_size]
+        sc_names = [_sc_component_name(code) for code in chunk]
+        params = {
+            "fields": json.dumps(["name", "parent_component"]),
+            "filters": json.dumps([["parent_component", "in", sc_names]]),
+            "limit_page_length": 0,
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+        except requests.exceptions.RequestException as exc:
+            return by_mu, f"ERP reverse trailer lookup failed: {exc}"
+        if not response.ok:
+            return by_mu, f"ERP reverse trailer lookup failed: HTTP {response.status_code}"
+        _merge_erp_heads_for_mu_chunk(response.json() or {}, head_shape_re, by_mu)
+    return by_mu, None
+def _merge_erp_heads_for_mu_chunk(payload, head_shape_re, by_mu):
+    for doc in payload.get("data") or []:
+        head_name = str(doc.get("name") or "").strip().upper()
+        if head_name.startswith("SC-"):
+            head_name = head_name[3:]
+        if not head_shape_re.match(head_name):
+            continue
+        mu_code = _mu_code_from_parent_component(doc.get("parent_component"))
+        if mu_code:
+            by_mu.setdefault(mu_code, []).append(head_name)
 def resolve_attached_mu_code(unit, subject=""):
     """
     Resolve the MU trailer code attached to a unit.

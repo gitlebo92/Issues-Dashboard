@@ -34,6 +34,7 @@ from xml.etree import ElementTree
 import urllib3
 
 from ._core import (  # noqa: F401  (re-exported dependencies)
+    _erp_heads_for_mu_trailers,
     _host_only,
     _net_row_for_unit,
     _ping_host,
@@ -887,35 +888,72 @@ def _zabbix_call(method, params):
 _ZABBIX_HOST_UNIT_RE = re.compile(r"^((?:RD|FD|MU)\d+)-(.+)$", re.IGNORECASE)
 def zabbix_active_problems_by_unit():
     """
-    Every currently-active Zabbix problem, fleet-wide in one call, grouped
-    by unit. Read-only (event.get — nothing here acknowledges or closes a
-    problem). Returns ({unit: [problem, ...]}, error).
+    Every currently-active Zabbix problem, fleet-wide in two calls, grouped
+    by unit. Read-only (problem.get / trigger.get — neither acknowledges or
+    closes anything). Returns ({unit: [problem, ...]}, error).
+
+    This used to be event.get(value=1, sort by eventid DESC, limit 500) —
+    which is NOT "the 500 currently active problems," it's "the 500 most
+    RECENTLY FIRED problem-state events," including ones that have long
+    since recovered (event.get returns historical log entries, not current
+    state). Checked live (2026-09-13): that query was hitting its 500 cap
+    with events all within the last ~5 hours, while problem.get — the API
+    Zabbix actually provides for "what's open right now" — reported 1,432
+    genuinely still-open problems fleet-wide at the same moment. Any
+    problem that had been open longer than whatever it took to fire 500
+    newer ones elsewhere in the fleet was invisible to this function and
+    everything built on it (the alarm glyph, Power & Infra Alerts) with no
+    indication anything was missing — a real, live false-negative, not a
+    theoretical one.
+
+    problem.get doesn't support selectHosts directly, so host attribution
+    is a second call: trigger.get on the distinct objectids (trigger ids)
+    problem.get returned, with selectHosts — one batch call for the whole
+    fleet, not one per problem (checked live: ~1,400 problems, ~1.2s total
+    for both calls combined).
     """
     try:
-        events = _zabbix_call("event.get", {
-            "output": ["eventid", "name", "severity", "clock"],
-            "source": 0, "object": 0, "value": 1,
-            "selectHosts": ["host"],
-            "sortfield": ["eventid"], "sortorder": "DESC",
-            "limit": 500,
+        problems = _zabbix_call("problem.get", {
+            "output": ["eventid", "objectid", "name", "severity", "clock"],
+            "recent": False,
         })
     except Exception as exc:
         return None, f"Zabbix problem lookup failed: {exc}"
+    problems = problems or []
+    if not problems:
+        return {}, None
+
+    trigger_ids = sorted({p.get("objectid") for p in problems if p.get("objectid")})
+    host_by_trigger = {}
+    if trigger_ids:
+        try:
+            triggers = _zabbix_call("trigger.get", {
+                "output": ["triggerid"],
+                "triggerids": trigger_ids,
+                "selectHosts": ["host"],
+            })
+        except Exception as exc:
+            return None, f"Zabbix trigger/host lookup failed: {exc}"
+        for trigger in triggers or []:
+            hosts = trigger.get("hosts") or []
+            if hosts:
+                host_by_trigger[trigger.get("triggerid")] = str(hosts[0].get("host") or "")
 
     by_unit = {}
-    for event in events or []:
-        for host in event.get("hosts") or []:
-            host_name = str(host.get("host") or "")
-            match = _ZABBIX_HOST_UNIT_RE.match(host_name)
-            unit = match.group(1).upper() if match else host_name
-            device = match.group(2) if match else ""
-            by_unit.setdefault(unit, []).append({
-                "device": device,
-                "host": host_name,
-                "name": event.get("name"),
-                "severity": int(event.get("severity") or 0),
-                "clock": int(event.get("clock") or 0),
-            })
+    for problem in problems:
+        host_name = host_by_trigger.get(problem.get("objectid"), "")
+        if not host_name:
+            continue
+        match = _ZABBIX_HOST_UNIT_RE.match(host_name)
+        unit = match.group(1).upper() if match else host_name
+        device = match.group(2) if match else ""
+        by_unit.setdefault(unit, []).append({
+            "device": device,
+            "host": host_name,
+            "name": problem.get("name"),
+            "severity": int(problem.get("severity") or 0),
+            "clock": int(problem.get("clock") or 0),
+        })
     return by_unit, None
 def combined_power_infra_alerts():
     """
@@ -926,14 +964,17 @@ def combined_power_infra_alerts():
     points at a power problem, not a software one); a unit flagged by only
     one still surfaces, since either system alone already beats nothing.
 
-    Correlation is a plain string match on unit identifier as each system
-    already names it — mostly exact for MU trailers, since Zabbix monitors
-    MU-side switches under the same MU number VRM uses for that trailer's
-    battery. There's no RD/FD-head-to-MU-trailer crosswalk here, so a
-    Zabbix problem on an RD/FD head's own NUC/Router/Speaker won't line up
-    with that head's trailer battery unless the ticket happens to reference
-    the MU number directly — a real gap, not a bug, and it would take an
-    ERP-based attached-MU lookup per unit to close.
+    Correlation is mostly a plain string match on unit identifier, since
+    Zabbix monitors an MU trailer's own switch under the same MU number VRM
+    uses for that trailer's battery. The one crosswalk that plain matching
+    can't do — an RD/FD head's own NUC/Router/Speaker problems don't share
+    a name with its attached MU trailer's battery alarm — is closed with a
+    single bulk ERP reverse lookup (_erp_heads_for_mu_trailers) over just
+    the MU units that showed up here, not the whole fleet: each such row
+    gets a "head_units" list of the RD/FD unit(s) whose ERP parent_component
+    points at that trailer, and their Zabbix problems (if any) are folded
+    into the row so it corroborates and sorts correctly. The ERP call is
+    non-fatal — if it fails, rows still return, just without that fold-in.
     Returns ({unit: {zabbix, vrm, both}}, error) plus the two raw error
     strings if either source failed (the other source's data still comes
     back rather than failing the whole call).
@@ -944,15 +985,39 @@ def combined_power_infra_alerts():
     vrm_by_unit = vrm_by_unit or {}
 
     units = set(zabbix_by_unit) | set(vrm_by_unit)
+    mu_units = [u for u in units if u.upper().startswith("MU")]
+    mu_to_heads = {}
+    if mu_units:
+        mu_to_heads, crosswalk_error = _erp_heads_for_mu_trailers(mu_units)
+        mu_to_heads = mu_to_heads or {}
+        # Non-fatal by design (rows still return without the fold-in), but
+        # non-fatal must not mean silent — this exact call came back HTTP
+        # 400 once the fleet passed ~200 alarmed MU units in one poll
+        # (fixed with chunking in _erp_heads_for_mu_trailers) and nothing
+        # printed a trace of it at the time.
+        if crosswalk_error:
+            print(f"combined_power_infra_alerts: ERP head crosswalk failed: {crosswalk_error}")
+
     rows = []
     for unit in units:
-        zabbix_problems = zabbix_by_unit.get(unit) or []
+        # own_zabbix_problems is what THIS unit's own Zabbix hosts actually
+        # reported — kept separate from the fold-in below so callers that
+        # care about true attribution (alarm_history, recording who is
+        # really having a problem) don't double-count a head's own problem
+        # under its trailer's row too.
+        own_zabbix_problems = list(zabbix_by_unit.get(unit) or [])
+        zabbix_problems = list(own_zabbix_problems)
         vrm_alarm = vrm_by_unit.get(unit)
+        head_units = mu_to_heads.get(unit, []) if unit.upper().startswith("MU") else []
+        for head in head_units:
+            zabbix_problems.extend(zabbix_by_unit.get(head) or [])
         both = bool(zabbix_problems) and bool(vrm_alarm)
         max_severity = max((p["severity"] for p in zabbix_problems), default=0)
         rows.append({
             "unit": unit,
+            "head_units": head_units,
             "zabbix_problems": sorted(zabbix_problems, key=lambda p: -p["severity"]),
+            "own_zabbix_problems": own_zabbix_problems,
             "vrm_alarm": vrm_alarm,
             "corroborated": both,
             "max_zabbix_severity": max_severity,
@@ -990,9 +1055,14 @@ def unit_network_latency_history(unit, hours=24):
     if not unit:
         return None, "Missing unit"
     try:
-        hours = max(1, min(int(hours), 24 * 30))
+        hours = max(1, min(int(hours), 24 * 90))
     except (TypeError, ValueError):
         hours = 24
+    # Zabbix's raw per-poll history isn't kept indefinitely — checked live:
+    # still present 25 days back, gone by 30. trend.get (hourly avg/min/max,
+    # kept far longer) is what 30d/90d actually use; history.get keeps the
+    # native ~3min resolution for anything a week or less.
+    use_trends = hours > 24 * 7
 
     device_names = sorted({m[1] for m in NETWORK_LATENCY_METRICS})
     host_names = [f"{unit}-{device}" for device in device_names]
@@ -1034,21 +1104,32 @@ def unit_network_latency_history(unit, hours=24):
             charts[key] = {"label": label, "unit": chart_unit, "points": [], "min": None, "max": None, "latest": None}
             continue
         try:
-            history = _zabbix_call("history.get", {
-                "itemids": item["itemid"],
-                "history": int(item.get("value_type") or 0),
-                "time_from": start,
-                "time_till": end,
-                "sortfield": "clock",
-                "sortorder": "ASC",
-            })
+            if use_trends:
+                raw = _zabbix_call("trend.get", {
+                    "itemids": item["itemid"],
+                    "time_from": start,
+                    "time_till": end,
+                    "sortfield": "clock",
+                    "sortorder": "ASC",
+                })
+                value_key = "value_avg"
+            else:
+                raw = _zabbix_call("history.get", {
+                    "itemids": item["itemid"],
+                    "history": int(item.get("value_type") or 0),
+                    "time_from": start,
+                    "time_till": end,
+                    "sortfield": "clock",
+                    "sortorder": "ASC",
+                })
+                value_key = "value"
         except Exception as exc:
             charts[key] = {"label": label, "unit": chart_unit, "points": [], "min": None, "max": None, "latest": None, "error": str(exc)}
             continue
         points = []
-        for entry in history or []:
+        for entry in raw or []:
             try:
-                value = float(entry["value"])
+                value = float(entry[value_key])
             except (KeyError, TypeError, ValueError):
                 continue
             # Loss is already 0-100 from Zabbix; response time comes in
@@ -1064,4 +1145,9 @@ def unit_network_latency_history(unit, hours=24):
             "latest": values[-1] if values else None,
         }
 
-    return {"unit": unit, "hours": hours, "charts": charts}, None
+    return {
+        "unit": unit,
+        "hours": hours,
+        "resolution": "hourly average" if use_trends else "native (~3min)",
+        "charts": charts,
+    }, None

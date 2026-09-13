@@ -142,6 +142,7 @@
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
             position: relative;
             word-break: break-word;
+            white-space: pre-line;
             animation: toast-in 140ms ease-out;
         }
         .toast.is-error   { border-left-color: var(--danger); }
@@ -755,6 +756,20 @@
             color: var(--text-muted);
             font-size: 13px;
         }
+        /* Units Unplugged / Shaded Units report rows — the live check
+           result line, colored the same as the corresponding command-menu
+           glyph's status (ok/warn/fail from unit_power_status /
+           unit_shading_status), so a "plugged in" line reads green here
+           the same way it would border green as a glyph. */
+        .flap-row-stats.report-status-ok {
+            color: var(--ok);
+        }
+        .flap-row-stats.report-status-warn {
+            color: var(--caution-text);
+        }
+        .flap-row-stats.report-status-fail {
+            color: var(--danger);
+        }
         .experimental-badge {
             font-size: 10px;
             font-weight: 600;
@@ -794,9 +809,105 @@
             color: var(--caution-text);
             margin-left: 4px;
             font-size: 12px;
+            cursor: pointer;
         }
         .command-alarm-glyph.is-corroborated {
             color: var(--danger);
+        }
+        /* Plugged-in indicator — a lazy, on-open check (see
+           checkAndApplyPowerGlyph), not a fleet-wide poll like the alarm
+           glyph above, since a real check costs a VRM round trip per unit. */
+        .command-power-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            margin-left: 4px;
+            border-radius: 50%;
+            border: 2px solid var(--border-strong);
+            font-size: 9px;
+            line-height: 1;
+            vertical-align: middle;
+            position: relative;
+        }
+        .command-power-glyph.is-present {
+            border-color: var(--ok);
+        }
+        .command-power-glyph.is-uncertain {
+            border-color: var(--caution-text);
+        }
+        .command-power-glyph.is-not_detected {
+            border-color: var(--danger);
+        }
+        .command-power-glyph.is-not_detected::after {
+            content: "×";
+            position: absolute;
+            top: -7px;
+            right: -7px;
+            color: var(--danger);
+            background: var(--bg-panel);
+            border-radius: 50%;
+            width: 10px;
+            height: 10px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 10px;
+            text-align: center;
+        }
+        /* "unknown" is deliberately NOT red/yellow/green — it means VRM has
+           no current data to read either way (stale/disconnected), which is
+           a different fact than "checked and it's unplugged." Neutral grey
+           (the same token the status-light "no reading" case uses) plus a
+           "?" badge keeps it from being mistaken for one of the three real
+           verdicts at a glance. */
+        .command-power-glyph.is-unknown {
+            border-color: var(--led-idle);
+        }
+        .command-power-glyph.is-unknown::after {
+            content: "?";
+            position: absolute;
+            top: -7px;
+            right: -7px;
+            color: var(--led-idle);
+            background: var(--bg-panel);
+            border-radius: 50%;
+            width: 10px;
+            height: 10px;
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 10px;
+            text-align: center;
+        }
+        /* "no_charger_hardware" is a plain, badge-free grey — it means the
+           unit IS in VRM (there's a real installation to show), it's just
+           a solar+battery trailer with no AC charger for this check to
+           read. Not the same fact as "unknown" (a charger exists but its
+           reading is too old to trust), so it deliberately skips the "?"
+           badge — nothing here is actually uncertain. */
+        .command-power-glyph.is-no_charger_hardware {
+            border-color: var(--led-idle);
+            opacity: 0.7;
+        }
+        /* Shading is a pure alert (see createCommandMenuElement) — only
+           ever shown, never a quiet "checked, clear" confirmation — so it
+           always reads as attention-worthy, same caution color as the
+           alarm glyph's uncorroborated state. Click opens Battery Graphs
+           (PV power), same "click the indicator to see the graph" pattern
+           as the plug glyph. */
+        .command-shading-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 9px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
         }
         .battery-graphs-dialog {
             width: min(720px, 100%);
@@ -856,6 +967,15 @@
         }
         .battery-chart-axis-label {
             fill: var(--text-muted);
+            font-size: 9px;
+        }
+        .battery-chart-threshold {
+            stroke: var(--caution-text);
+            stroke-width: 1px;
+            stroke-dasharray: 4 3;
+        }
+        .battery-chart-threshold-label {
+            fill: var(--caution-text);
             font-size: 9px;
         }
         .battery-chart-crosshair {
@@ -1113,6 +1233,25 @@
             color: var(--text-muted);
             display: block;
             margin-top: 2px;
+        }
+        /* Plug/alarm status row, top of the expanded menu — same glyphs as
+           before (see .command-alarm-glyph / .command-power-glyph), just
+           living here instead of on the collapsed summary button. Both
+           still start hidden and stay that way when there's nothing to
+           report (no VRM entry / no active alert), so the row can end up
+           empty; it takes up no visible space either way since it has no
+           border/background of its own. */
+        .command-menu-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .command-menu-status .command-alarm-glyph,
+        .command-menu-status .command-power-glyph {
+            margin-left: 0;
         }
         .command-recent {
             display: flex;
@@ -1627,8 +1766,18 @@
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
                 <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
                 <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
-                <button type="button" id="flap_report_toggle" class="toolbar-btn" title="Fleet-wide: which units keep bouncing between healthy and unhealthy, not just which are down right now">Flap Report</button>
+                <div class="list-category-wrap" id="reports_menu_wrap">
+                    <button type="button" class="list-category-toggle toolbar-btn" id="reports_menu_toggle" aria-haspopup="true" aria-expanded="false">
+                        <span class="list-category-toggle-text">Reports</span>
+                    </button>
+                    <div class="list-category-options" id="reports_menu_options" role="menu" aria-label="Reports">
+                        <button type="button" class="list-category-option" id="reports_menu_flap" role="menuitem" title="Fleet-wide: which units keep bouncing between healthy and unhealthy, not just which are down right now">Flap Report</button>
+                        <button type="button" class="list-category-option" id="reports_menu_unplugged" role="menuitem" title="Every currently-open 'Unit Unplugged' ticket, cross-checked live against VRM">Units Unplugged</button>
+                        <button type="button" class="list-category-option" id="reports_menu_shaded" role="menuitem" title="Every currently-open 'shaded' ticket, cross-checked live against VRM solar history">Shaded Units</button>
+                    </div>
+                </div>
                 <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
+                <button type="button" id="alarm_frequency_toggle" class="toolbar-btn" title="Repeat offenders: units whose Zabbix/VRM alarms keep clearing and coming back, not just what's active right now">Alarm Frequency</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
             <div class="list-section" id="flap_report_section" data-panel="issues" hidden>
@@ -1644,6 +1793,28 @@
             </div>
             <ul id="flap_report_list"><li class="empty">Click Refresh to load the flap report...</li></ul>
             </div>
+            <div class="list-section" id="units_unplugged_section" data-panel="issues" hidden>
+            <h2>
+                Units Unplugged <span class="experimental-badge">Experimental</span>
+                <span class="count" id="units_unplugged_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="units_unplugged_refresh" class="toolbar-btn">Refresh</button>
+                <span class="flap-report-db-stats" id="units_unplugged_status"></span>
+            </div>
+            <ul id="units_unplugged_list"><li class="empty">Click Refresh to check every open "Unit Unplugged" ticket against VRM...</li></ul>
+            </div>
+            <div class="list-section" id="shaded_units_section" data-panel="issues" hidden>
+            <h2>
+                Shaded Units <span class="experimental-badge">Experimental</span>
+                <span class="count" id="shaded_units_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="shaded_units_refresh" class="toolbar-btn">Refresh</button>
+                <span class="flap-report-db-stats" id="shaded_units_status"></span>
+            </div>
+            <ul id="shaded_units_list"><li class="empty">Click Refresh to check every open "shaded" ticket against VRM solar history...</li></ul>
+            </div>
             <div class="list-section" id="power_infra_section" data-panel="issues" hidden>
             <h2>
                 Power &amp; Infra Alerts <span class="experimental-badge">Experimental</span>
@@ -1654,6 +1825,19 @@
                 <span class="flap-report-db-stats" id="power_infra_source_status"></span>
             </div>
             <ul id="power_infra_list"><li class="empty">Click Refresh to load current Zabbix problems and VRM battery alarms...</li></ul>
+            </div>
+            <div class="list-section" id="alarm_frequency_section" data-panel="issues" hidden>
+            <h2>
+                Alarm Frequency <span class="experimental-badge">Experimental</span>
+                <span class="count" id="alarm_frequency_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <label>Last <input type="number" id="alarm_frequency_days" min="1" max="90" value="7" step="1"> day(s)</label>
+                <label>Min episodes <input type="number" id="alarm_frequency_min" min="1" max="50" value="2" step="1"></label>
+                <button type="button" id="alarm_frequency_refresh" class="toolbar-btn">Refresh</button>
+                <span class="flap-report-db-stats" id="alarm_frequency_db_stats"></span>
+            </div>
+            <ul id="alarm_frequency_list"><li class="empty">Click Refresh to load alarm frequency...</li></ul>
             </div>
             <div class="list-section" id="unit_tools_section" data-panel="issues" hidden>
             <h2>
@@ -4380,6 +4564,41 @@
         // Each mode: what to fetch, how to read the response, and the fixed
         // chart order (never dual-axis, so no metric is ever combined with
         // another on one chart — see GRAPH_MODES below).
+        // Each mode's own hour options — VRM's /stats keeps real history to
+        // 30 days (checked: unit_battery_history caps there); Zabbix goes
+        // further (90d) but switches to hourly trend averages past 7 days,
+        // since its raw per-poll history isn't kept that long (checked
+        // live: still there 25 days back, gone by 30).
+        const BATTERY_HOURS_OPTIONS = [
+            { value: 24, label: "Last 24 hours" },
+            { value: 72, label: "Last 3 days" },
+            { value: 168, label: "Last 7 days" },
+            { value: 720, label: "Last 30 days" },
+        ];
+        const NETWORK_HOURS_OPTIONS = [
+            { value: 24, label: "Last 24 hours" },
+            { value: 72, label: "Last 3 days" },
+            { value: 168, label: "Last 7 days" },
+            { value: 720, label: "Last 30 days (hourly avg)" },
+            { value: 2160, label: "Last 90 days (hourly avg)" },
+        ];
+        // Mirrors work_tool._format_age — a graph's own subtitle is the one
+        // place "how old is this VRM data" needs to read naturally rather
+        // than as a raw number, since a technician reads it, not code.
+        function formatAgeShort(ageSeconds) {
+            if (ageSeconds == null) {
+                return "unknown";
+            }
+            const seconds = Math.max(0, ageSeconds);
+            if (seconds < 3600) {
+                const minutes = Math.round(seconds / 60);
+                return minutes + " minute" + (minutes === 1 ? "" : "s");
+            }
+            if (seconds < 86400) {
+                return (seconds / 3600).toFixed(1) + " hours";
+            }
+            return (seconds / 86400).toFixed(1) + " days";
+        }
         const GRAPH_MODES = {
             battery: {
                 titleText: "Battery Graphs",
@@ -4387,8 +4606,18 @@
                 order: ["voltage", "soc", "current", "pv_power", "yield_today"],
                 loadingText: "Loading from VRM...",
                 failureLabel: "Battery Graphs",
+                hoursOptions: BATTERY_HOURS_OPTIONS,
                 subtitle: function (unit, data) {
-                    return unit + (data.installation_name ? (" (VRM: " + data.installation_name + ")") : "");
+                    let text = unit + (data.installation_name ? (" (VRM: " + data.installation_name + ")") : "");
+                    // "fresh" is the expected case and stays quiet — only
+                    // call out VRM's own last-report age when it's NOT
+                    // fresh, so a stale reading can't be mistaken for a
+                    // live one just because a graph is on screen.
+                    if (data.vrm_freshness && data.vrm_freshness !== "fresh") {
+                        text += " — VRM last reported " + formatAgeShort(data.vrm_last_seen_seconds_ago)
+                            + " ago (" + data.vrm_freshness + ")";
+                    }
+                    return text;
                 },
             },
             network: {
@@ -4397,8 +4626,10 @@
                 order: ["router_response", "router_loss", "switch_response", "switch_loss"],
                 loadingText: "Loading from Zabbix...",
                 failureLabel: "Network Latency Graphs",
-                subtitle: function (unit) {
-                    return unit + " — Router/Switch ICMP checks";
+                hoursOptions: NETWORK_HOURS_OPTIONS,
+                subtitle: function (unit, data) {
+                    return unit + " — Router/Switch ICMP checks"
+                        + (data.resolution ? " (" + data.resolution + ")" : "");
                 },
             },
         };
@@ -4466,8 +4697,58 @@
                 svg.appendChild(label);
             });
 
+            // Reference lines (e.g. a low-battery cutoff) — only ever
+            // added by the caller for a metric where a fixed number is
+            // actually meaningful regardless of system (SOC is a % of
+            // capacity on any battery; a voltage cutoff would need to
+            // know the trailer's system voltage first, which nothing here
+            // currently knows reliably, so no threshold is drawn for
+            // voltage — see renderGraphs).
+            (options.thresholds || []).forEach(function (threshold) {
+                if (threshold.value < yLo || threshold.value > yHi) {
+                    return;
+                }
+                const y = yPos(threshold.value);
+                const line = document.createElementNS(svgNS, "line");
+                line.setAttribute("x1", padding.left);
+                line.setAttribute("x2", width - padding.right);
+                line.setAttribute("y1", y);
+                line.setAttribute("y2", y);
+                line.setAttribute("class", "battery-chart-threshold");
+                svg.appendChild(line);
+                if (threshold.label) {
+                    const label = document.createElementNS(svgNS, "text");
+                    label.textContent = threshold.label;
+                    label.setAttribute("x", width - padding.right - 4);
+                    label.setAttribute("y", y - 3);
+                    label.setAttribute("class", "battery-chart-threshold-label");
+                    label.setAttribute("text-anchor", "end");
+                    svg.appendChild(label);
+                }
+            });
+
+            // A straight line drawn across a real data gap (the unit
+            // stopped reporting for a while) visually claims continuity
+            // that was never there — exactly the "hide the disconnect"
+            // failure this whole review is about, just in chart form.
+            // Breaking the path instead of connecting across a gap that's
+            // well beyond the series' own normal spacing makes the gap
+            // itself visible rather than smoothing over it. The threshold
+            // is derived from THIS series' own median spacing (never a
+            // fixed number — a 15-min-interval window and an hourly-trend
+            // one have very different normal cadences) with a 30-minute
+            // floor so ordinary polling jitter never triggers a false break.
+            const gaps = [];
+            for (let i = 1; i < points.length; i++) {
+                gaps.push(points[i].t - points[i - 1].t);
+            }
+            gaps.sort(function (a, b) { return a - b; });
+            const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
+            const gapThresholdMs = Math.max(medianGap * 4, 30 * 60 * 1000);
+
             const pathD = points.map(function (p, i) {
-                return (i === 0 ? "M" : "L") + xPos(p.t).toFixed(1) + "," + yPos(p.v).toFixed(1);
+                const isGapStart = i > 0 && (p.t - points[i - 1].t) > gapThresholdMs;
+                return (i === 0 || isGapStart ? "M" : "L") + xPos(p.t).toFixed(1) + "," + yPos(p.v).toFixed(1);
             }).join(" ");
             const path = document.createElementNS(svgNS, "path");
             path.setAttribute("d", pathD);
@@ -4578,7 +4859,18 @@
                     renderLineChart(
                         chartContainer,
                         chart.points.map(function (p) { return { t: p.t, v: p.v }; }),
-                        { label: chart.label, unit: chart.unit }
+                        {
+                            label: chart.label,
+                            unit: chart.unit,
+                            // SOC is the one metric here where a fixed
+                            // reference line is defensible regardless of
+                            // system (12V/24V/48V) — it's already a % of
+                            // capacity. 20% is a conventional low-battery
+                            // cutoff for lead/AGM and a conservative one for
+                            // lithium, so it reads as "worth a look," not
+                            // "definitely dying," on either chemistry.
+                            thresholds: key === "soc" ? [{ value: 20, label: "20% low-battery reference" }] : [],
+                        }
                     );
                 }
                 graphsBody.appendChild(block);
@@ -4630,6 +4922,20 @@
             graphsSubject = subject || "";
             graphsTitle.firstChild.textContent = modeConfig.titleText + " ";
             graphsSubtitle.textContent = unit || "";
+            const previousValue = graphsHours.value;
+            graphsHours.innerHTML = "";
+            modeConfig.hoursOptions.forEach(function (opt) {
+                const optionEl = document.createElement("option");
+                optionEl.value = opt.value;
+                optionEl.textContent = opt.label;
+                graphsHours.appendChild(optionEl);
+            });
+            // Keep the previously-picked window when the new mode still
+            // offers it (e.g. switching graph types without losing "7 days"),
+            // otherwise fall back to the mode's first/default option.
+            if (modeConfig.hoursOptions.some(function (opt) { return String(opt.value) === previousValue; })) {
+                graphsHours.value = previousValue;
+            }
             graphsModal.classList.add("is-open");
             loadGraphs();
         }
@@ -5578,6 +5884,94 @@
         // without waiting for someone to open the Power & Infra Alerts panel.
         let powerInfraAlarmedUnits = {};
 
+        const ZABBIX_SEVERITY_LABELS = ["Not classified", "Info", "Warning", "Average", "High", "Disaster"];
+
+        // Each raw problem here is a genuinely still-OPEN Zabbix problem
+        // (combined_power_infra_alerts now goes through problem.get, not a
+        // history scan — see that function's docstring), so "count" means
+        // "N distinct trigger instances with this device+name are open
+        // right now" (e.g. the same disk-latency check firing on several
+        // mounts), and clock is each instance's own start time. Grouping
+        // keeps the EARLIEST clock so "how long has this been happening"
+        // reflects the longest-standing instance, not the newest.
+        function dedupeZabbixProblems(problems) {
+            const byKey = new Map();
+            (problems || []).forEach(function (p) {
+                const key = p.device + "|" + p.name;
+                const existing = byKey.get(key);
+                if (existing) {
+                    existing.count += 1;
+                    existing.severity = Math.max(existing.severity, p.severity);
+                    if (p.clock && (!existing.firstClock || p.clock < existing.firstClock)) {
+                        existing.firstClock = p.clock;
+                    }
+                } else {
+                    byKey.set(key, {
+                        device: p.device, name: p.name, severity: p.severity, count: 1,
+                        firstClock: p.clock || null,
+                    });
+                }
+            });
+            return Array.from(byKey.values()).sort(function (a, b) { return b.severity - a.severity; });
+        }
+
+        function formatDurationSince(clockSeconds) {
+            if (!clockSeconds) {
+                return "";
+            }
+            const seconds = Math.max(0, Date.now() / 1000 - clockSeconds);
+            if (seconds < 3600) {
+                return Math.round(seconds / 60) + "m";
+            }
+            if (seconds < 86400) {
+                return (seconds / 3600).toFixed(1) + "h";
+            }
+            return (seconds / 86400).toFixed(1) + "d";
+        }
+
+        // Shared by the glyph's hover title and its click toast, so hover and
+        // click always agree on what "the alarm" actually is.
+        function powerInfraAlertSummaryText(unit, info) {
+            const lines = [];
+            if (info.corroborated) {
+                lines.push("Zabbix AND VRM both flag " + unit + " — likely a power issue, not just software/network.");
+            }
+            dedupeZabbixProblems(info.zabbixProblems).forEach(function (g) {
+                const duration = formatDurationSince(g.firstClock);
+                lines.push("Zabbix — " + g.device + ": " + g.name
+                    + (g.count > 1 ? " (×" + g.count + ")" : "")
+                    + " [" + (ZABBIX_SEVERITY_LABELS[g.severity] || g.severity) + "]"
+                    + (duration ? " — open " + duration : ""));
+            });
+            if (info.vrmAlarm) {
+                const soc = info.vrmAlarm.battery_soc ? (" — SOC " + info.vrmAlarm.battery_soc) : "";
+                const age = info.vrmAlarm.last_seen_age_minutes != null
+                    ? (" (seen " + info.vrmAlarm.last_seen_age_minutes + "m ago)")
+                    : "";
+                lines.push("VRM — " + info.vrmAlarm.installation_name + ": " + info.vrmAlarm.alarm_detail + soc + age);
+            }
+            return lines.join("\n");
+        }
+
+        // The status row (unit/subject header aside) has no border or
+        // background of its own beyond the divider under it, so an empty
+        // row would still leave a stray horizontal line with nothing above
+        // it. Hidden whenever both glyphs are — called after either one
+        // changes, since either alone can make the row go from empty to
+        // non-empty or back.
+        function refreshCommandMenuStatusRowVisibility(commandMenu) {
+            const row = commandMenu.querySelector(".command-menu-status");
+            if (!row) {
+                return;
+            }
+            const alarmGlyph = row.querySelector(".command-alarm-glyph");
+            const powerGlyph = row.querySelector(".command-power-glyph");
+            const shadingGlyph = row.querySelector(".command-shading-glyph");
+            const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
+                || (shadingGlyph && !shadingGlyph.hidden);
+            row.hidden = !anyVisible;
+        }
+
         function applyPowerInfraGlyph(commandMenu) {
             const glyph = commandMenu.querySelector(".command-alarm-glyph");
             if (!glyph) {
@@ -5587,12 +5981,164 @@
             const info = powerInfraAlarmedUnits[unit];
             if (!info) {
                 glyph.hidden = true;
+                glyph.title = "";
+                refreshCommandMenuStatusRowVisibility(commandMenu);
                 return;
             }
             glyph.hidden = false;
             glyph.classList.toggle("is-corroborated", !!info.corroborated);
-            const sources = info.corroborated ? "Zabbix + VRM" : (info.zabbix ? "Zabbix" : "VRM");
-            glyph.title = "Active " + sources + " alert on " + unit + " — see Power & Infra Alerts for detail";
+            glyph.title = powerInfraAlertSummaryText(unit, info) + "\n(click for detail)";
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        // Lazy, on-open power-status check (🔌 glyph) — deliberately NOT a
+        // fleet-wide poll like the alarm glyph above, since a real check
+        // costs a VRM round trip (sometimes two, if it falls back to the
+        // solar-ceiling inference) — only fires for a unit whose menu
+        // someone actually opened, and caches briefly so reopening the same
+        // unit's menu right after doesn't refetch.
+        //
+        // Shown whenever the unit resolves in VRM at all — every one of
+        // present/not_detected/uncertain/unknown/no_charger_hardware means
+        // "this unit IS in VRM," so all five show, unconditionally (not
+        // gated on the ticket's subtype being "Unit Unplugged" — the same
+        // check applies to any unit, ticket or not). The ONE thing that
+        // stays hidden is a null status: the fetch failing outright or the
+        // unit having no VRM entry at all (no attached MU trailer, or no
+        // installation under that MU's name) — there truly is nothing to
+        // show in that case, as opposed to no_charger_hardware, which
+        // means "in VRM, just solar+battery with no AC charger to read."
+        const powerGlyphCache = {};
+        const powerGlyphInFlight = {};
+        const POWER_GLYPH_CACHE_MS = 5 * 60 * 1000;
+        const POWER_GLYPH_VISIBLE_STATUSES = {
+            present: true, uncertain: true, not_detected: true,
+            unknown: true, no_charger_hardware: true,
+        };
+
+        function applyPowerGlyphFromCache(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-power-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const cached = powerGlyphCache[unit];
+            if (!cached || !POWER_GLYPH_VISIBLE_STATUSES[cached.status]) {
+                glyph.hidden = true;
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
+            glyph.hidden = false;
+            glyph.className = "command-power-glyph is-" + cached.status;
+            let title = cached.summary || ("Power status: " + cached.status);
+            // Point at the ⚠ glyph rather than repeating its detail here —
+            // one line is enough to say "these two don't necessarily
+            // agree, go look," without duplicating the whole alert text in
+            // two tooltips that would drift out of sync with each other.
+            if (powerInfraAlarmedUnits[unit]) {
+                title += "\n⚠ Zabbix/VRM also has an active alert on this unit — see the ⚠ for detail";
+            }
+            glyph.title = title;
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        function checkAndApplyPowerGlyph(commandMenu) {
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            if (!unit || unit === "MENU") {
+                return;
+            }
+            const cached = powerGlyphCache[unit];
+            if (cached && (Date.now() - cached.fetchedAt) < POWER_GLYPH_CACHE_MS) {
+                applyPowerGlyphFromCache(commandMenu);
+                return;
+            }
+            if (powerGlyphInFlight[unit]) {
+                return;
+            }
+            powerGlyphInFlight[unit] = true;
+            const entry = commandMenuEntries.get(commandMenu);
+            const subject = (entry && (entry.ticketSubject || entry.subject)) || "";
+            fetch("/issues/power-status/" + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ subject: subject }),
+            })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    powerGlyphCache[unit] = (data && data.ok)
+                        ? { status: data.ac_power_status, summary: data.summary, fetchedAt: Date.now() }
+                        : { status: null, fetchedAt: Date.now() };
+                })
+                .catch(function () {
+                    powerGlyphCache[unit] = { status: null, fetchedAt: Date.now() };
+                })
+                .finally(function () {
+                    delete powerGlyphInFlight[unit];
+                    applyPowerGlyphFromCache(commandMenu);
+                });
+        }
+
+        // Same lazy on-open, cached-per-unit pattern as the plug glyph
+        // above — a real check is two VRM /stats calls (a multi-day
+        // ceiling window, a recent window), so this only ever fires for a
+        // unit whose menu someone actually opened. Unlike the plug glyph,
+        // "clear" and "unknown" never show anything — see the CSS/creation
+        // comments for why this one is alert-only.
+        const shadingGlyphCache = {};
+        const shadingGlyphInFlight = {};
+        const SHADING_GLYPH_CACHE_MS = 5 * 60 * 1000;
+
+        function applyShadingGlyphFromCache(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-shading-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const cached = shadingGlyphCache[unit];
+            if (!cached || cached.status !== "shaded") {
+                glyph.hidden = true;
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
+            glyph.hidden = false;
+            glyph.title = (cached.summary || "Possible shading detected") + "\n(click to view solar graphs)";
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        function checkAndApplyShadingGlyph(commandMenu) {
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            if (!unit || unit === "MENU") {
+                return;
+            }
+            const cached = shadingGlyphCache[unit];
+            if (cached && (Date.now() - cached.fetchedAt) < SHADING_GLYPH_CACHE_MS) {
+                applyShadingGlyphFromCache(commandMenu);
+                return;
+            }
+            if (shadingGlyphInFlight[unit]) {
+                return;
+            }
+            shadingGlyphInFlight[unit] = true;
+            const entry = commandMenuEntries.get(commandMenu);
+            const subject = (entry && (entry.ticketSubject || entry.subject)) || "";
+            fetch("/issues/shading-status/" + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ subject: subject }),
+            })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    shadingGlyphCache[unit] = (data && data.ok)
+                        ? { status: data.shading_status, summary: data.summary, fetchedAt: Date.now() }
+                        : { status: null, fetchedAt: Date.now() };
+                })
+                .catch(function () {
+                    shadingGlyphCache[unit] = { status: null, fetchedAt: Date.now() };
+                })
+                .finally(function () {
+                    delete shadingGlyphInFlight[unit];
+                    applyShadingGlyphFromCache(commandMenu);
+                });
         }
 
         function pollPowerInfraAlertsCache() {
@@ -5600,15 +6146,39 @@
                 .then(function (response) { return response.json(); })
                 .then(function (data) {
                     const next = {};
-                    (data.rows || []).forEach(function (row) {
+                    const rows = data.rows || [];
+                    rows.forEach(function (row) {
                         next[String(row.unit || "").toUpperCase()] = {
                             corroborated: !!row.corroborated,
                             zabbix: (row.zabbix_problems || []).length > 0,
                             vrm: !!row.vrm_alarm,
+                            zabbixProblems: row.zabbix_problems || [],
+                            vrmAlarm: row.vrm_alarm || null,
                         };
                     });
+                    // Second pass: an MU trailer row's head_units (its RD/FD
+                    // head(s), from the ERP crosswalk) get the SAME info —
+                    // deliberately overwriting any plain direct-match entry
+                    // those heads already got in the first pass, since the
+                    // MU row's zabbix_problems already has the head's own
+                    // problems folded in server-side (see
+                    // combined_power_infra_alerts) and is therefore always
+                    // the more complete of the two.
+                    rows.forEach(function (row) {
+                        const info = next[String(row.unit || "").toUpperCase()];
+                        (row.head_units || []).forEach(function (head) {
+                            next[String(head).toUpperCase()] = info;
+                        });
+                    });
                     powerInfraAlarmedUnits = next;
-                    document.querySelectorAll("details.command-menu").forEach(applyPowerInfraGlyph);
+                    document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
+                        applyPowerInfraGlyph(commandMenu);
+                        // Re-apply from the (unchanged) power-status cache too —
+                        // its cross-check note depends on powerInfraAlarmedUnits,
+                        // which just changed, even though the power reading
+                        // itself didn't.
+                        applyPowerGlyphFromCache(commandMenu);
+                    });
                 })
                 .catch(function () {})
                 .finally(function () {
@@ -5932,16 +6502,39 @@
                         if (data.ac_power_detail) {
                             consoleLines.push("  " + data.ac_power_detail);
                         }
+                        // Cross-check against Zabbix/VRM's OWN independent
+                        // read on this unit — already fetched and cached
+                        // for the alarm glyph (see pollPowerInfraAlertsCache,
+                        // which fans an MU trailer's data out to its RD/FD
+                        // head too), so this costs nothing extra and needs
+                        // no new heuristic: it's just the two signals shown
+                        // side by side, neither one silently overriding the
+                        // other. This is exactly where a VRM-side alarm
+                        // like "Trailer Unplugged" would show up alongside
+                        // our own inferred verdict if the two disagree.
+                        const crossCheckInfo = powerInfraAlarmedUnits[String(entry.unit || "").toUpperCase()];
+                        let crossCheckText = "";
+                        if (crossCheckInfo) {
+                            crossCheckText = powerInfraAlertSummaryText(entry.unit, crossCheckInfo);
+                            consoleLines.push("  Zabbix/VRM alerts on this unit:");
+                            crossCheckText.split("\n").forEach(function (line) {
+                                consoleLines.push("    " + line);
+                            });
+                        }
                         renderConsole(true);
                         statusEl.textContent = data.summary;
                         const toastKind = data.status === "fail" ? "error"
                             : data.status === "warn" ? "warning" : "success";
-                        notify(data.summary, toastKind, {
-                            actionLabel: "View Graphs",
-                            onAction: function () {
-                                openGraphsModal(entry.unit, "battery", subjectForLookup);
-                            },
-                        });
+                        notify(
+                            data.summary + (crossCheckText ? "\n\nAlso active for this unit:\n" + crossCheckText : ""),
+                            crossCheckText ? "error" : toastKind,
+                            {
+                                actionLabel: "View Graphs",
+                                onAction: function () {
+                                    openGraphsModal(entry.unit, "battery", subjectForLookup);
+                                },
+                            }
+                        );
                     })
                     .catch(function (error) {
                         const message = "Power Status failed: " + (error.message || error);
@@ -5956,6 +6549,78 @@
                     });
             });
             diagMenu.appendChild(powerStatusBtn);
+
+            // Same idea as Power Status, but for the ticket subtype "shaded"
+            // instead of "unplugged" — see detect_solar_shading. This is the
+            // on-demand equivalent of the passive 🌳 glyph in the status row
+            // (which only checks lazily when the menu opens and caches for
+            // 5 minutes); this button always does a fresh check right now.
+            const shadingStatusBtn = document.createElement("button");
+            shadingStatusBtn.type = "button";
+            shadingStatusBtn.className = "action-btn";
+            shadingStatusBtn.textContent = "Shading Status (Solar Dip?)";
+            shadingStatusBtn.title = "Checks this trailer's recent solar output against its own hour-of-day history — experimental";
+            shadingStatusBtn.addEventListener("click", function () {
+                shadingStatusBtn.disabled = true;
+                shadingStatusBtn.textContent = "Checking...";
+                statusEl.textContent = "Shading status for " + entry.unit + "...";
+                const subjectForLookup = entry.ticketSubject || entry.subject || "";
+                fetch("/issues/shading-status/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ subject: subjectForLookup }),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        consoleLines.push(data.summary);
+                        if (data.shading_detail) {
+                            consoleLines.push("  " + data.shading_detail);
+                        }
+                        // Same cross-check as Power Status — see its comment.
+                        const crossCheckInfo = powerInfraAlarmedUnits[String(entry.unit || "").toUpperCase()];
+                        let crossCheckText = "";
+                        if (crossCheckInfo) {
+                            crossCheckText = powerInfraAlertSummaryText(entry.unit, crossCheckInfo);
+                            consoleLines.push("  Zabbix/VRM alerts on this unit:");
+                            crossCheckText.split("\n").forEach(function (line) {
+                                consoleLines.push("    " + line);
+                            });
+                        }
+                        renderConsole(true);
+                        statusEl.textContent = data.summary;
+                        const toastKind = data.status === "fail" ? "error"
+                            : data.status === "warn" ? "warning" : "success";
+                        notify(
+                            data.summary + (crossCheckText ? "\n\nAlso active for this unit:\n" + crossCheckText : ""),
+                            crossCheckText ? "error" : toastKind,
+                            {
+                                actionLabel: "View Graphs",
+                                onAction: function () {
+                                    openGraphsModal(entry.unit, "battery", subjectForLookup);
+                                },
+                            }
+                        );
+                    })
+                    .catch(function (error) {
+                        const message = "Shading Status failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        shadingStatusBtn.disabled = false;
+                        shadingStatusBtn.textContent = "Shading Status (Solar Dip?)";
+                    });
+            });
+            diagMenu.appendChild(shadingStatusBtn);
 
             const graphsMenu = appendCommandSubmenu(diagMenu, "Graphs");
 
@@ -6274,15 +6939,76 @@
             const commandSummary = document.createElement("summary");
             commandSummary.textContent = unitLabel;
             commandSummary.setAttribute("aria-label", "Commands for " + unitLabel);
-            const alarmGlyph = document.createElement("span");
-            alarmGlyph.className = "command-alarm-glyph";
-            alarmGlyph.textContent = "⚠";
-            alarmGlyph.hidden = true;
-            commandSummary.appendChild(alarmGlyph);
             commandMenu.appendChild(commandSummary);
             const commandItems = document.createElement("div");
             commandItems.className = "command-menu-items";
             commandMenu.appendChild(commandItems);
+
+            // Plug/alarm status lives INSIDE the expanded menu, not on the
+            // collapsed summary button — the button is just a label; these
+            // are read once someone actually opens the menu, so that's
+            // where they show up too. First child of commandItems so they
+            // sit above whatever buttons the caller appends next; on the
+            // first open, updateCommandMenuContext inserts the unit/subject
+            // header above this row, so the settled order reads unit name,
+            // then status, then the rest of the menu.
+            const statusRow = document.createElement("div");
+            statusRow.className = "command-menu-status";
+            const alarmGlyph = document.createElement("span");
+            alarmGlyph.className = "command-alarm-glyph";
+            alarmGlyph.textContent = "⚠";
+            alarmGlyph.hidden = true;
+            alarmGlyph.addEventListener("click", function (event) {
+                event.stopPropagation();
+                const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+                const info = powerInfraAlarmedUnits[unit];
+                if (!info) {
+                    return;
+                }
+                notify(
+                    "Active alert — " + unit + "\n" + powerInfraAlertSummaryText(unit, info),
+                    "error",
+                    {
+                        actionLabel: "Open Power & Infra Alerts",
+                        onAction: function () {
+                            if (powerInfraSection) {
+                                powerInfraSection.hidden = false;
+                            }
+                            if (!powerInfraLoaded) {
+                                loadPowerInfraAlerts();
+                            }
+                            if (powerInfraSection && powerInfraSection.scrollIntoView) {
+                                powerInfraSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }
+                        },
+                    }
+                );
+            });
+            statusRow.appendChild(alarmGlyph);
+            const powerGlyph = document.createElement("span");
+            powerGlyph.className = "command-power-glyph";
+            powerGlyph.textContent = "🔌";
+            powerGlyph.hidden = true;
+            statusRow.appendChild(powerGlyph);
+            // Shading is a pure alert, unlike the plug glyph — it only
+            // ever appears when detect_solar_shading actually found a
+            // sustained deficit, never as a quiet "checked, all clear"
+            // confirmation (see checkAndApplyShadingGlyph).
+            const shadingGlyph = document.createElement("span");
+            shadingGlyph.className = "command-shading-glyph";
+            shadingGlyph.textContent = "🌳";
+            shadingGlyph.hidden = true;
+            shadingGlyph.addEventListener("click", function (event) {
+                event.stopPropagation();
+                const entry = commandMenuEntries.get(commandMenu);
+                if (!entry || !entry.unit) {
+                    return;
+                }
+                openGraphsModal(entry.unit, "battery", entry.ticketSubject || entry.subject || "");
+            });
+            statusRow.appendChild(shadingGlyph);
+            commandItems.appendChild(statusRow);
+
             commandMenuEntries.set(commandMenu, entry);
             wireCommandMenuToggle(commandMenu, rowEl);
             applyPowerInfraGlyph(commandMenu);
@@ -6308,6 +7034,8 @@
                     updateCommandMenuContext(commandMenu);
                     placeCommandMenu(commandMenu);
                     renderRecentCommands(commandMenu.querySelector(".command-menu-items"));
+                    checkAndApplyPowerGlyph(commandMenu);
+                    checkAndApplyShadingGlyph(commandMenu);
                 } else {
                     clearCommandMenuPosition(commandMenu);
                 }
@@ -6810,7 +7538,6 @@
         // work, but nothing in the UI showed it. Opening a unit's row reuses
         // the exact ad-hoc "Unit tools" command menu (loadUnitTools) rather
         // than building a second copy of it.
-        const flapReportToggleBtn = document.getElementById("flap_report_toggle");
         const flapReportSection = document.getElementById("flap_report_section");
         const flapReportListEl = document.getElementById("flap_report_list");
         const flapReportCountEl = document.getElementById("flap_report_count");
@@ -6908,23 +7635,262 @@
                 .catch(function () {});
         }
 
-        if (flapReportToggleBtn && flapReportSection) {
-            flapReportToggleBtn.addEventListener("click", function () {
-                flapReportSection.hidden = !flapReportSection.hidden;
-                if (!flapReportSection.hidden && !flapReportLoaded) {
+        function toggleFlapReportSection() {
+            if (!flapReportSection) {
+                return;
+            }
+            flapReportSection.hidden = !flapReportSection.hidden;
+            if (!flapReportSection.hidden) {
+                if (!flapReportLoaded) {
                     loadFlapReport();
                 }
-            });
+                if (flapReportSection.scrollIntoView) {
+                    flapReportSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            }
         }
         if (flapReportRefreshBtn) {
             flapReportRefreshBtn.addEventListener("click", loadFlapReport);
         }
 
+        // ---- Units Unplugged / Shaded Units reports (experimental) -----------
+        // Both are ticket-driven, not fleet-wide scans: VRM only gets called
+        // for units that currently have a matching OPEN ticket already
+        // rendered on this page (issueSubtype "Unit Unplugged" / "shaded"),
+        // reusing entries already sitting in commandMenuEntries — the same
+        // small set the Commands-menu plug/shading glyphs would check if you
+        // opened each ticket by hand, just gathered into one list. This is
+        // deliberately NOT a check of every VRM installation in the fleet:
+        // that would mean one or two live VRM calls per SITE (hundreds), for
+        // a button click, against an API this whole session has been careful
+        // to keep to a few calls per check. A ticket already marked with the
+        // subtype is the bounded, already-known-relevant set worth spending
+        // that cost on.
+        function ticketEntriesWithSubtype(matchSubtype) {
+            const wanted = String(matchSubtype || "").toLowerCase();
+            const seen = new Set();
+            const results = [];
+            document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
+                const entry = commandMenuEntries.get(commandMenu);
+                if (!entry || !entry.unit) {
+                    return;
+                }
+                if (String(entry.issueSubtype || "").toLowerCase() !== wanted) {
+                    return;
+                }
+                const key = entry.unit.toUpperCase();
+                if (seen.has(key)) {
+                    return;
+                }
+                seen.add(key);
+                results.push(entry);
+            });
+            return results;
+        }
+
+        function renderTicketCheckRow(entry, data, error) {
+            const li = document.createElement("li");
+            li.className = "ticket-row ticket-row-no-rws";
+
+            const actions = document.createElement("div");
+            actions.className = "ticket-row-actions";
+            const openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "action-btn";
+            openBtn.textContent = entry.unit;
+            openBtn.title = "Open Commands for " + entry.unit + " in Unit tools";
+            openBtn.addEventListener("click", function () {
+                listSearchEl.value = entry.unit;
+                applyListFilters();
+                loadUnitTools(entry.unit, true);
+                const toolsSection = document.getElementById("unit_tools_section");
+                if (toolsSection && toolsSection.scrollIntoView) {
+                    toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+            actions.appendChild(openBtn);
+            li.appendChild(actions);
+
+            const body = document.createElement("div");
+            body.className = "ticket-row-body";
+            const ticketLine = document.createElement("span");
+            ticketLine.className = "flap-row-stats";
+            ticketLine.textContent = entry.ticketSubject || entry.subject || "(no ticket subject)";
+            body.appendChild(ticketLine);
+            body.appendChild(document.createElement("br"));
+            const resultLine = document.createElement("span");
+            resultLine.className = "flap-row-stats report-status-" + (error ? "fail" : (data.status || "warn"));
+            resultLine.textContent = error ? ("Check failed: " + error) : data.summary;
+            body.appendChild(resultLine);
+            li.appendChild(body);
+            return li;
+        }
+
+        function loadTicketSubtypeReport(subtype, endpoint, listEl, countEl, statusEl, emptyText) {
+            listEl.innerHTML = "";
+            const entries = ticketEntriesWithSubtype(subtype);
+            if (!entries.length) {
+                const emptyEl = document.createElement("li");
+                emptyEl.className = "empty";
+                emptyEl.textContent = emptyText;
+                listEl.appendChild(emptyEl);
+                countEl.textContent = "(0)";
+                statusEl.textContent = "";
+                return;
+            }
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Checking " + entries.length + " ticket(s) against VRM...";
+            listEl.appendChild(loadingEl);
+            statusEl.textContent = "";
+            Promise.all(entries.map(function (entry) {
+                const subject = entry.ticketSubject || entry.subject || "";
+                return fetch(endpoint + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ subject: subject }),
+                })
+                    .then(function (response) { return response.json(); })
+                    .then(function (data) {
+                        return { entry: entry, data: data, error: (!data || !data.ok) ? (data && data.error) || "unknown error" : null };
+                    })
+                    .catch(function (err) {
+                        return { entry: entry, data: null, error: err.message || String(err) };
+                    });
+            })).then(function (results) {
+                listEl.innerHTML = "";
+                results.forEach(function (r) {
+                    listEl.appendChild(renderTicketCheckRow(r.entry, r.data, r.error));
+                });
+                countEl.textContent = "(" + results.length + ")";
+                const failed = results.filter(function (r) { return r.error; }).length;
+                statusEl.textContent = "Checked " + results.length + " ticket(s)"
+                    + (failed ? ", " + failed + " check(s) failed" : "");
+            });
+        }
+
+        const unitsUnpluggedSection = document.getElementById("units_unplugged_section");
+        const unitsUnpluggedListEl = document.getElementById("units_unplugged_list");
+        const unitsUnpluggedCountEl = document.getElementById("units_unplugged_count");
+        const unitsUnpluggedStatusEl = document.getElementById("units_unplugged_status");
+        const unitsUnpluggedRefreshBtn = document.getElementById("units_unplugged_refresh");
+
+        // Always re-checks on open (no "loaded once" cache like Flap Report
+        // has) — plug/shading state is exactly the kind of thing that
+        // changes between one look and the next, and the underlying ticket
+        // set can too.
+        function loadUnitsUnpluggedReport() {
+            loadTicketSubtypeReport(
+                "Unit Unplugged", "/issues/power-status/",
+                unitsUnpluggedListEl, unitsUnpluggedCountEl, unitsUnpluggedStatusEl,
+                "No currently-open \"Unit Unplugged\" tickets on this page right now."
+            );
+        }
+
+        function toggleUnitsUnpluggedSection() {
+            if (!unitsUnpluggedSection) {
+                return;
+            }
+            unitsUnpluggedSection.hidden = !unitsUnpluggedSection.hidden;
+            if (!unitsUnpluggedSection.hidden) {
+                loadUnitsUnpluggedReport();
+                if (unitsUnpluggedSection.scrollIntoView) {
+                    unitsUnpluggedSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            }
+        }
+        if (unitsUnpluggedRefreshBtn) {
+            unitsUnpluggedRefreshBtn.addEventListener("click", loadUnitsUnpluggedReport);
+        }
+
+        const shadedUnitsSection = document.getElementById("shaded_units_section");
+        const shadedUnitsListEl = document.getElementById("shaded_units_list");
+        const shadedUnitsCountEl = document.getElementById("shaded_units_count");
+        const shadedUnitsStatusEl = document.getElementById("shaded_units_status");
+        const shadedUnitsRefreshBtn = document.getElementById("shaded_units_refresh");
+
+        function loadShadedUnitsReport() {
+            loadTicketSubtypeReport(
+                "shaded", "/issues/shading-status/",
+                shadedUnitsListEl, shadedUnitsCountEl, shadedUnitsStatusEl,
+                "No currently-open \"shaded\" tickets on this page right now."
+            );
+        }
+
+        function toggleShadedUnitsSection() {
+            if (!shadedUnitsSection) {
+                return;
+            }
+            shadedUnitsSection.hidden = !shadedUnitsSection.hidden;
+            if (!shadedUnitsSection.hidden) {
+                loadShadedUnitsReport();
+                if (shadedUnitsSection.scrollIntoView) {
+                    shadedUnitsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            }
+        }
+        if (shadedUnitsRefreshBtn) {
+            shadedUnitsRefreshBtn.addEventListener("click", loadShadedUnitsReport);
+        }
+
+        // ---- Reports menu (Flap Report / Units Unplugged / Shaded Units) -----
+        const reportsMenuWrap = document.getElementById("reports_menu_wrap");
+        const reportsMenuToggle = document.getElementById("reports_menu_toggle");
+        const reportsMenuOptions = document.getElementById("reports_menu_options");
+
+        function openReportsMenu() {
+            if (reportsMenuWrap) {
+                reportsMenuWrap.classList.add("is-open");
+                reportsMenuToggle.setAttribute("aria-expanded", "true");
+            }
+        }
+        function closeReportsMenu() {
+            if (reportsMenuWrap) {
+                reportsMenuWrap.classList.remove("is-open");
+                reportsMenuToggle.setAttribute("aria-expanded", "false");
+            }
+        }
+        if (reportsMenuToggle && reportsMenuWrap) {
+            reportsMenuToggle.addEventListener("click", function (event) {
+                event.stopPropagation();
+                if (reportsMenuWrap.classList.contains("is-open")) {
+                    closeReportsMenu();
+                } else {
+                    openReportsMenu();
+                }
+            });
+            document.getElementById("reports_menu_flap").addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleFlapReportSection();
+                closeReportsMenu();
+            });
+            document.getElementById("reports_menu_unplugged").addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleUnitsUnpluggedSection();
+                closeReportsMenu();
+            });
+            document.getElementById("reports_menu_shaded").addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleShadedUnitsSection();
+                closeReportsMenu();
+            });
+            document.addEventListener("click", function (event) {
+                if (reportsMenuWrap && !reportsMenuWrap.contains(event.target)) {
+                    closeReportsMenu();
+                }
+            });
+            document.addEventListener("keydown", function (event) {
+                if (event.key === "Escape") {
+                    closeReportsMenu();
+                }
+            });
+        }
+
         // ---- Power & Infra Alerts (experimental) -----------------------------
         // Zabbix's active problems x VRM's active battery alarms, merged by
         // unit — see combined_power_infra_alerts() for what "corroborated"
-        // means and why the correlation is limited to units both systems
-        // name the same way (mostly MU trailers).
+        // means and how an MU trailer row also picks up its RD/FD head's own
+        // Zabbix problems via a server-side ERP crosswalk.
         const powerInfraToggleBtn = document.getElementById("power_infra_toggle");
         const powerInfraSection = document.getElementById("power_infra_section");
         const powerInfraListEl = document.getElementById("power_infra_list");
@@ -6932,23 +7898,6 @@
         const powerInfraRefreshBtn = document.getElementById("power_infra_refresh");
         const powerInfraSourceStatusEl = document.getElementById("power_infra_source_status");
         let powerInfraLoaded = false;
-
-        function dedupeZabbixProblems(problems) {
-            const byKey = new Map();
-            (problems || []).forEach(function (p) {
-                const key = p.device + "|" + p.name;
-                const existing = byKey.get(key);
-                if (existing) {
-                    existing.count += 1;
-                    existing.severity = Math.max(existing.severity, p.severity);
-                } else {
-                    byKey.set(key, { device: p.device, name: p.name, severity: p.severity, count: 1 });
-                }
-            });
-            return Array.from(byKey.values()).sort(function (a, b) { return b.severity - a.severity; });
-        }
-
-        const ZABBIX_SEVERITY_LABELS = ["Not classified", "Info", "Warning", "Average", "High", "Disaster"];
 
         function renderPowerInfraRow(row) {
             const li = document.createElement("li");
@@ -6961,11 +7910,25 @@
             openBtn.type = "button";
             openBtn.className = "action-btn";
             openBtn.textContent = row.unit;
-            openBtn.title = "Open Commands for " + row.unit + " in Unit tools";
+            // A bare MU row here is a trailer, not a full unit — it has no
+            // NUC/PVE/cameras of its own, so its Commands menu is mostly
+            // empty. When the ERP crosswalk (head_units, from
+            // combined_power_infra_alerts) has already found the RD/FD
+            // head this trailer is attached to, open THAT unit's Commands
+            // instead — it's what actually has anything to click. A bare
+            // MU with no known head is a legitimate all-in-one unit (the
+            // fleet has both), so this only redirects when head_units says
+            // so, never on unit-number/prefix guessing alone.
+            const openTarget = (row.unit || "").toUpperCase().startsWith("MU") && (row.head_units || []).length
+                ? row.head_units[0]
+                : row.unit;
+            openBtn.title = openTarget === row.unit
+                ? "Open Commands for " + row.unit + " in Unit tools"
+                : "Open Commands for " + openTarget + " (" + row.unit + "'s head unit, via ERP) in Unit tools";
             openBtn.addEventListener("click", function () {
-                listSearchEl.value = row.unit;
+                listSearchEl.value = openTarget;
                 applyListFilters();
-                loadUnitTools(row.unit, true);
+                loadUnitTools(openTarget, true);
                 const toolsSection = document.getElementById("unit_tools_section");
                 if (toolsSection && toolsSection.scrollIntoView) {
                     toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -6997,9 +7960,11 @@
                 stats.appendChild(tag);
                 const grouped = dedupeZabbixProblems(row.zabbix_problems);
                 const text = grouped.map(function (g) {
+                    const duration = formatDurationSince(g.firstClock);
                     return g.device + ": " + g.name
                         + (g.count > 1 ? " (×" + g.count + ")" : "")
-                        + " [" + (ZABBIX_SEVERITY_LABELS[g.severity] || g.severity) + "]";
+                        + " [" + (ZABBIX_SEVERITY_LABELS[g.severity] || g.severity) + "]"
+                        + (duration ? " — open " + duration : "");
                 }).join("; ");
                 stats.appendChild(document.createTextNode(text));
                 stats.appendChild(document.createElement("br"));
@@ -7015,6 +7980,13 @@
                     ? (" (seen " + row.vrm_alarm.last_seen_age_minutes + "m ago)")
                     : "";
                 stats.appendChild(document.createTextNode(row.vrm_alarm.alarm_detail + soc + age));
+            }
+
+            if ((row.head_units || []).length) {
+                stats.appendChild(document.createElement("br"));
+                stats.appendChild(document.createTextNode(
+                    "Head unit (via ERP): " + row.head_units.join(", ")
+                ));
             }
 
             body.appendChild(stats);
@@ -7081,6 +8053,124 @@
         }
         if (powerInfraRefreshBtn) {
             powerInfraRefreshBtn.addEventListener("click", loadPowerInfraAlerts);
+        }
+
+        // ---- Alarm Frequency (experimental) -----------------------------------
+        // Zabbix/VRM only ever show what's active right now; this is the
+        // question neither system answers on its own — "has THIS unit's
+        // alarm cleared and come back before" — from alarm_history.py,
+        // which the scheduled Power & Infra Alerts poll (and this panel's
+        // own Refresh, and manual power-infra-alerts fetches) has been
+        // quietly recording episodes into since alarm_history.py shipped.
+        // Same fleet-wide "repeat offenders" shape as Flap Report, for
+        // alarms instead of validation-check health.
+        const alarmFrequencyToggleBtn = document.getElementById("alarm_frequency_toggle");
+        const alarmFrequencySection = document.getElementById("alarm_frequency_section");
+        const alarmFrequencyListEl = document.getElementById("alarm_frequency_list");
+        const alarmFrequencyCountEl = document.getElementById("alarm_frequency_count");
+        const alarmFrequencyDaysEl = document.getElementById("alarm_frequency_days");
+        const alarmFrequencyMinEl = document.getElementById("alarm_frequency_min");
+        const alarmFrequencyRefreshBtn = document.getElementById("alarm_frequency_refresh");
+        const alarmFrequencyDbStatsEl = document.getElementById("alarm_frequency_db_stats");
+        let alarmFrequencyLoaded = false;
+
+        function renderAlarmFrequencyRow(row) {
+            const li = document.createElement("li");
+            li.className = "ticket-row ticket-row-no-rws";
+
+            const actions = document.createElement("div");
+            actions.className = "ticket-row-actions";
+            const openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "action-btn";
+            openBtn.textContent = row.unit;
+            openBtn.title = "Open Commands for " + row.unit + " in Unit tools";
+            openBtn.addEventListener("click", function () {
+                listSearchEl.value = row.unit;
+                applyListFilters();
+                loadUnitTools(row.unit, true);
+                const toolsSection = document.getElementById("unit_tools_section");
+                if (toolsSection && toolsSection.scrollIntoView) {
+                    toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+            actions.appendChild(openBtn);
+            li.appendChild(actions);
+
+            const body = document.createElement("div");
+            body.className = "ticket-row-body";
+            const stats = document.createElement("span");
+            stats.className = "flap-row-stats";
+            stats.textContent = row.episodes + " episode(s) across " + row.distinct_alarms + " distinct alarm(s)"
+                + (row.currently_open ? " — " + row.currently_open + " open now" : " — none open now")
+                + ", last seen " + (row.last_seen || "unknown");
+            body.appendChild(stats);
+            li.appendChild(body);
+            return li;
+        }
+
+        function loadAlarmFrequency() {
+            const days = parseInt(alarmFrequencyDaysEl.value, 10) || 7;
+            const minEpisodes = parseInt(alarmFrequencyMinEl.value, 10) || 2;
+            alarmFrequencyListEl.innerHTML = "";
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Loading...";
+            alarmFrequencyListEl.appendChild(loadingEl);
+            fetch("/issues/alarm-frequency?days=" + days + "&min_episodes=" + minEpisodes)
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    alarmFrequencyListEl.innerHTML = "";
+                    const rows = data.rows || [];
+                    if (!rows.length) {
+                        const emptyEl = document.createElement("li");
+                        emptyEl.className = "empty";
+                        emptyEl.textContent = "No units with " + minEpisodes
+                            + "+ alarm episodes in the last " + days + " day(s).";
+                        alarmFrequencyListEl.appendChild(emptyEl);
+                    } else {
+                        rows.forEach(function (row) {
+                            alarmFrequencyListEl.appendChild(renderAlarmFrequencyRow(row));
+                        });
+                    }
+                    alarmFrequencyCountEl.textContent = "(" + rows.length + ")";
+                    alarmFrequencyLoaded = true;
+                })
+                .catch(function (error) {
+                    alarmFrequencyListEl.innerHTML = "";
+                    const errEl = document.createElement("li");
+                    errEl.className = "empty";
+                    errEl.textContent = "Alarm frequency failed: " + (error.message || error);
+                    alarmFrequencyListEl.appendChild(errEl);
+                });
+            fetch("/issues/alarm-history-stats")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (data && data.ok && alarmFrequencyDbStatsEl) {
+                        alarmFrequencyDbStatsEl.textContent = "History: " + data.episodes + " episode(s), "
+                            + data.open_episodes + " open, " + data.units + " units, " + data.size_mb + " MB on disk";
+                    }
+                })
+                .catch(function () {});
+        }
+
+        if (alarmFrequencyToggleBtn && alarmFrequencySection) {
+            alarmFrequencyToggleBtn.addEventListener("click", function () {
+                alarmFrequencySection.hidden = !alarmFrequencySection.hidden;
+                if (!alarmFrequencySection.hidden && !alarmFrequencyLoaded) {
+                    loadAlarmFrequency();
+                }
+            });
+        }
+        if (alarmFrequencyRefreshBtn) {
+            alarmFrequencyRefreshBtn.addEventListener("click", loadAlarmFrequency);
         }
 
         function appendPatchUpdateConsoleOutput(data) {

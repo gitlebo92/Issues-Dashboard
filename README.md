@@ -151,6 +151,34 @@ Read-only checks. None of them change anything on the device, so none take the p
 | **PVE Host Resources** | *(PVE units)* Memory, swap, root disk, load average and VM 101 state |
 | **NVMe Health (PVE)** | *(PVE units)* `smartctl -a` on the boot drive — wear, spare, errors, temperature. Lives under Linux → Scrypted |
 | **Unit History** | Recorded validations for this unit and how many times it has flapped in the last week |
+| **Power Status (Plugged In?)** *(Experimental)* | Best-effort "is this trailer on AC/shore power" read from VRM telemetry, with a confidence percentage and how stale the underlying VRM data is |
+| **Shading Status (Solar Dip?)** *(Experimental)* | Checks this trailer's recent solar output against its own hour-of-day history for a sustained deficit — the telemetry signature of something shadowing the panels |
+
+Both also toast a cross-check against any active Zabbix/VRM alarm already known for the unit, and offer a **View Graphs** action straight to the relevant chart.
+
+### Status glyphs
+
+The expanded Commands menu carries a small status row (unit/subject header, then this, then the action tree) with up to three glyphs — none of them require opening a submenu:
+
+![Command menu status row](docs/screenshots/16-command-menu-status.png)
+
+- 🔌 **Plug** — present / not detected / uncertain / unknown / no charger hardware, colored green/red/yellow/grey; hover for the confidence and detail, click has no action (use the Diagnostics button for that)
+- ⚠ **Alarm** — an active Zabbix problem and/or VRM alarm on this unit (or, for an MU trailer, its ERP-linked RD/FD head); red when both systems agree, amber otherwise. Click for the detail and a link to the full Power & Infra Alerts panel
+- 🌳 **Shading** — only appears when a sustained solar deficit was actually found (a pure alert, not a "checked, clear" confirmation); click opens Battery Graphs
+
+All three are checked lazily the first time you open a unit's menu and cached for 5 minutes — see the Diagnostics buttons above for an always-fresh, on-demand version, and the **Reports** menu below for a batch view across every ticket of a given kind.
+
+![Diagnostics — Power/Shading Status](docs/screenshots/17-diagnostics-power-shading.png)
+
+### Graphs
+
+Under Diagnostics → Graphs: **Battery Graphs** (voltage / SOC / current / solar power / today's solar yield, from VRM, up to 30 days) and **Network Latency Graphs** (router/switch ICMP response time and loss, from Zabbix, up to 90 days). Charts break the line across a real data gap rather than interpolating through it, and the SOC chart carries a 20%-low-battery reference line.
+
+![Battery Graphs](docs/screenshots/18-battery-graphs.png)
+
+### Reports menu
+
+Toolbar → **Reports**: **Flap Report** (fleet-wide, who keeps bouncing healthy/unhealthy), **Units Unplugged**, and **Shaded Units**. The latter two aren't fleet scans — each checks VRM live only for tickets already open on the page with a matching subtype ("Unit Unplugged" / "shaded"), cross-checked against the same logic behind the Diagnostics buttons above.
 
 ### Cameras
 
