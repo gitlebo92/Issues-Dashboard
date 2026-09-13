@@ -9,7 +9,12 @@ work on the code without breaking a live NOC tool.
 
 | File | Role |
 |------|------|
-| `work_tool.py` | All domain logic — ERP client, netsheet/inventory, camera proxy, SSH device ops, weather, validation, ART/recovery. ~10k lines, ~310 top-level functions. |
+| `work_tool/` | All domain logic, as a package. **Import it as `work_tool` exactly as before** — `__init__.py` re-exports every name, public and private, so `work_tool.<anything>` still resolves. |
+| `work_tool/_core.py` | The un-split remainder (~8,800 lines). ERP client, netsheet/inventory, cameras, validation, SSH device ops, ART/recovery, the CLI `main()`. |
+| `work_tool/locks.py` | Per-unit busy registry and shared unit notes. Zero dependencies on core. |
+| `work_tool/weather.py` | Open-Meteo lookups, WMO mapping, region coordinates. |
+| `work_tool/diagnostics.py` | The read-only diagnostics and the shared `_ssh_read` helper. |
+| `work_tool/security_update.py` | The guided Scrypted GPU-passthrough fix and platform service restarts. |
 | `flask_endpoints.py` | Every HTTP route. There is no `app.py`. Routes stay thin and delegate into `work_tool`. |
 | `templates/issues_results.html` | The entire dashboard UI and its JavaScript, in one file. This is where buttons and command menus live. |
 | `static/camera_shim.js` | Injected into proxied camera UIs (Dahua H5 / Hikvision). |
@@ -68,6 +73,31 @@ blank cell should be backfilled from v19/ERP first.
   Camera 1–3, never Camera 4.
 - Subjects look like `PHX - RD3076 - ...`; the leading token is the region code
   and drives the metro weather icons.
+
+## The work_tool package
+
+`work_tool.py` became `work_tool/` — same public surface, smaller files.
+`__init__.py` copies every name out of each submodule into the package
+namespace, including underscore-prefixed helpers, because callers and tests
+reach for those. `flask_endpoints.py` needed **no changes at all**, and a
+parity check confirmed 0 of the 468 previously-exposed names went missing.
+
+Two rules keep it working:
+
+- **Put new code in the module it belongs to, not `_core`.** `_core` is the
+  un-split remainder, not the default home.
+- **Never rebind shared module-level state from a submodule.** `net_array` and
+  the lock registry are shared because they are only ever *mutated in place*
+  (`.clear()`, `.append()`), so every module holds the same object. Rebinding
+  one (`net_array = [...]`) would silently give that module a private copy.
+  Use `_net_row_for_unit()` / `ensure_unit_net_info()` and you cannot get this
+  wrong.
+
+Cameras, ERP projects and the PVE helpers were deliberately **not** split:
+core calls into them in several places, so cutting them creates import cycles
+that can't be verified without running the app. The one cycle that did appear
+— the CLI `main()` calling into `security_update` — is handled with a deferred
+import inside `main()`.
 
 ## Adding a per-unit command button
 
