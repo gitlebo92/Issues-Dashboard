@@ -7759,15 +7759,76 @@
         // reads that cache instantly; "Check whole fleet now" forces a
         // fresh live pass when you want one, same live/cached split
         // Power & Infra Alerts already uses for the same reason.
+
+        // Expands the SAME inline command menu a ticket row's Commands
+        // button does (createCommandMenuElement + populateUnitToolsCommandMenu
+        // — the exact pair Unit Tools already uses for an ad-hoc unit
+        // search), right where it's clicked. Deliberately NOT the old
+        // behavior of jumping to the Unit Tools section at the bottom of
+        // the page and opening the menu there — a report can list
+        // hundreds of rows, and losing your place in that list to look at
+        // one unit's commands was the actual complaint this replaced.
+        //
+        // A fleet-check row only ever carries VRM/ERP shading/power
+        // fields, not the fuller unit context (hasPve, ticket subject,
+        // etc.) the shared command menu builders read — so this fetches
+        // /issues/unit-context/<unit> (the same call loadUnitTools already
+        // makes) lazily, on first click, rather than for every row a
+        // report might show.
+        function attachFleetRowCommandMenu(actions, li, unit, label, trailerUnit) {
+            const openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "action-btn";
+            openBtn.textContent = label;
+            openBtn.title = unit === trailerUnit
+                ? "Open Commands for " + unit
+                : "Open Commands for " + unit + " (" + trailerUnit + "'s head unit, via ERP)";
+            openBtn.addEventListener("click", function () {
+                openBtn.disabled = true;
+                openBtn.textContent = "Loading...";
+                fetch("/issues/unit-context/" + encodeURIComponent(unit))
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const entry = makeListEntry(data);
+                        const menuParts = createCommandMenuElement(entry, li);
+                        // Keep the RD####(MU####) label the report itself
+                        // already resolved — commandMenuButtonLabel would
+                        // otherwise just show entry.unit (the head alone).
+                        menuParts.commandMenu.querySelector("summary").textContent = label;
+                        menuParts.commandMenu.setAttribute("aria-label", "Commands for " + label);
+                        populateUnitToolsCommandMenu(menuParts.commandItems, entry);
+                        openBtn.replaceWith(menuParts.commandMenu);
+                        // Same "open immediately" pattern renderUnitToolsRow
+                        // uses — placeCommandMenu positions the popover AND
+                        // calls updateCommandMenuContext; the native toggle
+                        // event (fired by this same assignment in every
+                        // browser this app targets) covers the rest
+                        // (glyph checks, recent-commands strip).
+                        menuParts.commandMenu.open = true;
+                        placeCommandMenu(menuParts.commandMenu);
+                    })
+                    .catch(function (error) {
+                        openBtn.disabled = false;
+                        openBtn.textContent = label;
+                        notifyError("Could not load commands for " + unit + ": " + (error.message || error));
+                    });
+            });
+            actions.appendChild(openBtn);
+        }
+
         function renderFleetReportRow(row) {
             const li = document.createElement("li");
             li.className = "ticket-row ticket-row-no-rws";
 
             const actions = document.createElement("div");
             actions.className = "ticket-row-actions";
-            const openBtn = document.createElement("button");
-            openBtn.type = "button";
-            openBtn.className = "action-btn";
             // A bare MU row is a trailer, not a full unit — show and open
             // its ERP-linked RD/FD head instead when known, the same
             // RD####(MU####) shape every ticket subject already uses
@@ -7775,20 +7836,8 @@
             // looks like, and reads as if the trailer WERE the unit).
             const headUnits = row.head_units || [];
             const openTarget = headUnits.length ? headUnits[0] : row.unit;
-            openBtn.textContent = headUnits.length ? (headUnits[0] + "(" + row.unit + ")") : row.unit;
-            openBtn.title = openTarget === row.unit
-                ? "Open Commands for " + row.unit + " in Unit tools"
-                : "Open Commands for " + openTarget + " (" + row.unit + "'s head unit, via ERP) in Unit tools";
-            openBtn.addEventListener("click", function () {
-                listSearchEl.value = openTarget;
-                applyListFilters();
-                loadUnitTools(openTarget, true);
-                const toolsSection = document.getElementById("unit_tools_section");
-                if (toolsSection && toolsSection.scrollIntoView) {
-                    toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-            });
-            actions.appendChild(openBtn);
+            const openLabel = headUnits.length ? (headUnits[0] + "(" + row.unit + ")") : row.unit;
+            attachFleetRowCommandMenu(actions, li, openTarget, openLabel, row.unit);
             li.appendChild(actions);
 
             const body = document.createElement("div");
@@ -7808,6 +7857,30 @@
             if (row.shading_status !== undefined) {
                 const snapshotLine = document.createElement("div");
                 snapshotLine.className = "snapshot-task-line";
+
+                // The actual solar-power graph detect_solar_shading reads —
+                // same "Battery Graphs" chart (pv_power/yield_today) the
+                // per-unit Diagnostics menu's Shading Status check already
+                // links to from its toast, just reachable straight from
+                // the report row instead of needing to run that check
+                // first. Deliberately row.unit (the MU trailer with the
+                // actual VRM installation), not openTarget (its RD/FD
+                // head, which has no solar data of its own) — VRM
+                // resolution can go head-to-trailer via ERP, but the
+                // trailer code itself needs no such indirection.
+                // openGraphsModal only needs the unit (+ optional subject,
+                // which this report doesn't carry) — no unit-context
+                // fetch required first.
+                const graphBtn = document.createElement("button");
+                graphBtn.type = "button";
+                graphBtn.className = "action-btn";
+                graphBtn.textContent = "View Solar Graph";
+                graphBtn.title = "Opens the Battery Graphs modal (voltage/SOC/current/solar power) used to check this unit for shading";
+                graphBtn.addEventListener("click", function () {
+                    openGraphsModal(row.unit, "battery", "");
+                });
+                snapshotLine.appendChild(graphBtn);
+
                 const task = row.snapshot_task;
                 if (task) {
                     const statusText = document.createElement("span");
