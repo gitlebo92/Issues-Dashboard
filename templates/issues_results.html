@@ -7850,36 +7850,44 @@
             line.textContent = row.error ? ("Check failed: " + row.error) : (row.summary || row.unit);
             body.appendChild(line);
 
-            // Shaded Units rows only (row.shading_status is only ever set
-            // by _shading_status_for_site) — the snapshot task for this
-            // unit, if one exists, or a one-off Schedule button if the
-            // unit is currently flagged shaded and doesn't have one yet.
-            if (row.shading_status !== undefined) {
+            // Shaded Units AND Dead Panels rows — both are read off the
+            // same underlying solar-power history (row.shading_status is
+            // only ever set by _shading_status_for_site, row.dead_panel_status
+            // only by _dead_panel_status_for_site), so both get a direct
+            // link to the graph the verdict was actually based on rather
+            // than requiring the command menu or the per-unit check's own
+            // toast first.
+            if (row.shading_status !== undefined || row.dead_panel_status !== undefined) {
                 const snapshotLine = document.createElement("div");
                 snapshotLine.className = "snapshot-task-line";
 
-                // The actual solar-power graph detect_solar_shading reads —
-                // same "Battery Graphs" chart (pv_power/yield_today) the
-                // per-unit Diagnostics menu's Shading Status check already
-                // links to from its toast, just reachable straight from
-                // the report row instead of needing to run that check
-                // first. Deliberately row.unit (the MU trailer with the
-                // actual VRM installation), not openTarget (its RD/FD
-                // head, which has no solar data of its own) — VRM
-                // resolution can go head-to-trailer via ERP, but the
-                // trailer code itself needs no such indirection.
-                // openGraphsModal only needs the unit (+ optional subject,
-                // which this report doesn't carry) — no unit-context
-                // fetch required first.
+                // Same "Battery Graphs" chart (pv_power/yield_today) both
+                // detect_solar_shading and detect_dead_panel read.
+                // Deliberately row.unit (the MU trailer with the actual
+                // VRM installation), not openTarget (its RD/FD head,
+                // which has no solar data of its own) — VRM resolution
+                // can go head-to-trailer via ERP, but the trailer code
+                // itself needs no such indirection. openGraphsModal only
+                // needs the unit (+ optional subject, which this report
+                // doesn't carry) — no unit-context fetch required first.
                 const graphBtn = document.createElement("button");
                 graphBtn.type = "button";
                 graphBtn.className = "action-btn";
                 graphBtn.textContent = "View Solar Graph";
-                graphBtn.title = "Opens the Battery Graphs modal (voltage/SOC/current/solar power) used to check this unit for shading";
+                graphBtn.title = "Opens the Battery Graphs modal (voltage/SOC/current/solar power) used to check this unit";
                 graphBtn.addEventListener("click", function () {
                     openGraphsModal(row.unit, "battery", "");
                 });
                 snapshotLine.appendChild(graphBtn);
+                body.appendChild(snapshotLine);
+            }
+
+            // Shaded Units rows only — the snapshot task for this unit, if
+            // one exists, or a one-off Schedule button if the unit is
+            // currently flagged shaded and doesn't have one yet.
+            if (row.shading_status !== undefined) {
+                const snapshotLine = document.createElement("div");
+                snapshotLine.className = "snapshot-task-line";
 
                 const task = row.snapshot_task;
                 if (task) {
