@@ -4299,6 +4299,9 @@
                         })
                         .then(function (data) {
                             consoleLines.push(data.summary || ("Battery outlook for " + entry.unit));
+                            if (data.ac_power_detail) {
+                                consoleLines.push("  AC power (" + data.ac_power_label + "): " + data.ac_power_detail);
+                            }
                             (data.forecast || []).forEach(function (day) {
                                 consoleLines.push(
                                     "  " + day.date + ": " + day.conditions
@@ -4310,6 +4313,9 @@
                             });
                             if (data.weather_error) {
                                 consoleLines.push("  Forecast unavailable: " + data.weather_error);
+                            }
+                            if (data.soc_error) {
+                                consoleLines.push("  Battery %: " + data.soc_error);
                             }
                             renderConsole(true);
                             statusEl.textContent = data.summary || ("Battery outlook complete for " + entry.unit);
@@ -4353,7 +4359,7 @@
             battery: {
                 titleText: "Battery Graphs",
                 endpoint: "/issues/battery-history/",
-                order: ["voltage", "soc", "current", "pv_power"],
+                order: ["voltage", "soc", "current", "pv_power", "yield_today"],
                 loadingText: "Loading from VRM...",
                 failureLabel: "Battery Graphs",
                 subtitle: function (unit, data) {
