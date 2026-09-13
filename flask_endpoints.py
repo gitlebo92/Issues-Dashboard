@@ -127,6 +127,13 @@ resolved_tracker_lock = threading.Lock()
 ERP_POLL_INTERVAL_SECONDS = 30 * 60
 ERP_POLL_THROTTLE_SECONDS = 29.5 * 60
 
+# Cache for the scheduled Zabbix/VRM alerts poll below — the live endpoint
+# (/issues/power-infra-alerts) calls both APIs fresh and takes ~7s, too slow
+# for the dashboard to poll every row's warning glyph against. This cache is
+# what the frontend actually polls; the scheduled loop is what keeps it warm.
+_power_infra_cache = {"rows": [], "fetched_at": None, "zabbix_error": None, "vrm_error": None}
+_power_infra_cache_lock = threading.Lock()
+
 ISSUE_RESULT_KEYS = (
     "false_positives",
     "nuc_down",
@@ -1859,10 +1866,28 @@ def issues_pve_resources(unit):
     return jsonify({"ok": True, **info})
 
 
+@app.route("/issues/nuc-resources/<unit>", methods=["POST"])
+def issues_nuc_resources(unit):
+    """Memory, disk and CPU load on the unit's Windows NUC (read-only)."""
+    info, error = work_tool.nuc_host_resources(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
 @app.route("/issues/camera-matrix/<unit>", methods=["POST"])
 def issues_camera_matrix(unit):
     """Reach every camera, fisheye and speaker for a unit in one pass."""
     info, error = work_tool.camera_reachability_matrix(unit)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/camera-analytics/<unit>", methods=["POST"])
+def issues_camera_analytics(unit):
+    """Field/Line Detection rule state on a Hikvision unit's cameras (read-only)."""
+    info, error = work_tool.hikvision_analytics_status(unit)
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
@@ -1911,6 +1936,74 @@ def issues_history_stats():
     return jsonify(unit_history.stats())
 
 
+@app.route("/issues/power-infra-alerts", methods=["GET"])
+def issues_power_infra_alerts():
+    """
+    Experimental: Zabbix active problems x VRM active battery alarms,
+    merged by unit, fleet-wide. Read-only against both APIs. Live — takes
+    a few seconds; use the /cached variant for anything polled frequently.
+    """
+    info, error = work_tool.combined_power_infra_alerts()
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    with _power_infra_cache_lock:
+        _power_infra_cache["rows"] = info.get("rows") or []
+        _power_infra_cache["fetched_at"] = time.time()
+        _power_infra_cache["zabbix_error"] = info.get("zabbix_error")
+        _power_infra_cache["vrm_error"] = info.get("vrm_error")
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/power-infra-alerts/cached", methods=["GET"])
+def issues_power_infra_alerts_cached():
+    """
+    Instant read of the last poll (scheduled, every
+    POWER_INFRA_ALERTS_REFRESH_SECONDS when PAUSE_AUTOMATED_TASKS is off, or
+    whatever the panel's own Refresh last fetched). This is what the
+    dashboard polls to light up a unit's warning glyph — never calls Zabbix
+    or VRM itself, so it's cheap enough to poll often.
+    """
+    with _power_infra_cache_lock:
+        snapshot = dict(_power_infra_cache)
+    return jsonify({
+        "ok": True,
+        "rows": snapshot.get("rows") or [],
+        "fetched_at": snapshot.get("fetched_at"),
+        "zabbix_error": snapshot.get("zabbix_error"),
+        "vrm_error": snapshot.get("vrm_error"),
+    })
+
+
+@app.route("/issues/network-latency-history/<unit>", methods=["POST"])
+def issues_network_latency_history(unit):
+    """Experimental: Router/Switch ICMP ping response time & loss over time, from Zabbix."""
+    payload = request.get_json(silent=True) or {}
+    hours = payload.get("hours") or request.args.get("hours") or 24
+    info, error = work_tool.unit_network_latency_history(unit, hours)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/zabbix-alerts/<unit>", methods=["POST"])
+def issues_zabbix_alerts(unit):
+    """Active Zabbix problems for one unit's Router/Switch/NUC/Speaker/SNUC hosts."""
+    by_unit, error = work_tool.zabbix_active_problems_by_unit()
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    problems = (by_unit or {}).get(str(unit or "").strip().upper()) or []
+    problems = sorted(problems, key=lambda p: -p["severity"])
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "problems": problems,
+        "summary": (
+            f"{len(problems)} active Zabbix problem(s) on {unit}"
+            if problems else f"No active Zabbix problems on {unit}"
+        ),
+    })
+
+
 @app.route("/issues/history-compact", methods=["POST"])
 def issues_history_compact():
     """
@@ -1949,6 +2042,34 @@ def issues_weather(unit):
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/battery-outlook/<unit>", methods=["POST"])
+def issues_battery_outlook(unit):
+    """Experimental: VRM battery SOC x multi-day cloud outlook (read-only)."""
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.unit_battery_weather_outlook(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/battery-history/<unit>", methods=["POST"])
+def issues_battery_history(unit):
+    """Experimental: VRM voltage/SOC/current/solar time-series (read-only)."""
+    payload = request.get_json(silent=True) or {}
+    hours = payload.get("hours") or request.args.get("hours") or 24
+    subject = payload.get("subject") or request.args.get("subject") or ""
+    info, error = work_tool.unit_battery_history(unit, hours, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
 
 @app.route("/issues/weather-bulk", methods=["POST"])
 def issues_weather_bulk():
@@ -2058,6 +2179,37 @@ def issues_unit_note_set(unit):
     text = payload.get("text", "")
     updated_at = work_tool.set_unit_note(unit, text)
     return jsonify({"ok": True, "unit": unit, "updated_at": updated_at})
+
+
+# Worked/Skipped, shared across every browser looking at this dashboard —
+# see work_tool/locks.py for why this exists (it didn't used to be shared).
+@app.route("/issues/ticket-state", methods=["GET"])
+def issues_ticket_state_get():
+    return jsonify({"ok": True, "states": work_tool.get_ticket_states()})
+
+
+@app.route("/issues/ticket-state", methods=["POST"])
+def issues_ticket_state_set():
+    payload = request.get_json(silent=True) or {}
+    issue_id = str(payload.get("issue_id") or "").strip()
+    if not issue_id:
+        return jsonify({"ok": False, "error": "issue_id is required"}), 400
+    worked = payload.get("worked")
+    skipped = payload.get("skipped")
+    entry = work_tool.set_ticket_state(
+        issue_id,
+        worked=bool(worked) if worked is not None else None,
+        skipped=bool(skipped) if skipped is not None else None,
+    )
+    return jsonify({"ok": True, "issue_id": issue_id, "state": entry or {"worked": False, "skipped": False}})
+
+
+@app.route("/issues/ticket-state/clear", methods=["POST"])
+def issues_ticket_state_clear():
+    payload = request.get_json(silent=True) or {}
+    issue_ids = payload.get("issue_ids")
+    states = work_tool.clear_ticket_states(issue_ids if isinstance(issue_ids, list) else None)
+    return jsonify({"ok": True, "states": states})
 
 
 @app.route("/issues/reboot-scrypted/<unit>", methods=["POST"])
@@ -2953,6 +3105,17 @@ def _start_arizona_validation_scheduler():
                 "ART NOC outage report (reportId=153) refresh scheduled "
                 f"every {ART_REPORT_REFRESH_SECONDS // 60} minutes"
             )
+        power_infra_thread = threading.Thread(
+            target=_power_infra_alerts_loop,
+            daemon=True,
+            name="power-infra-alerts",
+        )
+        power_infra_thread.start()
+        if not automated_tasks_paused():
+            print(
+                "Power & Infra Alerts (Zabbix + VRM) poll scheduled every "
+                f"{POWER_INFRA_ALERTS_REFRESH_SECONDS // 60} minutes"
+            )
 
 def _run_scheduled_art_recovery_report():
     if automated_tasks_paused():
@@ -2975,9 +3138,56 @@ def _art_recovery_report_loop():
             print(f"Scheduled ART recovery report failed: {exc}")
         time.sleep(ART_REPORT_REFRESH_SECONDS)
 
+def _run_scheduled_power_infra_alerts():
+    """
+    Poll Zabbix + VRM, cache the result, and log what changed since the
+    last poll — new alarms appearing or clearing, not just a full dump every
+    time. This is the "log/notify" half of the request; it never writes to
+    Zabbix or VRM, only reads. The cache it fills is what the dashboard's
+    warning glyphs and the Power & Infra Alerts panel's cached view read.
+    """
+    if automated_tasks_paused():
+        return
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    info, error = work_tool.combined_power_infra_alerts()
+    if error:
+        print(f"[{when}] Scheduled Power & Infra Alerts poll failed: {error}")
+        return
+    rows = info.get("rows") or []
+    with _power_infra_cache_lock:
+        previous_units = {r["unit"] for r in _power_infra_cache.get("rows") or []}
+        current_units = {r["unit"] for r in rows}
+        _power_infra_cache["rows"] = rows
+        _power_infra_cache["fetched_at"] = time.time()
+        _power_infra_cache["zabbix_error"] = info.get("zabbix_error")
+        _power_infra_cache["vrm_error"] = info.get("vrm_error")
+
+    new_units = current_units - previous_units
+    cleared_units = previous_units - current_units
+    if new_units:
+        print(f"[{when}] Power & Infra Alerts: new — {', '.join(sorted(new_units))}")
+    if cleared_units:
+        print(f"[{when}] Power & Infra Alerts: cleared — {', '.join(sorted(cleared_units))}")
+    if not new_units and not cleared_units:
+        print(f"[{when}] Power & Infra Alerts: no change ({len(rows)} unit(s) flagged)")
+
+
+def _power_infra_alerts_loop():
+    # Brief startup delay so the service finishes boot before first pull.
+    time.sleep(60)
+    while True:
+        try:
+            _run_scheduled_power_infra_alerts()
+        except Exception as exc:
+            print(f"Scheduled Power & Infra Alerts poll failed: {exc}")
+        time.sleep(POWER_INFRA_ALERTS_REFRESH_SECONDS)
+
 
 ART_REPORT_REFRESH_SECONDS = int(
     (os.getenv("ART_REPORT_REFRESH_SECONDS") or "3600").strip() or "3600"
+)
+POWER_INFRA_ALERTS_REFRESH_SECONDS = int(
+    (os.getenv("POWER_INFRA_ALERTS_REFRESH_SECONDS") or "600").strip() or "600"
 )
 
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ != "__main__":

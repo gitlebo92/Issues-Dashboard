@@ -712,6 +712,167 @@
             color: var(--text-muted);
             font-size: 13px;
         }
+        .flap-report-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 13px;
+            color: var(--text-muted);
+            padding: 6px 0 10px;
+        }
+        .flap-report-controls label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .flap-report-controls input[type="number"] {
+            width: 4em;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 4px;
+        }
+        .flap-report-db-stats {
+            margin-left: auto;
+            font-size: 12px;
+        }
+        .flap-row-stats {
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+        .experimental-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--caution-text);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-pill);
+            padding: 1px 6px;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+        .power-infra-row-stats {
+            color: var(--text-muted);
+            font-size: 13px;
+            display: block;
+        }
+        .power-infra-row-stats .source-tag {
+            font-size: 10px;
+            font-weight: 600;
+            border-radius: var(--radius-sm);
+            padding: 0 5px;
+            margin-right: 4px;
+        }
+        .power-infra-row-stats .source-tag.zabbix {
+            background: rgba(var(--danger-rgb), 0.15);
+            color: var(--danger);
+        }
+        .power-infra-row-stats .source-tag.vrm {
+            background: rgba(var(--caution-border-rgb), 0.2);
+            color: var(--caution-text);
+        }
+        .power-infra-row.is-corroborated {
+            border-left: 3px solid var(--danger);
+        }
+        .command-alarm-glyph {
+            color: var(--caution-text);
+            margin-left: 4px;
+            font-size: 12px;
+        }
+        .command-alarm-glyph.is-corroborated {
+            color: var(--danger);
+        }
+        .battery-graphs-dialog {
+            width: min(720px, 100%);
+            max-height: 85vh;
+            overflow-y: auto;
+        }
+        .battery-graphs-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        .battery-graphs-controls select {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 4px;
+        }
+        .battery-chart-block {
+            margin-bottom: 16px;
+        }
+        .battery-chart-heading {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            font-size: 13px;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+        .battery-chart-heading .battery-chart-range {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+        .battery-chart-container {
+            position: relative;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+        }
+        .battery-chart-svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .battery-chart-line {
+            stroke: var(--accent);
+            stroke-width: 2px;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .battery-chart-grid {
+            stroke: var(--border);
+            stroke-width: 1px;
+        }
+        .battery-chart-axis-label {
+            fill: var(--text-muted);
+            font-size: 9px;
+        }
+        .battery-chart-crosshair {
+            stroke: var(--text-muted);
+            stroke-width: 1px;
+            stroke-dasharray: 2 2;
+        }
+        .battery-chart-dot {
+            fill: var(--accent);
+            stroke: var(--bg-deepest);
+            stroke-width: 1.5px;
+        }
+        .battery-chart-tooltip {
+            position: absolute;
+            top: 4px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 3px 7px;
+            font-size: 11px;
+            color: var(--text);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .battery-chart-empty {
+            padding: 24px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
         .panel li:has(.command-menu[open]),
         .panel li.menu-open {
             z-index: 400;
@@ -939,6 +1100,24 @@
             color: var(--text-muted);
             display: block;
             margin-top: 2px;
+        }
+        .command-recent {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .command-recent-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-right: 2px;
+        }
+        .command-recent .command-recent-btn {
+            font-size: 11px;
+            padding: 2px 8px;
         }
         .unit-busy-banner {
             margin-top: 6px;
@@ -1311,6 +1490,16 @@
             border-color: var(--caution-border);
             color: var(--caution-text);
         }
+        .stats-delta {
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .stats-delta.is-up {
+            color: var(--danger);
+        }
+        .stats-delta.is-down {
+            color: var(--ok);
+        }
         .stats-chip.is-warning strong {
             color: var(--caution-text);
         }
@@ -1425,7 +1614,33 @@
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
                 <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
                 <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
+                <button type="button" id="flap_report_toggle" class="toolbar-btn" title="Fleet-wide: which units keep bouncing between healthy and unhealthy, not just which are down right now">Flap Report</button>
+                <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
                 <span class="list-match-count" id="list_match_count"></span>
+            </div>
+            <div class="list-section" id="flap_report_section" data-panel="issues" hidden>
+            <h2>
+                Flap Report
+                <span class="count" id="flap_report_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <label>Last <input type="number" id="flap_report_days" min="1" max="90" value="7" step="1"> day(s)</label>
+                <label>Min transitions <input type="number" id="flap_report_min" min="1" max="50" value="3" step="1"></label>
+                <button type="button" id="flap_report_refresh" class="toolbar-btn">Refresh</button>
+                <span class="flap-report-db-stats" id="flap_report_db_stats"></span>
+            </div>
+            <ul id="flap_report_list"><li class="empty">Click Refresh to load the flap report...</li></ul>
+            </div>
+            <div class="list-section" id="power_infra_section" data-panel="issues" hidden>
+            <h2>
+                Power &amp; Infra Alerts <span class="experimental-badge">Experimental</span>
+                <span class="count" id="power_infra_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="power_infra_refresh" class="toolbar-btn">Refresh</button>
+                <span class="flap-report-db-stats" id="power_infra_source_status"></span>
+            </div>
+            <ul id="power_infra_list"><li class="empty">Click Refresh to load current Zabbix problems and VRM battery alarms...</li></ul>
             </div>
             <div class="list-section" id="unit_tools_section" data-panel="issues" hidden>
             <h2>
@@ -1602,7 +1817,7 @@
     <div class="confirm-modal" id="clear_checkboxes_modal">
         <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="clear_checkboxes_title">
             <h2 id="clear_checkboxes_title">Clear checkboxes?</h2>
-            <p>This will uncheck Worked and Skipped for every ticket in this browser. Resolved tickets and status lights will not change.</p>
+            <p>This will uncheck Worked and Skipped for every ticket — for everyone looking at this dashboard, not just this browser. Resolved tickets and status lights will not change.</p>
             <div class="confirm-actions">
                 <button type="button" class="confirm-cancel" id="clear_checkboxes_cancel">Cancel</button>
                 <button type="button" class="confirm-ok" id="clear_checkboxes_confirm">Clear checkboxes</button>
@@ -1631,6 +1846,26 @@
             </div>
         </div>
     </div>
+    <div class="confirm-modal" id="graphs_modal">
+        <div class="confirm-dialog battery-graphs-dialog" role="dialog" aria-modal="true" aria-labelledby="graphs_title">
+            <h2 id="graphs_title">Graphs <span class="experimental-badge">Experimental</span></h2>
+            <p id="graphs_subtitle"></p>
+            <div class="battery-graphs-controls">
+                <label>Window
+                    <select id="graphs_hours">
+                        <option value="24">Last 24 hours</option>
+                        <option value="72">Last 3 days</option>
+                        <option value="168">Last 7 days</option>
+                    </select>
+                </label>
+                <button type="button" id="graphs_refresh" class="toolbar-btn">Refresh</button>
+            </div>
+            <div id="graphs_body"></div>
+            <div class="confirm-actions">
+                <button type="button" class="confirm-cancel" id="graphs_close">Close</button>
+            </div>
+        </div>
+    </div>
     <div class="confirm-modal" id="generic_confirm_modal">
         <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="generic_confirm_title">
             <h2 id="generic_confirm_title">Are you sure?</h2>
@@ -1638,16 +1873,6 @@
             <div class="confirm-actions">
                 <button type="button" class="confirm-cancel" id="generic_confirm_cancel">Cancel</button>
                 <button type="button" class="confirm-ok" id="generic_confirm_action">Confirm</button>
-            </div>
-        </div>
-    </div>
-    <div class="confirm-modal" id="bounce_switch_modal">
-        <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="bounce_switch_title">
-            <h2 id="bounce_switch_title">Bounce switch?</h2>
-            <p id="bounce_switch_message">This will bounce the relay/switch for this unit.</p>
-            <div class="confirm-actions">
-                <button type="button" class="confirm-cancel" id="bounce_switch_cancel">Cancel</button>
-                <button type="button" class="confirm-ok" id="bounce_switch_confirm">Bounce Switch</button>
             </div>
         </div>
     </div>
@@ -1854,14 +2079,6 @@
             verify_warning: "restart",
             verify_failed: "verify",
         };
-        const bounceSwitchModal = document.getElementById("bounce_switch_modal");
-        const bounceSwitchMessage = document.getElementById("bounce_switch_message");
-        const bounceSwitchCancel = document.getElementById("bounce_switch_cancel");
-        const bounceSwitchConfirm = document.getElementById("bounce_switch_confirm");
-        let bounceSwitchUnit = "";
-        let bounceSwitchLabel = "Bounce (Relay)";
-        let bounceSwitchEndpoint = "/issues/bounce-switch/";
-        let bounceSwitchButton = null;
         const createDeploymentModal = document.getElementById("create_deployment_modal");
         const createDeploymentMessage = document.getElementById("create_deployment_message");
         const createDeploymentCancel = document.getElementById("create_deployment_cancel");
@@ -2018,6 +2235,11 @@
         const ticketStateStorageKey = "workToolIssueCheckboxesV1_" + workToolPort;
         const unitToolsStorageKey = "workToolUnitToolsV1_" + workToolPort;
         let localTicketState = {};
+        // Worked/Skipped, shared across every browser via /issues/ticket-state
+        // (everything else in localTicketState — LED caches, the local
+        // "resolved" staging checkbox — stays per-browser; those are UI cache,
+        // not triage state a teammate needs to see).
+        let serverTicketState = {};
         let serverEventCursor = 0;
         let serverVersion = 0;
         let validationRunId = "";
@@ -2857,6 +3079,24 @@
             { id: "panel_issues", label: "Panel issues" },
         ];
         let busyUnitsCount = 0;
+        // Previous poll's counts, so the stats strip can show a delta
+        // (▲/▼ since last check) instead of only the instant value. Purely
+        // informational — no click handler reads this, same as the rest of
+        // the strip's read-only intent.
+        let previousStatsCounts = null;
+
+        function statsDeltaHtml(id, current) {
+            if (!previousStatsCounts || !(id in previousStatsCounts)) {
+                return "";
+            }
+            const diff = current - previousStatsCounts[id];
+            if (diff === 0) {
+                return "";
+            }
+            const cls = diff > 0 ? "is-up" : "is-down";
+            const arrow = diff > 0 ? "▲" : "▼";
+            return " <span class=\"stats-delta " + cls + "\">" + arrow + Math.abs(diff) + "</span>";
+        }
 
         listIds.forEach(function (id) {
             listState[id] = [];
@@ -3382,6 +3622,14 @@
             });
             updateTicketCounts();
             closeClearCheckboxesModal();
+            serverTicketState = {};
+            fetch("/issues/ticket-state/clear", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+            }).catch(function () {
+                // Local state is already cleared; next pollTicketState() retries the sync.
+            });
         }
 
         clearCheckboxesBtn.addEventListener("click", openClearCheckboxesModal);
@@ -3417,8 +3665,11 @@
             if (event.key === "Escape" && patchUpdateModal.classList.contains("is-open")) {
                 closePatchUpdateModal();
             }
-            if (event.key === "Escape" && bounceSwitchModal.classList.contains("is-open")) {
-                closeBounceSwitchModal();
+            if (event.key === "Escape" && genericConfirmModal.classList.contains("is-open")) {
+                closeGenericConfirmModal();
+            }
+            if (event.key === "Escape" && graphsModal.classList.contains("is-open")) {
+                closeGraphsModal();
             }
         });
 
@@ -3490,7 +3741,8 @@
                 nucMenu,
                 "Reboot NUC",
                 "/issues/reboot-nuc/",
-                entry
+                entry,
+                { confirmMessage: "This will reboot the NUC on " + entry.unit + ", interrupting compute/services briefly." }
             );
 
             const uptimeBtn = document.createElement("button");
@@ -3841,7 +4093,7 @@
             restartServicesBtn.className = "action-btn";
             restartServicesBtn.textContent = "Restart All Services";
             restartServicesBtn.title = "Restart all platform services on the Scrypted box";
-            restartServicesBtn.addEventListener("click", function () {
+            function fireRestartServices() {
                 restartServicesBtn.disabled = true;
                 restartServicesBtn.textContent = "Restarting...";
                 statusEl.textContent = "Restarting all services on " + entry.unit + "...";
@@ -3873,6 +4125,15 @@
                         restartServicesBtn.disabled = false;
                         restartServicesBtn.textContent = "Restart All Services";
                     });
+            }
+            restartServicesBtn.addEventListener("click", function () {
+                openGenericConfirmModal(
+                    "Restart All Services?",
+                    "This will restart all 16 platform services on " + entry.unit
+                        + " (including the Docker engine), briefly interrupting recording/streaming/alerts on this unit.",
+                    "Restart All Services",
+                    fireRestartServices
+                );
             });
             powerActionsMenu.appendChild(restartServicesBtn);
         }
@@ -4003,6 +4264,361 @@
                 historyBtn.title = "No known region in subject (LAX/OAK/HOU/PHX/SLC/DEN)";
                 weatherMenu.appendChild(historyBtn);
             }
+
+            // Experimental: correlates this trailer's VRM battery SOC with
+            // the cloud outlook for its site/trailer location. Errors
+            // cleanly (e.g. "no VRM installation found") on units with no
+            // matching trailer, so this stays unconditional rather than
+            // trying to guess client-side which units have one.
+            const batteryBtn = document.createElement("button");
+            batteryBtn.type = "button";
+            batteryBtn.className = "action-btn";
+            batteryBtn.textContent = "Battery Outlook (Experimental)";
+            if (!entry || !entry.unit) {
+                batteryBtn.disabled = true;
+                batteryBtn.title = "No unit on this ticket";
+            } else {
+                batteryBtn.title = "VRM battery SOC vs. the multi-day cloud outlook — experimental, read-only";
+                batteryBtn.addEventListener("click", function () {
+                    batteryBtn.disabled = true;
+                    batteryBtn.textContent = "Checking...";
+                    statusEl.textContent = "Battery outlook for " + entry.unit + "...";
+                    const subject = entry.ticketSubject || entry.subject || "";
+                    fetch("/issues/battery-outlook/" + encodeURIComponent(entry.unit), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ subject: subject }),
+                    })
+                        .then(function (response) {
+                            return response.json().then(function (data) {
+                                if (!response.ok || !data.ok) {
+                                    throw new Error(data.error || ("HTTP " + response.status));
+                                }
+                                return data;
+                            });
+                        })
+                        .then(function (data) {
+                            consoleLines.push(data.summary || ("Battery outlook for " + entry.unit));
+                            (data.forecast || []).forEach(function (day) {
+                                consoleLines.push(
+                                    "  " + day.date + ": " + day.conditions
+                                    + (day.cloud_cover_mean != null
+                                        ? " (" + Math.round(day.cloud_cover_mean) + "% cloud)"
+                                        : "")
+                                    + (day.cloudy ? " — cloudy" : "")
+                                );
+                            });
+                            if (data.weather_error) {
+                                consoleLines.push("  Forecast unavailable: " + data.weather_error);
+                            }
+                            renderConsole(true);
+                            statusEl.textContent = data.summary || ("Battery outlook complete for " + entry.unit);
+                        })
+                        .catch(function (error) {
+                            const message = "Battery outlook failed: " + (error.message || error);
+                            consoleLines.push(message);
+                            renderConsole(true);
+                            statusEl.textContent = message;
+                            notifyError(message);
+                        })
+                        .finally(function () {
+                            batteryBtn.disabled = false;
+                            batteryBtn.textContent = "Battery Outlook (Experimental)";
+                        });
+                });
+            }
+            weatherMenu.appendChild(batteryBtn);
+        }
+
+        // ---- Graphs (experimental) --------------------------------------------
+        // One modal, two data sources: Battery (VRM) and Network Latency
+        // (Zabbix ping history) — same inline-SVG renderer either way. One
+        // axis, one series per chart (never dual-axis — these are different
+        // units), a thin rounded line in the app's existing accent color,
+        // and a hover crosshair+tooltip since a static line alone doesn't
+        // expose values.
+        const graphsModal = document.getElementById("graphs_modal");
+        const graphsTitle = document.getElementById("graphs_title");
+        const graphsSubtitle = document.getElementById("graphs_subtitle");
+        const graphsHours = document.getElementById("graphs_hours");
+        const graphsRefreshBtn = document.getElementById("graphs_refresh");
+        const graphsClose = document.getElementById("graphs_close");
+        const graphsBody = document.getElementById("graphs_body");
+        let graphsUnit = "";
+        let graphsSubject = "";
+        // Each mode: what to fetch, how to read the response, and the fixed
+        // chart order (never dual-axis, so no metric is ever combined with
+        // another on one chart — see GRAPH_MODES below).
+        const GRAPH_MODES = {
+            battery: {
+                titleText: "Battery Graphs",
+                endpoint: "/issues/battery-history/",
+                order: ["voltage", "soc", "current", "pv_power"],
+                loadingText: "Loading from VRM...",
+                failureLabel: "Battery Graphs",
+                subtitle: function (unit, data) {
+                    return unit + (data.installation_name ? (" (VRM: " + data.installation_name + ")") : "");
+                },
+            },
+            network: {
+                titleText: "Network Latency Graphs",
+                endpoint: "/issues/network-latency-history/",
+                order: ["router_response", "router_loss", "switch_response", "switch_loss"],
+                loadingText: "Loading from Zabbix...",
+                failureLabel: "Network Latency Graphs",
+                subtitle: function (unit) {
+                    return unit + " — Router/Switch ICMP checks";
+                },
+            },
+        };
+        let graphsMode = "battery";
+
+        function renderLineChart(container, points, options) {
+            const width = 640;
+            const height = 130;
+            const padding = { top: 8, right: 10, bottom: 8, left: 46 };
+            const plotW = width - padding.left - padding.right;
+            const plotH = height - padding.top - padding.bottom;
+            container.innerHTML = "";
+
+            if (!points || !points.length) {
+                const empty = document.createElement("div");
+                empty.className = "battery-chart-empty";
+                empty.textContent = "No data for this window.";
+                container.appendChild(empty);
+                return;
+            }
+
+            const xs = points.map(function (p) { return p.t; });
+            const ys = points.map(function (p) { return p.v; });
+            const xMin = Math.min.apply(null, xs);
+            const xMax = Math.max.apply(null, xs);
+            const yMinRaw = Math.min.apply(null, ys);
+            const yMaxRaw = Math.max.apply(null, ys);
+            const yPad = (yMaxRaw - yMinRaw) * 0.12 || Math.abs(yMaxRaw) * 0.05 || 1;
+            const yLo = yMinRaw - yPad;
+            const yHi = yMaxRaw + yPad;
+
+            function xPos(t) {
+                return padding.left + (xMax === xMin ? plotW / 2 : (t - xMin) / (xMax - xMin) * plotW);
+            }
+            function yPos(v) {
+                return padding.top + (yHi === yLo ? plotH / 2 : (yHi - v) / (yHi - yLo) * plotH);
+            }
+
+            const svgNS = "http://www.w3.org/2000/svg";
+            const svg = document.createElementNS(svgNS, "svg");
+            svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+            svg.setAttribute("class", "battery-chart-svg");
+            svg.setAttribute("role", "img");
+            svg.setAttribute(
+                "aria-label",
+                options.label + ": " + points.length + " readings, "
+                    + ys[0].toFixed(1) + " to " + ys[ys.length - 1].toFixed(1) + " " + options.unit
+            );
+
+            [0, 0.5, 1].forEach(function (frac) {
+                const y = padding.top + frac * plotH;
+                const line = document.createElementNS(svgNS, "line");
+                line.setAttribute("x1", padding.left);
+                line.setAttribute("x2", width - padding.right);
+                line.setAttribute("y1", y);
+                line.setAttribute("y2", y);
+                line.setAttribute("class", "battery-chart-grid");
+                svg.appendChild(line);
+                const label = document.createElementNS(svgNS, "text");
+                label.textContent = (yHi - frac * (yHi - yLo)).toFixed(1);
+                label.setAttribute("x", padding.left - 6);
+                label.setAttribute("y", y + 3);
+                label.setAttribute("class", "battery-chart-axis-label");
+                label.setAttribute("text-anchor", "end");
+                svg.appendChild(label);
+            });
+
+            const pathD = points.map(function (p, i) {
+                return (i === 0 ? "M" : "L") + xPos(p.t).toFixed(1) + "," + yPos(p.v).toFixed(1);
+            }).join(" ");
+            const path = document.createElementNS(svgNS, "path");
+            path.setAttribute("d", pathD);
+            path.setAttribute("class", "battery-chart-line");
+            path.setAttribute("fill", "none");
+            svg.appendChild(path);
+
+            const crosshair = document.createElementNS(svgNS, "line");
+            crosshair.setAttribute("class", "battery-chart-crosshair");
+            crosshair.setAttribute("y1", padding.top);
+            crosshair.setAttribute("y2", height - padding.bottom);
+            crosshair.style.display = "none";
+            svg.appendChild(crosshair);
+
+            const dot = document.createElementNS(svgNS, "circle");
+            dot.setAttribute("r", 3.5);
+            dot.setAttribute("class", "battery-chart-dot");
+            dot.style.display = "none";
+            svg.appendChild(dot);
+
+            const overlay = document.createElementNS(svgNS, "rect");
+            overlay.setAttribute("x", padding.left);
+            overlay.setAttribute("y", padding.top);
+            overlay.setAttribute("width", plotW);
+            overlay.setAttribute("height", plotH);
+            overlay.setAttribute("fill", "transparent");
+            svg.appendChild(overlay);
+
+            const tooltip = document.createElement("div");
+            tooltip.className = "battery-chart-tooltip";
+            tooltip.hidden = true;
+
+            function nearestPoint(clientX) {
+                const rect = svg.getBoundingClientRect();
+                const svgX = (clientX - rect.left) / rect.width * width;
+                const t = xMin + (svgX - padding.left) / plotW * (xMax - xMin);
+                let nearest = points[0];
+                let bestDiff = Infinity;
+                points.forEach(function (p) {
+                    const diff = Math.abs(p.t - t);
+                    if (diff < bestDiff) {
+                        bestDiff = diff;
+                        nearest = p;
+                    }
+                });
+                return nearest;
+            }
+
+            overlay.addEventListener("mousemove", function (event) {
+                const nearest = nearestPoint(event.clientX);
+                const x = xPos(nearest.t);
+                const y = yPos(nearest.v);
+                crosshair.setAttribute("x1", x);
+                crosshair.setAttribute("x2", x);
+                crosshair.style.display = "";
+                dot.setAttribute("cx", x);
+                dot.setAttribute("cy", y);
+                dot.style.display = "";
+                tooltip.hidden = false;
+                tooltip.textContent = new Date(nearest.t).toLocaleString() + " — "
+                    + nearest.v.toFixed(2) + " " + options.unit;
+                const leftPct = (x / width) * 100;
+                tooltip.style.left = Math.min(Math.max(leftPct, 5), 75) + "%";
+            });
+            overlay.addEventListener("mouseleave", function () {
+                crosshair.style.display = "none";
+                dot.style.display = "none";
+                tooltip.hidden = true;
+            });
+
+            container.style.position = "relative";
+            container.appendChild(svg);
+            container.appendChild(tooltip);
+        }
+
+        function renderGraphs(data) {
+            const modeConfig = GRAPH_MODES[graphsMode];
+            graphsBody.innerHTML = "";
+            modeConfig.order.forEach(function (key) {
+                const chart = (data.charts || {})[key];
+                if (!chart) {
+                    return;
+                }
+                const block = document.createElement("div");
+                block.className = "battery-chart-block";
+                const heading = document.createElement("div");
+                heading.className = "battery-chart-heading";
+                const title = document.createElement("span");
+                title.textContent = chart.label
+                    + (chart.latest != null ? " — " + chart.latest.toFixed(2) + " " + chart.unit + " now" : "");
+                heading.appendChild(title);
+                const range = document.createElement("span");
+                range.className = "battery-chart-range";
+                range.textContent = (chart.min != null && chart.max != null)
+                    ? ("min " + chart.min.toFixed(2) + " / max " + chart.max.toFixed(2) + " " + chart.unit)
+                    : "";
+                heading.appendChild(range);
+                block.appendChild(heading);
+                if (!(chart.points || []).length) {
+                    const empty = document.createElement("div");
+                    empty.className = "battery-chart-empty";
+                    empty.textContent = chart.error ? ("Unavailable: " + chart.error) : "No data for this window.";
+                    block.appendChild(empty);
+                } else {
+                    const chartContainer = document.createElement("div");
+                    chartContainer.className = "battery-chart-container";
+                    block.appendChild(chartContainer);
+                    renderLineChart(
+                        chartContainer,
+                        chart.points.map(function (p) { return { t: p.t, v: p.v }; }),
+                        { label: chart.label, unit: chart.unit }
+                    );
+                }
+                graphsBody.appendChild(block);
+            });
+        }
+
+        function loadGraphs() {
+            const unit = graphsUnit;
+            if (!unit) {
+                return;
+            }
+            const modeConfig = GRAPH_MODES[graphsMode];
+            const hours = graphsHours.value || 24;
+            graphsBody.innerHTML = "";
+            const loading = document.createElement("div");
+            loading.className = "battery-chart-empty";
+            loading.textContent = modeConfig.loadingText;
+            graphsBody.appendChild(loading);
+            fetch(modeConfig.endpoint + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ hours: hours, subject: graphsSubject }),
+            })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    graphsSubtitle.textContent = modeConfig.subtitle(unit, data) + " — last " + hours + " hour(s)";
+                    renderGraphs(data);
+                })
+                .catch(function (error) {
+                    graphsBody.innerHTML = "";
+                    const errEl = document.createElement("div");
+                    errEl.className = "battery-chart-empty";
+                    errEl.textContent = modeConfig.failureLabel + " failed: " + (error.message || error);
+                    graphsBody.appendChild(errEl);
+                });
+        }
+
+        function openGraphsModal(unit, mode, subject) {
+            graphsMode = GRAPH_MODES[mode] ? mode : "battery";
+            const modeConfig = GRAPH_MODES[graphsMode];
+            graphsUnit = unit || "";
+            graphsSubject = subject || "";
+            graphsTitle.firstChild.textContent = modeConfig.titleText + " ";
+            graphsSubtitle.textContent = unit || "";
+            graphsModal.classList.add("is-open");
+            loadGraphs();
+        }
+
+        function closeGraphsModal() {
+            graphsModal.classList.remove("is-open");
+        }
+
+        if (graphsClose) {
+            graphsClose.addEventListener("click", closeGraphsModal);
+        }
+        if (graphsRefreshBtn) {
+            graphsRefreshBtn.addEventListener("click", loadGraphs);
+        }
+        if (graphsModal) {
+            graphsModal.addEventListener("click", function (event) {
+                if (event.target === graphsModal) {
+                    closeGraphsModal();
+                }
+            });
         }
 
         function appendRouterPingButton(parentMenu, entry, label, mode) {
@@ -4924,6 +5540,52 @@
             }
         }
 
+        // ---- Power & Infra alarm glyph ----------------------------------------
+        // A cheap, frequent poll of the scheduled Zabbix+VRM cache (never hits
+        // either API itself — see /issues/power-infra-alerts/cached) lights up
+        // a ⚠ on a unit's Commands button the moment either system flags it,
+        // without waiting for someone to open the Power & Infra Alerts panel.
+        let powerInfraAlarmedUnits = {};
+
+        function applyPowerInfraGlyph(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-alarm-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const info = powerInfraAlarmedUnits[unit];
+            if (!info) {
+                glyph.hidden = true;
+                return;
+            }
+            glyph.hidden = false;
+            glyph.classList.toggle("is-corroborated", !!info.corroborated);
+            const sources = info.corroborated ? "Zabbix + VRM" : (info.zabbix ? "Zabbix" : "VRM");
+            glyph.title = "Active " + sources + " alert on " + unit + " — see Power & Infra Alerts for detail";
+        }
+
+        function pollPowerInfraAlertsCache() {
+            fetch("/issues/power-infra-alerts/cached")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const next = {};
+                    (data.rows || []).forEach(function (row) {
+                        next[String(row.unit || "").toUpperCase()] = {
+                            corroborated: !!row.corroborated,
+                            zabbix: (row.zabbix_problems || []).length > 0,
+                            vrm: !!row.vrm_alarm,
+                        };
+                    });
+                    powerInfraAlarmedUnits = next;
+                    document.querySelectorAll("details.command-menu").forEach(applyPowerInfraGlyph);
+                })
+                .catch(function () {})
+                .finally(function () {
+                    setTimeout(pollPowerInfraAlertsCache, 45000);
+                });
+        }
+        pollPowerInfraAlertsCache();
+
         // ---- Busy flag -------------------------------------------------------
         // The per-unit lock already exists server-side; this surfaces it on the
         // row so two people don't start conflicting actions on the same unit.
@@ -5049,6 +5711,39 @@
                 },
             });
 
+            // Hikvision-only: the server re-checks with is_hikvision_unit() and
+            // errors cleanly if this guess is ever wrong. Dahua isn't offered
+            // here — its cgi-bin analytics endpoint wasn't reachable on this
+            // fleet's fisheyes when checked directly.
+            if (String(entry.unit || "").toUpperCase().indexOf("MU") === 0) {
+                appendDiagnosticButton(diagMenu, entry, {
+                    label: "Camera Analytics (Hikvision)",
+                    title: "Field/Line Detection rule state read over ISAPI — reports what's configured, not whether it should be",
+                    endpoint: "/issues/camera-analytics/",
+                    detailLines: function (data) {
+                        const lines = [];
+                        (data.cameras || []).forEach(function (cam) {
+                            Object.keys(cam.rules || {}).forEach(function (key) {
+                                const rule = cam.rules[key];
+                                let state;
+                                if (!rule.reachable) {
+                                    state = "unreachable";
+                                } else if (rule.enabled == null) {
+                                    state = "reachable, state unknown";
+                                } else {
+                                    state = rule.enabled ? "enabled" : "disabled";
+                                }
+                                lines.push(
+                                    (rule.reachable ? "✓ " : "× ")
+                                        + cam.label + " " + rule.label + " — " + state
+                                );
+                            });
+                        });
+                        return lines;
+                    },
+                });
+            }
+
             if (entry.hasPve) {
                 appendDiagnosticButton(diagMenu, entry, {
                     label: "Service Status",
@@ -5086,6 +5781,31 @@
                         }
                         if (data.vm101_status) {
                             lines.push("VM 101: " + data.vm101_status);
+                        }
+                        return lines;
+                    },
+                });
+            } else if (entry.unit) {
+                // The NUC half of the fleet had no resource visibility at all
+                // before this — PVE units got Service Status + PVE Host
+                // Resources above, NUC units got nothing.
+                appendDiagnosticButton(diagMenu, entry, {
+                    label: "NUC Resources",
+                    title: "Memory, disk and CPU load on the NUC",
+                    endpoint: "/issues/nuc-resources/",
+                    detailLines: function (data) {
+                        const lines = [];
+                        if (data.mem_used_percent != null) {
+                            lines.push("Memory: " + data.mem_used_percent + "% used ("
+                                + data.mem_used_mb + " / " + data.mem_total_mb + " MB)");
+                        }
+                        if (data.disk_used_percent != null) {
+                            lines.push("C: drive: " + data.disk_used_percent + "% used ("
+                                + (data.disk_size_gb - data.disk_free_gb).toFixed(1) + " / "
+                                + data.disk_size_gb + " GB)");
+                        }
+                        if (data.cpu_load_percent != null) {
+                            lines.push("CPU load: " + Math.round(data.cpu_load_percent) + "%");
                         }
                         return lines;
                     },
@@ -5146,6 +5866,28 @@
                     });
             });
             diagMenu.appendChild(historyBtn);
+
+            const graphsMenu = appendCommandSubmenu(diagMenu, "Graphs");
+
+            const batteryGraphsBtn = document.createElement("button");
+            batteryGraphsBtn.type = "button";
+            batteryGraphsBtn.className = "action-btn";
+            batteryGraphsBtn.textContent = "Battery Graphs (Experimental)";
+            batteryGraphsBtn.title = "Voltage / SOC / current / solar power over time, from VRM";
+            batteryGraphsBtn.addEventListener("click", function () {
+                openGraphsModal(entry.unit, "battery", entry.ticketSubject || entry.subject || "");
+            });
+            graphsMenu.appendChild(batteryGraphsBtn);
+
+            const networkGraphsBtn = document.createElement("button");
+            networkGraphsBtn.type = "button";
+            networkGraphsBtn.className = "action-btn";
+            networkGraphsBtn.textContent = "Network Latency Graphs (Experimental)";
+            networkGraphsBtn.title = "Router/Switch ICMP ping response time & loss over time, from Zabbix";
+            networkGraphsBtn.addEventListener("click", function () {
+                openGraphsModal(entry.unit, "network");
+            });
+            graphsMenu.appendChild(networkGraphsBtn);
         }
 
         function appendCamerasCommandMenu(commandItems, entry) {
@@ -5442,12 +6184,18 @@
             const commandSummary = document.createElement("summary");
             commandSummary.textContent = unitLabel;
             commandSummary.setAttribute("aria-label", "Commands for " + unitLabel);
+            const alarmGlyph = document.createElement("span");
+            alarmGlyph.className = "command-alarm-glyph";
+            alarmGlyph.textContent = "⚠";
+            alarmGlyph.hidden = true;
+            commandSummary.appendChild(alarmGlyph);
             commandMenu.appendChild(commandSummary);
             const commandItems = document.createElement("div");
             commandItems.className = "command-menu-items";
             commandMenu.appendChild(commandItems);
             commandMenuEntries.set(commandMenu, entry);
             wireCommandMenuToggle(commandMenu, rowEl);
+            applyPowerInfraGlyph(commandMenu);
             return {
                 commandMenu: commandMenu,
                 commandItems: commandItems,
@@ -5469,10 +6217,111 @@
                     });
                     updateCommandMenuContext(commandMenu);
                     placeCommandMenu(commandMenu);
+                    renderRecentCommands(commandMenu.querySelector(".command-menu-items"));
                 } else {
                     clearCommandMenuPosition(commandMenu);
                 }
             });
+        }
+
+        // ---- Recently-used commands ------------------------------------------
+        // The menu is deep (dozens of actions, several submenu levels), so a
+        // small "Recent" strip surfaces whichever of those you actually use —
+        // no restructuring of the existing tree, just a shortcut to it.
+        // Tracked per browser (localStorage), same as the other UI-only state.
+        const RECENT_COMMANDS_KEY = "commandMenuRecentActions";
+        const RECENT_COMMANDS_MAX = 6;
+
+        function getRecentCommands() {
+            try {
+                const raw = window.localStorage.getItem(RECENT_COMMANDS_KEY);
+                const list = raw ? JSON.parse(raw) : [];
+                return Array.isArray(list) ? list.filter(function (item) { return typeof item === "string"; }) : [];
+            } catch (ignore) {
+                return [];
+            }
+        }
+
+        function recordRecentCommand(label) {
+            const clean = String(label || "").trim();
+            if (!clean) {
+                return;
+            }
+            try {
+                const list = getRecentCommands().filter(function (item) { return item !== clean; });
+                list.unshift(clean);
+                window.localStorage.setItem(
+                    RECENT_COMMANDS_KEY,
+                    JSON.stringify(list.slice(0, RECENT_COMMANDS_MAX))
+                );
+            } catch (ignore) {
+                // localStorage unavailable — recency just won't persist.
+            }
+        }
+
+        // One delegated listener covers every command menu (both builders
+        // below share the same .action-btn contract), so a new action needs
+        // no extra wiring to show up here once it's been used.
+        document.addEventListener("click", function (event) {
+            const btn = event.target.closest(".command-menu-items .action-btn");
+            if (btn && !btn.closest(".command-recent")) {
+                recordRecentCommand(btn.textContent);
+            }
+        }, true);
+
+        function renderRecentCommands(commandItems) {
+            if (!commandItems) {
+                return;
+            }
+            let recentBox = commandItems.querySelector(".command-recent");
+            const matches = [];
+            getRecentCommands().forEach(function (label) {
+                const original = Array.from(commandItems.querySelectorAll(".action-btn")).find(
+                    function (el) {
+                        return !el.closest(".command-recent") && el.textContent.trim() === label;
+                    }
+                );
+                // Skip labels that don't apply to this unit (e.g. a PVE-only
+                // action recently used elsewhere) rather than show a dead shortcut.
+                if (original) {
+                    matches.push({ label: label, original: original });
+                }
+            });
+            if (!matches.length) {
+                if (recentBox) {
+                    recentBox.remove();
+                }
+                return;
+            }
+            if (!recentBox) {
+                recentBox = document.createElement("div");
+                recentBox.className = "command-recent";
+                const label = document.createElement("span");
+                label.className = "command-recent-label";
+                label.textContent = "Recent:";
+                recentBox.appendChild(label);
+            } else {
+                Array.from(recentBox.querySelectorAll(".command-recent-btn")).forEach(function (b) {
+                    b.remove();
+                });
+            }
+            matches.forEach(function (item) {
+                const shortcut = document.createElement("button");
+                shortcut.type = "button";
+                shortcut.className = "action-btn command-recent-btn";
+                shortcut.textContent = item.label;
+                shortcut.title = "Recently used in this menu";
+                shortcut.addEventListener("click", function () {
+                    item.original.click();
+                });
+                recentBox.appendChild(shortcut);
+            });
+            const firstSubmenu = commandItems.querySelector(".command-submenu");
+            if (firstSubmenu) {
+                commandItems.insertBefore(recentBox, firstSubmenu);
+            } else if (!recentBox.parentNode) {
+                commandItems.appendChild(recentBox);
+            }
         }
 
         function populateUnitToolsCommandMenu(commandItems, entry) {
@@ -5644,14 +6493,16 @@
 
             const switchMenu = appendCommandSubmenu(commandItems, "Switch");
 
-            function appendBounceButton(label, endpoint, parentMenu) {
+            function appendBounceButton(label, endpoint, parentMenu, confirmMessage) {
                 const bounceBtn = document.createElement("button");
                 bounceBtn.type = "button";
                 bounceBtn.className = "action-btn";
                 bounceBtn.textContent = label;
                 bounceBtn.addEventListener("click", function () {
-                    if (String(endpoint || "").indexOf("/issues/bounce-switch/") !== -1) {
-                        openBounceSwitchModal(entry.unit, label, endpoint, bounceBtn);
+                    if (confirmMessage) {
+                        openGenericConfirmModal(label + "?", confirmMessage, label, function () {
+                            executeBounceAction(entry.unit, label, endpoint, bounceBtn);
+                        });
                         return;
                     }
                     executeBounceAction(entry.unit, label, endpoint, bounceBtn);
@@ -5659,7 +6510,12 @@
                 parentMenu.appendChild(bounceBtn);
             }
 
-            appendBounceButton("Bounce (Relay)", "/issues/bounce-switch/", switchMenu);
+            appendBounceButton(
+                "Bounce (Relay)",
+                "/issues/bounce-switch/",
+                switchMenu,
+                "This will bounce the relay/switch for " + entry.unit + ". Continue?"
+            );
 
             const uptimeBtn = document.createElement("button");
             uptimeBtn.type = "button";
@@ -5856,6 +6712,285 @@
                 .finally(function () {
                     unitToolsInFlight = false;
                 });
+        }
+
+        // ---- Flap Report -------------------------------------------------
+        // Fleet-wide "who keeps bouncing" — the API (/issues/flap-report,
+        // /issues/history-stats) has existed since the validation-history
+        // work, but nothing in the UI showed it. Opening a unit's row reuses
+        // the exact ad-hoc "Unit tools" command menu (loadUnitTools) rather
+        // than building a second copy of it.
+        const flapReportToggleBtn = document.getElementById("flap_report_toggle");
+        const flapReportSection = document.getElementById("flap_report_section");
+        const flapReportListEl = document.getElementById("flap_report_list");
+        const flapReportCountEl = document.getElementById("flap_report_count");
+        const flapReportDaysEl = document.getElementById("flap_report_days");
+        const flapReportMinEl = document.getElementById("flap_report_min");
+        const flapReportRefreshBtn = document.getElementById("flap_report_refresh");
+        const flapReportDbStatsEl = document.getElementById("flap_report_db_stats");
+        let flapReportLoaded = false;
+
+        function renderFlapReportRow(unitStats) {
+            const li = document.createElement("li");
+            li.className = "ticket-row ticket-row-no-rws";
+
+            const actions = document.createElement("div");
+            actions.className = "ticket-row-actions";
+            const openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "action-btn";
+            openBtn.textContent = unitStats.unit;
+            openBtn.title = "Open Commands for " + unitStats.unit + " in Unit tools";
+            openBtn.addEventListener("click", function () {
+                listSearchEl.value = unitStats.unit;
+                applyListFilters();
+                loadUnitTools(unitStats.unit, true);
+                const toolsSection = document.getElementById("unit_tools_section");
+                if (toolsSection && toolsSection.scrollIntoView) {
+                    toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+            actions.appendChild(openBtn);
+            li.appendChild(actions);
+
+            const body = document.createElement("div");
+            body.className = "ticket-row-body";
+            const stats = document.createElement("span");
+            stats.className = "flap-row-stats";
+            stats.textContent = unitStats.transitions + " transition(s), "
+                + unitStats.down_checks + "/" + unitStats.checks + " checks down, last seen "
+                + (unitStats.last_seen || "unknown") + " — currently "
+                + (unitStats.currently_healthy ? "healthy" : "unhealthy");
+            body.appendChild(stats);
+            li.appendChild(body);
+            return li;
+        }
+
+        function loadFlapReport() {
+            const days = parseInt(flapReportDaysEl.value, 10) || 7;
+            const minTransitions = parseInt(flapReportMinEl.value, 10) || 3;
+            flapReportListEl.innerHTML = "";
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Loading...";
+            flapReportListEl.appendChild(loadingEl);
+            fetch("/issues/flap-report?days=" + days + "&min_transitions=" + minTransitions)
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    flapReportListEl.innerHTML = "";
+                    const units = data.units || [];
+                    if (!units.length) {
+                        const emptyEl = document.createElement("li");
+                        emptyEl.className = "empty";
+                        emptyEl.textContent = "No units at or above " + minTransitions
+                            + " transitions in the last " + days + " day(s).";
+                        flapReportListEl.appendChild(emptyEl);
+                    } else {
+                        units.forEach(function (unitStats) {
+                            flapReportListEl.appendChild(renderFlapReportRow(unitStats));
+                        });
+                    }
+                    flapReportCountEl.textContent = "(" + units.length + ")";
+                    flapReportLoaded = true;
+                })
+                .catch(function (error) {
+                    flapReportListEl.innerHTML = "";
+                    const errEl = document.createElement("li");
+                    errEl.className = "empty";
+                    errEl.textContent = "Flap report failed: " + (error.message || error);
+                    flapReportListEl.appendChild(errEl);
+                });
+            fetch("/issues/history-stats")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (data && data.ok && flapReportDbStatsEl) {
+                        flapReportDbStatsEl.textContent = "History: " + data.events + " events, "
+                            + data.units + " units, " + data.size_mb + " MB on disk";
+                    }
+                })
+                .catch(function () {});
+        }
+
+        if (flapReportToggleBtn && flapReportSection) {
+            flapReportToggleBtn.addEventListener("click", function () {
+                flapReportSection.hidden = !flapReportSection.hidden;
+                if (!flapReportSection.hidden && !flapReportLoaded) {
+                    loadFlapReport();
+                }
+            });
+        }
+        if (flapReportRefreshBtn) {
+            flapReportRefreshBtn.addEventListener("click", loadFlapReport);
+        }
+
+        // ---- Power & Infra Alerts (experimental) -----------------------------
+        // Zabbix's active problems x VRM's active battery alarms, merged by
+        // unit — see combined_power_infra_alerts() for what "corroborated"
+        // means and why the correlation is limited to units both systems
+        // name the same way (mostly MU trailers).
+        const powerInfraToggleBtn = document.getElementById("power_infra_toggle");
+        const powerInfraSection = document.getElementById("power_infra_section");
+        const powerInfraListEl = document.getElementById("power_infra_list");
+        const powerInfraCountEl = document.getElementById("power_infra_count");
+        const powerInfraRefreshBtn = document.getElementById("power_infra_refresh");
+        const powerInfraSourceStatusEl = document.getElementById("power_infra_source_status");
+        let powerInfraLoaded = false;
+
+        function dedupeZabbixProblems(problems) {
+            const byKey = new Map();
+            (problems || []).forEach(function (p) {
+                const key = p.device + "|" + p.name;
+                const existing = byKey.get(key);
+                if (existing) {
+                    existing.count += 1;
+                    existing.severity = Math.max(existing.severity, p.severity);
+                } else {
+                    byKey.set(key, { device: p.device, name: p.name, severity: p.severity, count: 1 });
+                }
+            });
+            return Array.from(byKey.values()).sort(function (a, b) { return b.severity - a.severity; });
+        }
+
+        const ZABBIX_SEVERITY_LABELS = ["Not classified", "Info", "Warning", "Average", "High", "Disaster"];
+
+        function renderPowerInfraRow(row) {
+            const li = document.createElement("li");
+            li.className = "ticket-row ticket-row-no-rws power-infra-row"
+                + (row.corroborated ? " is-corroborated" : "");
+
+            const actions = document.createElement("div");
+            actions.className = "ticket-row-actions";
+            const openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "action-btn";
+            openBtn.textContent = row.unit;
+            openBtn.title = "Open Commands for " + row.unit + " in Unit tools";
+            openBtn.addEventListener("click", function () {
+                listSearchEl.value = row.unit;
+                applyListFilters();
+                loadUnitTools(row.unit, true);
+                const toolsSection = document.getElementById("unit_tools_section");
+                if (toolsSection && toolsSection.scrollIntoView) {
+                    toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+            actions.appendChild(openBtn);
+            li.appendChild(actions);
+
+            const body = document.createElement("div");
+            body.className = "ticket-row-body";
+            const stats = document.createElement("span");
+            stats.className = "power-infra-row-stats";
+
+            if (row.corroborated) {
+                const tag = document.createElement("span");
+                tag.className = "source-tag zabbix";
+                tag.textContent = "BOTH";
+                stats.appendChild(tag);
+                stats.appendChild(document.createTextNode(
+                    "Zabbix AND VRM both flag this unit — likely a power issue, not just software/network."
+                ));
+                stats.appendChild(document.createElement("br"));
+            }
+
+            if ((row.zabbix_problems || []).length) {
+                const tag = document.createElement("span");
+                tag.className = "source-tag zabbix";
+                tag.textContent = "ZABBIX";
+                stats.appendChild(tag);
+                const grouped = dedupeZabbixProblems(row.zabbix_problems);
+                const text = grouped.map(function (g) {
+                    return g.device + ": " + g.name
+                        + (g.count > 1 ? " (×" + g.count + ")" : "")
+                        + " [" + (ZABBIX_SEVERITY_LABELS[g.severity] || g.severity) + "]";
+                }).join("; ");
+                stats.appendChild(document.createTextNode(text));
+                stats.appendChild(document.createElement("br"));
+            }
+
+            if (row.vrm_alarm) {
+                const tag = document.createElement("span");
+                tag.className = "source-tag vrm";
+                tag.textContent = "VRM";
+                stats.appendChild(tag);
+                const soc = row.vrm_alarm.battery_soc ? (" — SOC " + row.vrm_alarm.battery_soc) : "";
+                const age = row.vrm_alarm.last_seen_age_minutes != null
+                    ? (" (seen " + row.vrm_alarm.last_seen_age_minutes + "m ago)")
+                    : "";
+                stats.appendChild(document.createTextNode(row.vrm_alarm.alarm_detail + soc + age));
+            }
+
+            body.appendChild(stats);
+            li.appendChild(body);
+            return li;
+        }
+
+        function loadPowerInfraAlerts() {
+            powerInfraListEl.innerHTML = "";
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Loading — this checks two external APIs live, may take several seconds...";
+            powerInfraListEl.appendChild(loadingEl);
+            fetch("/issues/power-infra-alerts")
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error(data.error || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    powerInfraListEl.innerHTML = "";
+                    const rows = data.rows || [];
+                    if (!rows.length) {
+                        const emptyEl = document.createElement("li");
+                        emptyEl.className = "empty";
+                        emptyEl.textContent = "No active Zabbix problems or VRM battery alarms right now.";
+                        powerInfraListEl.appendChild(emptyEl);
+                    } else {
+                        rows.forEach(function (row) {
+                            powerInfraListEl.appendChild(renderPowerInfraRow(row));
+                        });
+                    }
+                    powerInfraCountEl.textContent = "(" + rows.length + ")";
+                    const corroboratedCount = rows.filter(function (r) { return r.corroborated; }).length;
+                    const statusParts = [corroboratedCount + " corroborated"];
+                    if (data.zabbix_error) {
+                        statusParts.push("Zabbix: " + data.zabbix_error);
+                    }
+                    if (data.vrm_error) {
+                        statusParts.push("VRM: " + data.vrm_error);
+                    }
+                    powerInfraSourceStatusEl.textContent = statusParts.join(" — ");
+                    powerInfraLoaded = true;
+                })
+                .catch(function (error) {
+                    powerInfraListEl.innerHTML = "";
+                    const errEl = document.createElement("li");
+                    errEl.className = "empty";
+                    errEl.textContent = "Power & Infra Alerts failed: " + (error.message || error);
+                    powerInfraListEl.appendChild(errEl);
+                });
+        }
+
+        if (powerInfraToggleBtn && powerInfraSection) {
+            powerInfraToggleBtn.addEventListener("click", function () {
+                powerInfraSection.hidden = !powerInfraSection.hidden;
+                if (!powerInfraSection.hidden && !powerInfraLoaded) {
+                    loadPowerInfraAlerts();
+                }
+            });
+        }
+        if (powerInfraRefreshBtn) {
+            powerInfraRefreshBtn.addEventListener("click", loadPowerInfraAlerts);
         }
 
         function appendPatchUpdateConsoleOutput(data) {
@@ -6323,44 +7458,6 @@
                     }
                 });
         }
-
-        function openBounceSwitchModal(unit, label, endpoint, button) {
-            bounceSwitchUnit = unit || "";
-            bounceSwitchLabel = label || "Bounce (Relay)";
-            bounceSwitchEndpoint = endpoint || "/issues/bounce-switch/";
-            bounceSwitchButton = button || null;
-            bounceSwitchMessage.textContent =
-                "This will bounce the relay/switch for "
-                + (bounceSwitchUnit || "this unit")
-                + ". Continue?";
-            bounceSwitchModal.classList.add("is-open");
-            bounceSwitchCancel.focus();
-        }
-
-        function closeBounceSwitchModal() {
-            bounceSwitchModal.classList.remove("is-open");
-            bounceSwitchUnit = "";
-            bounceSwitchLabel = "Bounce (Relay)";
-            bounceSwitchEndpoint = "/issues/bounce-switch/";
-            bounceSwitchButton = null;
-        }
-
-        function runBounceSwitch() {
-            const unit = bounceSwitchUnit;
-            const label = bounceSwitchLabel;
-            const endpoint = bounceSwitchEndpoint;
-            const button = bounceSwitchButton;
-            closeBounceSwitchModal();
-            executeBounceAction(unit, label, endpoint, button);
-        }
-
-        bounceSwitchCancel.addEventListener("click", closeBounceSwitchModal);
-        bounceSwitchConfirm.addEventListener("click", runBounceSwitch);
-        bounceSwitchModal.addEventListener("click", function (event) {
-            if (event.target === bounceSwitchModal) {
-                closeBounceSwitchModal();
-            }
-        });
 
         function openCreateDeploymentModal(projectId, subject, button) {
             createDeploymentProjectId = projectId || "";
@@ -7498,7 +8595,8 @@
             // clear-the-filter chip, first in the row
             const totalChip = document.createElement(interactive ? "button" : "div");
             totalChip.className = "stats-chip" + (downTotal ? " is-warning" : "");
-            totalChip.innerHTML = "<strong>" + downTotal + "</strong> units down/degraded";
+            totalChip.innerHTML = "<strong>" + downTotal + "</strong> units down/degraded"
+                + statsDeltaHtml("__total__", downTotal);
             if (interactive) {
                 totalChip.type = "button";
                 totalChip.classList.add("is-filter");
@@ -7516,7 +8614,8 @@
                 const count = (listState[item.id] || []).length;
                 const el = document.createElement(interactive ? "button" : "div");
                 el.className = "stats-chip" + (count ? " is-warning" : "");
-                el.innerHTML = "<strong>" + count + "</strong> " + item.label;
+                el.innerHTML = "<strong>" + count + "</strong> " + item.label
+                    + statsDeltaHtml(item.id, count);
                 if (interactive) {
                     el.type = "button";
                     const isActive = filtering && selected.has(item.id);
@@ -7555,6 +8654,12 @@
             busyChip.className = "stats-chip" + (busyUnitsCount ? " is-warning" : "");
             busyChip.innerHTML = "<strong>" + busyUnitsCount + "</strong> mid-maintenance";
             statsStripEl.appendChild(busyChip);
+
+            const nextStatsCounts = { __total__: downTotal };
+            DOWN_STATS_LISTS.forEach(function (item) {
+                nextStatsCounts[item.id] = (listState[item.id] || []).length;
+            });
+            previousStatsCounts = nextStatsCounts;
         }
 
         // One poll feeds both the mid-maintenance count and the per-row busy
@@ -7582,6 +8687,45 @@
                 });
         }
         pollBusyUnits();
+
+        // Brings in Worked/Skipped changes made from someone else's browser.
+        // Same 20s cadence as pollBusyUnits, same self-rescheduling shape.
+        function pollTicketState() {
+            fetch("/issues/ticket-state")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const nextStates = (data && data.states) || {};
+                    const changedLists = new Set();
+                    listIds.forEach(function (id) {
+                        (listState[id] || []).forEach(function (entry) {
+                            if (!entry.issueId) {
+                                return;
+                            }
+                            const shared = nextStates[entry.issueId];
+                            const nextWorked = !!(shared && shared.worked);
+                            const nextSkipped = !!(shared && shared.skipped);
+                            if (entry.worked !== nextWorked || entry.skipped !== nextSkipped) {
+                                entry.worked = nextWorked;
+                                entry.skipped = nextSkipped;
+                                saveEntryState(entry);
+                                changedLists.add(id);
+                            }
+                        });
+                    });
+                    serverTicketState = nextStates;
+                    changedLists.forEach(function (id) {
+                        renderList(id);
+                    });
+                    if (changedLists.size) {
+                        updateTicketCounts();
+                    }
+                })
+                .catch(function () {})
+                .finally(function () {
+                    setTimeout(pollTicketState, 20000);
+                });
+        }
+        pollTicketState();
 
         function isListComplete(entries) {
             if (!entries || !entries.length) {
@@ -7635,16 +8779,23 @@
 
         function restoreEntryState(entry, options) {
             const saved = localTicketState[entryStateKey(entry)];
-            if (!saved) {
-                return entry;
+            if (saved) {
+                entry.worked = !!saved.worked;
+                entry.skipped = !!saved.skipped;
+                if (saved.newAcknowledged) {
+                    entry.isNew = false;
+                }
+                if (!(options && options.resetLeds) && saved.validationRunId === validationRunId) {
+                    applyLedFields(entry, saved);
+                }
             }
-            entry.worked = !!saved.worked;
-            entry.skipped = !!saved.skipped;
-            if (saved.newAcknowledged) {
-                entry.isNew = false;
-            }
-            if (!(options && options.resetLeds) && saved.validationRunId === validationRunId) {
-                applyLedFields(entry, saved);
+            // Worked/Skipped are shared, so whatever the server has for this
+            // issue wins over the per-browser cache above — a teammate's click
+            // should show up even on a browser that never touched this ticket.
+            if (entry.issueId && serverTicketState[entry.issueId]) {
+                const shared = serverTicketState[entry.issueId];
+                entry.worked = !!shared.worked;
+                entry.skipped = !!shared.skipped;
             }
             return entry;
         }
@@ -7811,6 +8962,32 @@
             } catch (ignore) {
                 // Checkbox and LED state remain in this tab if browser storage is unavailable.
             }
+        }
+
+        // Pushes Worked/Skipped to the server so every other browser looking
+        // at this ticket sees the same triage state. Best-effort: a failed
+        // push just means this browser's click hasn't reached anyone else yet
+        // (it's still applied locally via saveEntryState above), so this
+        // stays quiet rather than toasting an error for a background sync.
+        function pushTicketState(entry) {
+            if (!entry || !entry.issueId) {
+                return;
+            }
+            serverTicketState[entry.issueId] = {
+                worked: !!entry.worked,
+                skipped: !!entry.skipped,
+            };
+            fetch("/issues/ticket-state", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    issue_id: entry.issueId,
+                    worked: !!entry.worked,
+                    skipped: !!entry.skipped,
+                }),
+            }).catch(function () {
+                // Offline/unreachable — next pollTicketState() reconciles.
+            });
         }
 
         function makeListEntry(item, options) {
@@ -8365,6 +9542,7 @@
                         }
                         refreshRow();
                         updateResolveSelectedButton();
+                        pushTicketState(entry);
                     });
                     rowRws.appendChild(workedBox);
 
@@ -8384,6 +9562,7 @@
                         }
                         refreshRow();
                         updateResolveSelectedButton();
+                        pushTicketState(entry);
                     });
                     rowRws.appendChild(skipBox);
                 }
@@ -9160,14 +10339,16 @@
                 appendOpenScryptedButton(openMenu, entry);
                 appendOpenVrmButton(openMenu, entry);
 
-                function appendBounceButton(label, endpoint, parentMenu) {
+                function appendBounceButton(label, endpoint, parentMenu, confirmMessage) {
                     const bounceBtn = document.createElement("button");
                     bounceBtn.type = "button";
                     bounceBtn.className = "action-btn";
                     bounceBtn.textContent = label;
                     bounceBtn.addEventListener("click", function () {
-                        if (String(endpoint || "").indexOf("/issues/bounce-switch/") !== -1) {
-                            openBounceSwitchModal(entry.unit, label, endpoint, bounceBtn);
+                        if (confirmMessage) {
+                            openGenericConfirmModal(label + "?", confirmMessage, label, function () {
+                                executeBounceAction(entry.unit, label, endpoint, bounceBtn);
+                            });
                             return;
                         }
                         executeBounceAction(entry.unit, label, endpoint, bounceBtn);
@@ -9180,7 +10361,8 @@
                     appendBounceButton(
                         "Bounce (Relay)",
                         "/issues/bounce-switch/",
-                        switchMenu
+                        switchMenu,
+                        "This will bounce the relay/switch for " + entry.unit + ". Continue?"
                     );
 
                     const uptimeBtn = document.createElement("button");
@@ -9331,7 +10513,9 @@
                 if (cliActionId === "speaker_outage") {
                     appendBounceButton(
                         "Bounce Speaker",
-                        "/issues/bounce-speaker/"
+                        "/issues/bounce-speaker/",
+                        undefined,
+                        "This will power-cycle the speaker on " + entry.unit + ", interrupting audio briefly. Continue?"
                     );
                 }
 

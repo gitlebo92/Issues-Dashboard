@@ -23,10 +23,16 @@ run_live.bat      rem http://127.0.0.1:5000 — daily use
 run_sandbox.bat   rem http://127.0.0.1:5001 — dev/test (auto-reload)
 ```
 
-| Script | URL | Purpose |
-|--------|-----|---------|
-| `run_live.bat` | http://127.0.0.1:5000 | Production dashboard |
+| How it runs | URL | Purpose |
+|-------------|-----|---------|
+| **`IssuesDashboard` Windows service** | http://&lt;this machine&gt;:5000 | **The live instance.** Starts automatically and stays running. Restart the service to pick up code changes. |
+| `run_live.bat` | http://127.0.0.1:5000 | Same thing by hand — only when the service is stopped, or they will fight over the port. |
 | `run_sandbox.bat` | http://127.0.0.1:5001 | Dev/test (own `data/sandbox/`) |
+
+> **The service does not read `run_live.bat`.** It launches `flask_endpoints.py`
+> directly, so anything the live instance needs must come from a code default
+> or from `.env` (which is loaded at import). Setting an environment variable
+> in `run_live.bat` has no effect on the service.
 
 With `PAUSE_AUTOMATED_TASKS=1` (default on both bats), scheduled 4:00/4:05/4:10 jobs and 30‑minute ERP polling stay off. Manual **Pull Issues**, validate, Open menus, etc. still work.
 
@@ -50,6 +56,10 @@ Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navba
 - **Per-row LEDs:** Green / yellow / orange / red compute (and speaker/camera LEDs where relevant).
 - **Weather icons:** Between the LED and the ticket link. Metro weather from the subject region code (`LAX` / `OAK` / `HOU` / `PHX` / `SLC` / `DEN`) via Open-Meteo — **no ERP**. Fresh fetch on page load; auto-refresh every **30 minutes**. Distinct icons for clear / partly cloudy / mostly cloudy / rain / thunder / etc. **Click an icon** (or **Weather → Weather (Current)**) for precise site/trailer weather → stdout + icon update. Toolbar **Update Weather** force-refreshes all region icons.
 - **R / W / S:** Resolved / Worked / Skipped checkboxes (local UI state only; Resolve does not post to ERP).
+- **All lists / One list:** **All lists** shows everything. **One list** reveals the category dropdown, which now takes **several lists at once** — tick Offline compute and Down Full and see both — with each list's ticket count beside it. The button reads the list name when one is ticked, "3 lists selected" for several. **Select all** / **Clear** sit at the bottom of the menu, empty lists are dimmed, and completed lists show their count in green. Switching to **Projects** swaps the menu for the project lists, and each panel keeps its own selection.
+- **Quick actions:** A short row of buttons on every ticket — **Validate**, **Uptime** (switch/Robofiber), **VRM**, **Mesh**, **Snap** — promoted out of the nested command menus. Edit the `QUICK_ACTIONS` array near the top of `templates/issues_results.html` to change which appear, reorder them, or set it to `[]` to remove the row.
+- **Busy flag:** An amber pill appears on a ticket when that unit is locked by another action (Security Update Fix, a reboot, Restart All Services), refreshed every 20 seconds from `/issues/busy-units`. Shows the action and its phase so two people don't collide on one unit.
+- **Toasts:** Failures appear as non-blocking toasts in the bottom-right instead of `alert()` dialogs. Errors stay until dismissed; other messages fade after six seconds. Every message is still written to stdout and the status line.
 
 ### Issue list categories
 
@@ -67,6 +77,8 @@ Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navba
 | **Monitoring Hours / Termination / Relocation** | Specialty buckets |
 
 Each list (except a few write-heavy specialty buckets) has **Revalidate** to re-check tickets in that list only.
+
+To narrow the view, switch to **One list** and tick one or more lists in the dropdown.
 
 ### Projects panel
 
@@ -88,6 +100,16 @@ Click the unit button (left of the LED) to open **Commands**.
 
 ![Command menu](docs/screenshots/03-command-menu.png)
 
+### Search commands
+
+The menu holds around 87 actions across nested submenus, four levels deep at worst. A **Search commands** box sits at the top and is focused as soon as the menu opens, so you can type instead of clicking through the tree.
+
+- Typing filters the actions live and opens whichever submenus contain a match — `reb` surfaces Reboot Scrypted, Reboot PVE and Reboot NUC together, from three different submenus.
+- Matching a submenu's own name reveals everything inside it: `cameras` shows every camera action.
+- **Enter** runs the action when the search has narrowed to exactly one.
+- **Escape** clears the search; press it again to close the menu.
+- Clearing the box restores the menu exactly as it was, with the submenus closed.
+
 ### Validate
 
 | Action | Behavior |
@@ -95,12 +117,12 @@ Click the unit button (left of the LED) to open **Commands**.
 | **Validate (Quick)** | Category / connectivity re-check (`/issues/validate-unit/...`). On NUC-down lists may ping compute only. |
 | **Validate (Full)** | Deeper multi-endpoint check (`/issues/validate-unit-full/...`) → LED colors (green/yellow/orange/red), optional list move. |
 
-LED colors (compute):
+LED colors (compute). Each light also carries a glyph — ✓ up, ! warning, × down — so state is readable without relying on hue:
 
-- **Green** — up / steady  
-- **Yellow** — soft down / still unreachable compute or Scrypted  
-- **Orange** — multi-down  
-- **Red** — fully down  
+- **Green ✓** — up / steady  
+- **Yellow !** — soft down / still unreachable compute or Scrypted  
+- **Orange ×** — multi-down  
+- **Red ×** — fully down  
 
 ### Weather
 
@@ -115,7 +137,20 @@ Region list icons stay metro-level and ERP-free; **Weather (Current)** / icon cl
 
 - **Get Carrier** — SIM ICCID → carrier via v19 inventory  
 - **Quick Validate** — router-oriented check  
-- **Ping Router** / **Long Ping Router** — ICMP (long ping streams to stdout)
+- **Ping Router** / **Long Ping Router** — ICMP (long ping streams to stdout). **Ping Router** (fixed mode) also reports min/avg/max and jitter, parsed from the four echoes it already sends — no extra packets and no extra time. **Quick Validate** stops at the first reply and is unchanged.
+
+### Diagnostics
+
+Read-only checks. None of them change anything on the device, so none take the per-unit lock.
+
+| Action | Behavior |
+|--------|----------|
+| **Run All Diagnostics** | Every applicable check below in one pass, reported as a single list of problems |
+| **Camera Reachability** | Pings every camera, the fisheye and the speaker at once and prints a ✓/× table |
+| **Service Status** | *(PVE units)* Which of the sixteen platform services (15 sentracam-* daemons + docker) are actually active — run this **before** Restart All Services |
+| **PVE Host Resources** | *(PVE units)* Memory, swap, root disk, load average and VM 101 state |
+| **NVMe Health (PVE)** | *(PVE units)* `smartctl -a` on the boot drive — wear, spare, errors, temperature. Lives under Linux → Scrypted |
+| **Unit History** | Recorded validations for this unit and how many times it has flapped in the last week |
 
 ### Cameras
 
@@ -861,6 +896,253 @@ All HTTP routes are defined in `flask_endpoints.py` (there is no separate `app.p
 
 **Response:** `200` tool payload with `ok: true`, or `400` `{"ok": false, "error": "..."}`.
 
+#### `POST /issues/pve-nvme-health/<unit>`
+
+**Description:** Read-only NVMe SMART health from the unit's PVE host via `smartctl -a`. PVE units only (`entry.hasPve`). Reports only — does not start a self-test.
+
+**Request:**
+- Path: `unit`
+- JSON or query: `device` — optional, defaults to `/dev/nvme0n1`. Must match `/dev/...`; anything else is refused before the SSH connection is made.
+
+**Response:**
+- `200`
+```json
+{
+  "ok": true,
+  "unit": "RD3400",
+  "host": "10.x.x.x",
+  "device": "/dev/nvme0n1",
+  "status": "ok",
+  "reasons": [],
+  "summary": "NVMe on RD3400 looks healthy — 3% used, 100% spare, 41C, 15203h powered on",
+  "model": "SAMSUNG MZVL2512HCJQ-00BL7",
+  "overall_health": "PASSED",
+  "critical_warning": "0x00",
+  "percentage_used": 3,
+  "available_spare": 100,
+  "temperature_c": 41,
+  "media_errors": 0,
+  "output": "<raw smartctl output>"
+}
+```
+- `400` — `{"ok": false, "error": "..."}` for an unknown unit, missing PVE IP, SSH/auth failure, a refused device path, or `smartctl` not installed (the message names `apt-get install -y smartmontools`).
+
+`status` is `ok` / `warn` / `fail`. **fail** on a non-PASSED self-assessment, a non-zero critical warning, any media/data-integrity errors, or available spare at/below its threshold. **warn** on ≥80% of rated endurance used or a drive at ≥70 °C.
+
+---
+
+### Read-only diagnostics
+
+None of these change anything on the device, so none take the per-unit lock and none are affected by `DISABLE_ERP_WRITES`. All appear under **Commands → Diagnostics** on the unit menu.
+
+#### `POST /issues/service-status/<unit>`
+
+**Description:** Which platform services are actually active on the unit's Scrypted box. The read that should come *before* Restart All Services — it names the one service that died instead of restarting all thirteen blind. PVE units only.
+
+**Request:** Path `unit`; empty body.
+
+**Response:**
+- `200` — `{"ok": true, "unit": "...", "host": "...", "status": "fail", "summary": "1 of 13 services not active on RD3400: web", "services": [{"name": "acme-web.service", "short": "web", "state": "failed", "sub_state": "failed", "ok": false}], "down": ["web"], "output": "..."}`
+- `400` — unknown unit, no Scrypted IP, SSH failure, or `company` not set in `.env`
+
+`status` is `ok` when every service is active, `fail` when any is not.
+
+#### `POST /issues/pve-resources/<unit>`
+
+**Description:** Memory, swap, root disk, load average and VM 101 state on the PVE host. Answers "is the host wedged, or is only the guest down?" PVE units only.
+
+**Request:** Path `unit`; empty body.
+
+**Response:**
+- `200` — includes `mem_used_percent`, `mem_used_mb`, `mem_total_mb`, `swap_used_mb`, `root_disk` (`{size, used, available, use_percent, mount}`), `load_1m` / `load_5m` / `load_15m`, `vm101_status`, plus `status`, `reasons`, `summary`, `sections` and raw `output`.
+- `400` — unknown unit, no PVE IP, or SSH failure
+
+**fail** on memory ≥90%, root filesystem ≥90% full, or VM 101 not running. **warn** on root ≥80% full or swap ≥50% used.
+
+#### `POST /issues/camera-matrix/<unit>`
+
+**Description:** Ping every configured camera, the fisheye and the speaker for a unit in one pass. Pings run concurrently, so the whole matrix costs about as long as the slowest single endpoint.
+
+**Request:** Path `unit`; empty body.
+
+**Response:**
+- `200` — `{"ok": true, "unit": "...", "status": "warn", "summary": "...", "endpoints": [{"target": "fisheye", "label": "Fisheye", "host": "10.x.x.x", "reachable": true}], "down": ["Camera 2"], "reachable_count": 4, "total": 5}`
+- `400` — unknown unit, or no camera/speaker IPs in the net sheet
+
+**ok** when everything answers, **fail** when nothing does (check the switch or router first), **warn** in between.
+
+#### `POST /issues/run-diagnostics/<unit>`
+
+**Description:** Every read-only check that applies to the unit, in one call — full connectivity validation, the camera matrix, and on PVE units the service roll-up, host resources and NVMe health. Checks run sequentially on purpose: they SSH into the same two hosts, and five concurrent sessions during an outage invites sshd rate-limiting.
+
+**Request:** Path `unit`; empty body.
+
+**Response:**
+- `200` — `{"ok": true, "unit": "...", "status": "fail", "summary": "2 issue(s) found on RD3400", "problems": ["Platform services: ...", "NVMe health: ..."], "checks": {"connectivity": {"label": "...", "ok": true, "status": "ok", "result": {...}}, ...}, "has_pve": true}`
+- `400` — only when the unit itself cannot be resolved
+
+Individual checks fail independently: one erroring (no PVE, `smartctl` missing, SSH refused) records its error under `checks.<key>.error` and the rest still run.
+
+---
+
+### Validation history
+
+Every validation the dashboard runs is recorded to SQLite (`data/<env>/unit_history.db`), so flap detection costs no extra packets.
+
+**Disk use is bounded.** A row costs about 104 bytes including both indexes. Retention is `UNIT_HISTORY_KEEP_DAYS` (default 90), and `prune()` — which runs at startup — also enforces a hard ceiling of 200,000 rows and then VACUUMs, returning the freed space to the filesystem. The write-ahead log is checkpointed every 256 pages, so it stays around 1 MB. **The database cannot exceed roughly 21 MB** regardless of how heavily the dashboard is used.
+
+#### `GET /issues/unit-history/<unit>`
+
+**Description:** Recorded validations for a unit, newest first, plus its recent flap summary.
+
+**Request:** Path `unit`; query `days` (default `30`), `limit` (default `200`).
+
+**Response:**
+- `200`
+```json
+{
+  "ok": true,
+  "unit": "RD3076",
+  "days": 30,
+  "entries": [
+    {"ts": 1789170398.1, "when": "2026-09-11 14:06:38", "kind": "validate_full",
+     "category": "false_positives", "led": "green", "healthy": true, "detail": null}
+  ],
+  "summary": {"unit": "RD3076", "days": 7, "checks": 41, "down_checks": 12,
+              "transitions": 6, "last_seen": "...", "currently_healthy": true}
+}
+```
+- `400` — `days` or `limit` not an integer
+
+`transitions` counts healthy↔unhealthy flips, which is what separates a unit that is simply down (one transition, still down) from one that keeps bouncing.
+
+#### `GET /issues/history-stats`
+
+**Description:** Row count, unit count, date range and size on disk of the history database.
+
+**Response:** `200` — `{"ok": true, "path": "...", "events": 12043, "units": 118, "first": "...", "last": "...", "bytes": 1359872, "size_mb": 1.3, "bytes_per_event": 113, "max_events": 200000}`
+
+#### `POST /issues/history-compact`
+
+**Description:** Prune to the retention window and hand the freed disk back to the OS. Runs at startup too; this is the on-demand version for when you want the space back now.
+
+**Response:** `200` — `{"ok": true, "deleted": 4210, "freed_mb": 0.8, ...stats fields...}`; `500` on VACUUM failure.
+
+#### `GET /issues/flap-report`
+
+**Description:** Units flapping most in the window, worst first — the fleet-wide view.
+
+**Request:** Query `days` (default `7`), `min_transitions` (default `3`).
+
+**Response:**
+- `200` — `{"ok": true, "days": 7, "min_transitions": 3, "units": [{"unit": "RD3076", "checks": 41, "down_checks": 12, "transitions": 6, "last_seen": "...", "currently_healthy": false}]}`
+- `400` — `days` or `min_transitions` not an integer
+
+---
+
+### Per-unit lock, status, and notes
+
+#### `GET /issues/unit-status/<unit>`
+
+**Description:** Combined busy/lock state and note for a unit, including the Security Update Fix wizard's phase and saved log. This is what lets the wizard survive a page refresh.
+
+**Request:** Path `unit`; query `token` (optional — when it matches the in-flight job, `is_owner` comes back true).
+
+**Response:** `200`
+```json
+{
+  "ok": true,
+  "busy": true,
+  "note": "waiting on site visit 9/14",
+  "note_updated_at": "2026-09-11T14:02:11",
+  "action": "Security Update Fix",
+  "phase": "step2_done",
+  "version": "0000:00:02.0",
+  "started_at": 1789170398.1,
+  "log": ["..."],
+  "is_owner": true
+}
+```
+When the unit is free, only `ok`, `busy: false`, `note` and `note_updated_at` are present.
+
+#### `POST /issues/unit-lock/<unit>/clear`
+
+**Description:** Force-clear a stuck unit lock regardless of token — escape hatch when a job died mid-run.
+
+**Request:** Path `unit`; empty body.
+
+**Response:** `200` — `{"ok": true, "cleared": true}` (`cleared: false` when the unit was not locked).
+
+#### `GET /issues/busy-units`
+
+**Description:** Every unit currently locked, for the dashboard's busy indicator.
+
+**Request:** None.
+
+**Response:** `200` — `{"ok": true, "units": [{"unit": "...", "action": "...", "phase": "...", "started_at": 1789170398.1}]}`.
+
+#### `GET /issues/unit-note/<unit>`
+
+**Description:** Read the shared free-text note for a unit. Persisted to JSON in the data dir, so it survives restarts and is visible to everyone on the dashboard. Not an ERP write.
+
+**Request:** Path `unit`.
+
+**Response:** `200` — `{"ok": true, "unit": "...", "text": "...", "updated_at": "..."}`.
+
+#### `POST /issues/unit-note/<unit>`
+
+**Description:** Replace the note for a unit.
+
+**Request body (JSON):** `{ "text": "waiting on site visit 9/14" }`
+
+**Response:** `200` — `{"ok": true, "unit": "...", "updated_at": "..."}`.
+
+---
+
+### Scrypted security update fix (guided, multi-step)
+
+Five steps of one wizard, run in order against a PVE unit. Step 1 acquires the per-unit lock and returns a `token`; steps 2–5 must present it (as JSON `token` or `?token=`) and return **409** if the lock was lost or the session expired. Each step records its phase server-side, so `GET /issues/unit-status/<unit>` can restore the wizard after a page refresh.
+
+#### `POST /issues/security-update-fix/step1/<unit>`
+
+**Description:** Stop VM 101, read and save its `hostpci0` value, then remove passthrough and set standard VGA so the guest boots without the GPU.
+
+**Response:** `200` — `{"ok": true, "unit": "...", "token": "<hex>", "version": "0000:00:02.0", ...}`; `400` on failure; `409` if the unit is already locked.
+
+#### `POST /issues/security-update-fix/step2/<unit>`
+
+**Description:** Inside the guest: hold the kernel packages, blacklist them from unattended upgrades, and confirm the running kernel.
+
+**Response:** `200` `{"ok": true, ...}`; `400`; `409` on a lost lock.
+
+#### `POST /issues/security-update-fix/shutdown/<unit>`
+
+**Description:** Shut the guest down cleanly before passthrough is restored.
+
+**Response:** `200` `{"ok": true, ...}`; `400` / `409`.
+
+#### `POST /issues/security-update-fix/finish/<unit>`
+
+**Description:** Restore `hostpci0` from the saved value and start VM 101 again.
+
+**Request body (JSON):** `{ "version": "0000:00:02.0" }` (normally carried through from step 1).
+
+**Response:** `200` `{"ok": true, ...}`; `400` / `409`.
+
+#### `POST /issues/security-update-fix/verify/<unit>`
+
+**Description:** Confirm the GPU came back — checks VGA presence and that the `i915` driver loaded, with `dmesg` context.
+
+**Response:** `200` — `{"ok": true, "drivers_loaded": true, ...}`; `400` / `409`.
+
+#### `POST /issues/restart-services/<unit>`
+
+**Description:** Restart all sixteen platform services on the unit's Scrypted box — `docker` first (the sentracam-* daemons depend on it), then database, watchdog, web, metadata, images, indexer, capture, rtsp, smtp, alarms, events, onvif, monitor, snmp, cache. Also the wizard's optional final step.
+
+**Request:** Path `unit`. Body `{ "token": "<hex>" }` when handed off from the Security Update Fix wizard (reuses that job's lock and ends it); empty body acquires a fresh lock.
+
+**Response:** `200` — `{"ok": true, "unit": "...", "message": "Restarted all platform services on ..."}`; `400` on failure; `409` if the unit is busy or the handed-off token no longer matches.
+
 ---
 
 ### Validation & list revalidation
@@ -1231,6 +1513,25 @@ Unless noted, these return **403** when ERP writes are disabled.
 | POST | `/issues/validate-stale-vpn/<unit>` |
 | POST | `/issues/validate-camera-view/<unit>` |
 | GET | `/issues/unit-context/<unit>` |
+| POST | `/issues/pve-nvme-health/<unit>` |
+| POST | `/issues/service-status/<unit>` |
+| POST | `/issues/pve-resources/<unit>` |
+| POST | `/issues/camera-matrix/<unit>` |
+| POST | `/issues/run-diagnostics/<unit>` |
+| GET | `/issues/unit-history/<unit>` |
+| GET | `/issues/flap-report` |
+| GET | `/issues/history-stats` |
+| POST | `/issues/history-compact` |
+| GET | `/issues/unit-status/<unit>` |
+| POST | `/issues/unit-lock/<unit>/clear` |
+| GET | `/issues/busy-units` |
+| GET, POST | `/issues/unit-note/<unit>` |
+| POST | `/issues/security-update-fix/step1/<unit>` |
+| POST | `/issues/security-update-fix/step2/<unit>` |
+| POST | `/issues/security-update-fix/shutdown/<unit>` |
+| POST | `/issues/security-update-fix/finish/<unit>` |
+| POST | `/issues/security-update-fix/verify/<unit>` |
+| POST | `/issues/restart-services/<unit>` |
 | GET | `/issues/shield/<unit>` |
 | GET | `/issues/shield-component/<unit>` |
 | GET | `/issues/attached-mu/<unit>` |
@@ -1265,6 +1566,9 @@ See `.env.example` for the full list. Common ones:
 | `PAUSE_AUTOMATED_TASKS` | `1` pauses schedulers / auto poll |
 | `DISABLE_ERP_WRITES` | `1` (default) leaves ERP write buttons visible but disabled; POST routes return 403. Set `0` to allow writes. Resolve (R) is local-only and stays enabled. |
 | `WORK_TOOL_ENV` / `WORK_TOOL_PORT` | live vs sandbox |
+| `WORK_TOOL_BIND` | Interface to bind. Defaults to `0.0.0.0` so the dashboard is reachable at the machine's LAN IP, which is how the NOC uses it. Set `127.0.0.1` to restrict it to the local machine. Put this in `.env` — the service reads `.env`, not `run_live.bat`. |
 | `myemail` / `mypass` | ART form login (Recovery Email hourly report) |
+| `company` | Service-name prefix on the Scrypted box (`acme` → `acme-web.service`). Required by Restart All Services and Service Status. |
+| `UNIT_HISTORY_KEEP_DAYS` | Days of validation history to keep in `data/<env>/unit_history.db` (default `90`). A hard 200,000-row ceiling applies regardless. |
 | `ART_DATA_URL` | Optional ART report URL (default reportId=153) |
 | `ART_REPORT_REFRESH_SECONDS` | ART spreadsheet refresh interval (default `3600`) |

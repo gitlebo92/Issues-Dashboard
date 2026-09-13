@@ -30,6 +30,7 @@ from requests.auth import HTTPDigestAuth, HTTPBasicAuth
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from urllib.parse import quote
+from xml.etree import ElementTree
 import urllib3
 
 from ._core import (  # noqa: F401  (re-exported dependencies)
@@ -42,19 +43,29 @@ from ._core import (  # noqa: F401  (re-exported dependencies)
     _scrypted_ssh_target,
     ensure_unit_net_info,
     env_path,
+    is_hikvision_unit,
     list_unit_cameras,
     username,
     uses_pve,
     validate_unit_full,
 )
+from .weather import vrm_active_alarms_by_unit  # noqa: F401  (re-exported dependency)
 
 
 # Platform services managed on the Scrypted box, in start order. Kept in sync
 # with refresh_platform_services() — if you add a service to one, add it here.
+# Verified live against 6 real boxes across two subnets/regions (2026-09-12):
+# every one runs exactly these 15, no more, no less — indexer and rtsp were
+# missing from this list despite being real, active services on every box.
 PLATFORM_SERVICES = (
-    "database", "watchdog", "web", "metadata", "images", "capture",
-    "smtp", "alarms", "events", "onvif", "monitor", "snmp", "cache",
+    "database", "watchdog", "web", "metadata", "images", "indexer", "capture",
+    "rtsp", "smtp", "alarms", "events", "onvif", "monitor", "snmp", "cache",
 )
+# docker.service hosts the core engine the 15 sentracam-* daemons depend on,
+# but it doesn't follow the {company}-<name>.service naming convention, so
+# it can't just be added to PLATFORM_SERVICES above — it's tracked here and
+# joined in below instead.
+PLATFORM_SERVICES_UNPREFIXED = ("docker",)
 def _ssh_read(host, username, password, command, timeout=60, connect_timeout=30):
     """
     Run one read-only command over SSH and return (stdout_text, error).
@@ -107,7 +118,10 @@ def scrypted_service_status(unit):
     if not company:
         return None, "Set `company` in .env — it prefixes the platform service names"
 
-    names = [f"{company}-{svc}.service" for svc in PLATFORM_SERVICES]
+    names = (
+        [f"{svc}.service" for svc in PLATFORM_SERVICES_UNPREFIXED]
+        + [f"{company}-{svc}.service" for svc in PLATFORM_SERVICES]
+    )
     # One call, one line per service: "<name> <active-state> <sub-state>".
     command = (
         "for s in " + " ".join(shlex.quote(n) for n in names) + "; do "
@@ -303,6 +317,124 @@ def pve_host_resources(unit):
         else f"PVE host for {unit} needs attention ({'; '.join(reasons)}) — {detail}"
     )
     return info, None
+def nuc_host_resources(unit):
+    """
+    Memory, disk and CPU load on a unit's Windows NUC, read over SSH.
+
+    Mirrors what pve_host_resources() answers for PVE units ("is the host
+    actually under pressure") — this half of the fleet had no resource
+    visibility at all before this, only reboot/uptime/chkdsk. One PowerShell
+    one-liner emits JSON directly rather than text this function has to
+    parse, so there's no regex layer to keep in sync with Windows' output
+    formatting the way the PVE/Linux checks have to be.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    if uses_pve(unit):
+        return None, f"{unit} uses PVE — use PVE Host Resources instead"
+    row = ensure_unit_net_info(unit, needed_indexes=(3,))
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    host = _host_only(row[3] if len(row) > 3 else "")
+    if not host:
+        return None, f"No NUC IP for {unit}"
+    nucuser = (os.getenv("nucuser") or "").strip().strip('"').strip("'")
+    nucpass = (os.getenv("nucpass") or "").strip().strip('"').strip("'")
+    if not nucuser or not nucpass:
+        return None, "Set nucuser/nucpass in .env"
+
+    ps_script = (
+        "$os = Get-CimInstance Win32_OperatingSystem; "
+        "$cpu = (Get-CimInstance Win32_Processor | "
+        "Measure-Object -Property LoadPercentage -Average).Average; "
+        # Single-quoted throughout (PowerShell escapes an embedded single
+        # quote by doubling it: ''). The whole script is itself wrapped in
+        # double quotes for -Command "..." below, so any double quote here
+        # would need Windows command-line-level escaping too — avoiding
+        # that nesting entirely is what actually survives SSH intact.
+        "$disk = Get-CimInstance Win32_LogicalDisk -Filter 'DeviceID=''C:'''; "
+        "[PSCustomObject]@{"
+        "TotalMemMB=[math]::Round($os.TotalVisibleMemorySize/1024);"
+        "FreeMemMB=[math]::Round($os.FreePhysicalMemory/1024);"
+        "CpuLoadPct=$cpu;"
+        "DiskSizeGB=[math]::Round($disk.Size/1GB,1);"
+        "DiskFreeGB=[math]::Round($disk.FreeSpace/1GB,1)"
+        "} | ConvertTo-Json -Compress"
+    )
+    command = f'powershell -NoProfile -NonInteractive -Command "{ps_script}"'
+    raw, error = _ssh_read(host, nucuser, nucpass, command, timeout=45)
+    if error:
+        return None, error
+    if not raw:
+        return None, f"No output from NUC {host}"
+
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None, f"Could not parse NUC resource output from {host}: {raw[:200]}"
+
+    total_mb = parsed.get("TotalMemMB")
+    free_mb = parsed.get("FreeMemMB")
+    used_mb = (total_mb - free_mb) if isinstance(total_mb, (int, float)) and isinstance(free_mb, (int, float)) else None
+    mem_used_percent = round(used_mb * 100 / total_mb) if used_mb is not None and total_mb else None
+    disk_size_gb = parsed.get("DiskSizeGB")
+    disk_free_gb = parsed.get("DiskFreeGB")
+    disk_used_percent = (
+        round((disk_size_gb - disk_free_gb) * 100 / disk_size_gb)
+        if disk_size_gb and disk_free_gb is not None
+        else None
+    )
+    cpu_load_pct = parsed.get("CpuLoadPct")
+
+    info = {
+        "unit": unit,
+        "host": host,
+        "mem_total_mb": total_mb,
+        "mem_used_mb": used_mb,
+        "mem_free_mb": free_mb,
+        "mem_used_percent": mem_used_percent,
+        "disk_size_gb": disk_size_gb,
+        "disk_free_gb": disk_free_gb,
+        "disk_used_percent": disk_used_percent,
+        "cpu_load_percent": cpu_load_pct,
+        "output": raw,
+    }
+
+    reasons = []
+    status = "ok"
+    if mem_used_percent is not None and mem_used_percent >= 90:
+        status = "fail"
+        reasons.append(f"memory {mem_used_percent}% used")
+    if disk_used_percent is not None:
+        if disk_used_percent >= 90:
+            status = "fail"
+            reasons.append(f"C: {disk_used_percent}% full")
+        elif disk_used_percent >= 80 and status == "ok":
+            status = "warn"
+            reasons.append(f"C: {disk_used_percent}% full")
+    if isinstance(cpu_load_pct, (int, float)) and cpu_load_pct >= 90 and status == "ok":
+        status = "warn"
+        reasons.append(f"CPU {round(cpu_load_pct)}% load")
+
+    info["status"] = status
+    info["reasons"] = reasons
+    parts = []
+    if mem_used_percent is not None:
+        parts.append(f"mem {mem_used_percent}%")
+    if disk_used_percent is not None:
+        parts.append(f"C: {disk_used_percent}%")
+    if cpu_load_pct is not None:
+        parts.append(f"CPU {round(cpu_load_pct)}%")
+    detail = ", ".join(parts) if parts else "see output"
+    info["summary"] = (
+        f"NUC for {unit} looks healthy — {detail}"
+        if status == "ok"
+        else f"NUC for {unit} needs attention ({'; '.join(reasons)}) — {detail}"
+    )
+    return info, None
 def camera_reachability_matrix(unit):
     """
     Reach every camera, the fisheye and the speaker for a unit in one pass.
@@ -369,6 +501,103 @@ def camera_reachability_matrix(unit):
         "reachable_count": up_count,
         "total": len(results),
     }, None
+def hikvision_analytics_status(unit):
+    """
+    Field/Line Detection rule state on a Hikvision unit's cameras, read over
+    plain HTTP (ISAPI) with the same fishuser/fishpass creds as the fisheye
+    snapshot. Reports what's configured — enabled or not — rather than
+    judging whether it should be; that's an operational call, not this
+    function's.
+
+    Hikvision only (MU sites). Dahua's cgi-bin analytics endpoint was checked
+    directly against two fisheye units and wasn't reachable on either — every
+    /cgi-bin/ path 404'd, not just the analytics one — so there is no Dahua
+    equivalent here yet. Returns (info, error).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit)
+    if error:
+        return None, error
+    if not is_hikvision_unit(unit, cameras=cameras):
+        return None, f"{unit} is not a Hikvision unit — analytics status is only available for Hikvision cameras"
+
+    load_dotenv(env_path)
+    fishuser = os.getenv("fishuser")
+    fishpass = os.getenv("fishpass")
+    if not fishuser or not fishpass:
+        return None, "Set fishuser/fishpass in .env — camera analytics status uses the same creds as fisheye snapshots"
+
+    camera_targets = [cam for cam in (cameras or []) if cam.get("target") != "fisheye" and cam.get("host")]
+    if not camera_targets:
+        return None, f"No camera IPs in the net sheet for {unit}"
+
+    rule_paths = (
+        ("field_detection", "Field Detection", "/ISAPI/Smart/FieldDetection/1"),
+        ("line_detection", "Line Detection", "/ISAPI/Smart/LineDetection/1"),
+    )
+
+    def _rule_enabled(xml_bytes):
+        try:
+            root = ElementTree.fromstring(xml_bytes)
+        except ElementTree.ParseError:
+            return None
+        for el in root.iter():
+            if el.tag.rsplit("}", 1)[-1] == "enabled":
+                return (el.text or "").strip().lower() == "true"
+        return None
+
+    def check_camera(cam):
+        host = cam["host"]
+        result = {"target": cam.get("target"), "label": cam.get("label"), "host": host, "rules": {}}
+        for key, label, path in rule_paths:
+            url = f"http://{host}{path}"
+            rule = {"label": label}
+            try:
+                resp = requests.get(url, auth=HTTPDigestAuth(fishuser, fishpass), timeout=10)
+                if resp.status_code == 401:
+                    resp = requests.get(url, auth=HTTPBasicAuth(fishuser, fishpass), timeout=10)
+                if resp.status_code == 200:
+                    rule["reachable"] = True
+                    rule["enabled"] = _rule_enabled(resp.content)
+                else:
+                    rule["reachable"] = False
+                    rule["http_status"] = resp.status_code
+            except requests.RequestException as exc:
+                rule["reachable"] = False
+                rule["error"] = str(exc)
+            result["rules"][key] = rule
+        return result
+
+    with ThreadPoolExecutor(max_workers=min(8, len(camera_targets))) as pool:
+        results = list(pool.map(check_camera, camera_targets))
+
+    reachable_count = sum(
+        1 for r in results if any(rule.get("reachable") for rule in r["rules"].values())
+    )
+    if reachable_count == len(results):
+        status = "ok"
+    elif reachable_count == 0:
+        status = "fail"
+    else:
+        status = "warn"
+
+    enabled_summary = [
+        f"{r['label']} {rule['label']}"
+        for r in results
+        for rule in r["rules"].values()
+        if rule.get("reachable") and rule.get("enabled")
+    ]
+    summary = f"Analytics reachable on {reachable_count}/{len(results)} camera(s) on {unit}"
+    summary += f" — enabled: {', '.join(enabled_summary)}" if enabled_summary else " — no rules enabled"
+
+    return {
+        "unit": unit,
+        "status": status,
+        "summary": summary,
+        "cameras": results,
+    }, None
 def run_unit_diagnostics(unit):
     """
     Every read-only check that applies to a unit, in one call — the 3 AM button.
@@ -395,6 +624,8 @@ def run_unit_diagnostics(unit):
             ("pve_host", "PVE host resources", lambda: pve_host_resources(unit)),
             ("nvme", "NVMe health", lambda: pve_nvme_health(unit)),
         ])
+    else:
+        checks.append(("nuc_host", "NUC resources", lambda: nuc_host_resources(unit)))
 
     results = {}
     problems = []
@@ -632,3 +863,205 @@ def pve_nvme_health(unit, device=None):
         "output": raw,
     })
     return info, None
+def _zabbix_call(method, params):
+    """One JSON-RPC call to the Zabbix API. Raises on transport/API error."""
+    url = (os.getenv("zab_url") or "").strip()
+    token = (os.getenv("zab_token") or "").strip()
+    if not url or not token:
+        raise RuntimeError("Set zab_url/zab_token in .env — Zabbix lookups need API access")
+    response = requests.post(
+        url,
+        json={"jsonrpc": "2.0", "method": method, "params": params, "auth": token, "id": 1},
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        raise RuntimeError(data["error"].get("message") or str(data["error"]))
+    return data.get("result")
+
+# Zabbix hosts are named "<unit>-<devicetype>" (RD3422-Switch, MU1041-Switch,
+# RD3524-SNUC-PVE, ...). Device type itself sometimes contains a hyphen
+# (SNUC-PVE/SNUC-Watch/SNUC-Win), so this anchors on the unit prefix
+# (RD/FD/MU + digits) rather than trying to enumerate every device type.
+_ZABBIX_HOST_UNIT_RE = re.compile(r"^((?:RD|FD|MU)\d+)-(.+)$", re.IGNORECASE)
+def zabbix_active_problems_by_unit():
+    """
+    Every currently-active Zabbix problem, fleet-wide in one call, grouped
+    by unit. Read-only (event.get — nothing here acknowledges or closes a
+    problem). Returns ({unit: [problem, ...]}, error).
+    """
+    try:
+        events = _zabbix_call("event.get", {
+            "output": ["eventid", "name", "severity", "clock"],
+            "source": 0, "object": 0, "value": 1,
+            "selectHosts": ["host"],
+            "sortfield": ["eventid"], "sortorder": "DESC",
+            "limit": 500,
+        })
+    except Exception as exc:
+        return None, f"Zabbix problem lookup failed: {exc}"
+
+    by_unit = {}
+    for event in events or []:
+        for host in event.get("hosts") or []:
+            host_name = str(host.get("host") or "")
+            match = _ZABBIX_HOST_UNIT_RE.match(host_name)
+            unit = match.group(1).upper() if match else host_name
+            device = match.group(2) if match else ""
+            by_unit.setdefault(unit, []).append({
+                "device": device,
+                "host": host_name,
+                "name": event.get("name"),
+                "severity": int(event.get("severity") or 0),
+                "clock": int(event.get("clock") or 0),
+            })
+    return by_unit, None
+def combined_power_infra_alerts():
+    """
+    Zabbix's active problems and VRM's active battery alarms, merged by
+    unit — two independent systems that have never been cross-referenced
+    here. A unit flagged by both is the highest-confidence signal (e.g. a
+    NUC Zabbix can't reach *and* a low-battery alarm on the same trailer
+    points at a power problem, not a software one); a unit flagged by only
+    one still surfaces, since either system alone already beats nothing.
+
+    Correlation is a plain string match on unit identifier as each system
+    already names it — mostly exact for MU trailers, since Zabbix monitors
+    MU-side switches under the same MU number VRM uses for that trailer's
+    battery. There's no RD/FD-head-to-MU-trailer crosswalk here, so a
+    Zabbix problem on an RD/FD head's own NUC/Router/Speaker won't line up
+    with that head's trailer battery unless the ticket happens to reference
+    the MU number directly — a real gap, not a bug, and it would take an
+    ERP-based attached-MU lookup per unit to close.
+    Returns ({unit: {zabbix, vrm, both}}, error) plus the two raw error
+    strings if either source failed (the other source's data still comes
+    back rather than failing the whole call).
+    """
+    zabbix_by_unit, zabbix_error = zabbix_active_problems_by_unit()
+    vrm_by_unit, vrm_error = vrm_active_alarms_by_unit()
+    zabbix_by_unit = zabbix_by_unit or {}
+    vrm_by_unit = vrm_by_unit or {}
+
+    units = set(zabbix_by_unit) | set(vrm_by_unit)
+    rows = []
+    for unit in units:
+        zabbix_problems = zabbix_by_unit.get(unit) or []
+        vrm_alarm = vrm_by_unit.get(unit)
+        both = bool(zabbix_problems) and bool(vrm_alarm)
+        max_severity = max((p["severity"] for p in zabbix_problems), default=0)
+        rows.append({
+            "unit": unit,
+            "zabbix_problems": sorted(zabbix_problems, key=lambda p: -p["severity"]),
+            "vrm_alarm": vrm_alarm,
+            "corroborated": both,
+            "max_zabbix_severity": max_severity,
+        })
+    # Corroborated first (both systems agree), then by worst Zabbix severity,
+    # then VRM-only alarms.
+    rows.sort(key=lambda r: (not r["corroborated"], -r["max_zabbix_severity"], r["vrm_alarm"] is None))
+    return {
+        "rows": rows,
+        "zabbix_error": zabbix_error,
+        "vrm_error": vrm_error,
+    }, None
+# One graph per (device, metric) the UI offers. Router/Switch are the only
+# device types every unit has in Zabbix with an identical key namespace
+# (plain ICMP checks) — NUC/SNUC-Watch/SNUC-PVE each use a different key
+# namespace (system.cpu.util vs pve.cpu.utilization vs nothing at all for
+# older units), so this stays scoped to what's actually universal rather
+# than branching three ways for a first version.
+NETWORK_LATENCY_METRICS = (
+    ("router_response", "Router", "icmppingsec", "Router Ping Response Time", "s"),
+    ("router_loss", "Router", "icmppingloss", "Router Ping Loss", "%"),
+    ("switch_response", "Switch", "icmppingsec", "Switch Ping Response Time", "s"),
+    ("switch_loss", "Switch", "icmppingloss", "Switch Ping Loss", "%"),
+)
+def unit_network_latency_history(unit, hours=24):
+    """
+    Router/Switch ICMP ping response time and loss over time, from Zabbix's
+    own history — the same checks behind "ICMP Ping: High ping loss/response
+    time", the single most common active-problem type on this fleet (see
+    combined_power_infra_alerts's real numbers). A live SSH/ping snapshot
+    only answers "is it up right now"; this answers "has it been flaky."
+    Returns (info, error).
+    """
+    unit = str(unit or "").strip().upper()
+    if not unit:
+        return None, "Missing unit"
+    try:
+        hours = max(1, min(int(hours), 24 * 30))
+    except (TypeError, ValueError):
+        hours = 24
+
+    device_names = sorted({m[1] for m in NETWORK_LATENCY_METRICS})
+    host_names = [f"{unit}-{device}" for device in device_names]
+    try:
+        hosts = _zabbix_call("host.get", {
+            "output": ["hostid", "host"],
+            "filter": {"host": host_names},
+        })
+    except Exception as exc:
+        return None, f"Zabbix host lookup failed: {exc}"
+    host_by_device = {}
+    for host in hosts or []:
+        for device in device_names:
+            if host.get("host") == f"{unit}-{device}":
+                host_by_device[device] = host.get("hostid")
+    if not host_by_device:
+        return None, f"No Zabbix Router/Switch host found for {unit}"
+
+    try:
+        items = _zabbix_call("item.get", {
+            "hostids": list(host_by_device.values()),
+            "output": ["itemid", "key_", "value_type", "hostid"],
+        })
+    except Exception as exc:
+        return None, f"Zabbix item lookup failed: {exc}"
+    hostid_to_device = {v: k for k, v in host_by_device.items()}
+    item_by_device_key = {}
+    for item in items or []:
+        device = hostid_to_device.get(item.get("hostid"))
+        if device:
+            item_by_device_key[(device, item.get("key_"))] = item
+
+    end = int(time.time())
+    start = end - hours * 3600
+    charts = {}
+    for key, device, zab_key, label, chart_unit in NETWORK_LATENCY_METRICS:
+        item = item_by_device_key.get((device, zab_key))
+        if not item:
+            charts[key] = {"label": label, "unit": chart_unit, "points": [], "min": None, "max": None, "latest": None}
+            continue
+        try:
+            history = _zabbix_call("history.get", {
+                "itemids": item["itemid"],
+                "history": int(item.get("value_type") or 0),
+                "time_from": start,
+                "time_till": end,
+                "sortfield": "clock",
+                "sortorder": "ASC",
+            })
+        except Exception as exc:
+            charts[key] = {"label": label, "unit": chart_unit, "points": [], "min": None, "max": None, "latest": None, "error": str(exc)}
+            continue
+        points = []
+        for entry in history or []:
+            try:
+                value = float(entry["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # Loss is already 0-100 from Zabbix; response time comes in
+            # seconds, which is what it's labeled and charted as here.
+            points.append({"t": int(entry["clock"]) * 1000, "v": value})
+        values = [p["v"] for p in points]
+        charts[key] = {
+            "label": label,
+            "unit": chart_unit,
+            "points": points,
+            "min": min(values) if values else None,
+            "max": max(values) if values else None,
+            "latest": values[-1] if values else None,
+        }
+
+    return {"unit": unit, "hours": hours, "charts": charts}, None

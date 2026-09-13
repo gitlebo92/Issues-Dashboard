@@ -144,3 +144,71 @@ def set_unit_note(unit, text):
             json.dump(notes, f, indent=2, sort_keys=True)
         os.replace(tmp_path, path)
         return notes.get(unit, {}).get("updated_at", "")
+
+# ---- Shared ticket triage state (Worked / Skipped) -------------------------
+# Worked/Skipped used to live only in each browser's localStorage, so one
+# tech's triage was invisible to anyone else looking at the same dashboard.
+# This mirrors the unit-notes pattern above (one JSON file, same lock/atomic-
+# write discipline) but keyed by ERP issue_id instead of unit. An entry is
+# dropped once both flags are false, so the file stays bounded by however
+# many tickets are actively marked right now, not by history.
+_ticket_state_lock = threading.Lock()
+def _ticket_state_path():
+    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
+    if not data_dir:
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "ticket_state.json")
+def _load_ticket_state():
+    try:
+        with open(_ticket_state_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+def get_ticket_states():
+    """Return {issue_id: {"worked": bool, "skipped": bool, "updated_at": str}} for
+    every ticket currently marked worked and/or skipped, shared across everyone
+    on the dashboard."""
+    with _ticket_state_lock:
+        return dict(_load_ticket_state())
+def set_ticket_state(issue_id, worked=None, skipped=None):
+    """Merge worked/skipped flags for one ticket; a field left None is unchanged.
+    Returns the resulting entry (or None if the ticket ends up untouched)."""
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return None
+    with _ticket_state_lock:
+        path = _ticket_state_path()
+        states = _load_ticket_state()
+        entry = dict(states.get(issue_id) or {"worked": False, "skipped": False})
+        if worked is not None:
+            entry["worked"] = bool(worked)
+        if skipped is not None:
+            entry["skipped"] = bool(skipped)
+        if entry.get("worked") or entry.get("skipped"):
+            entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            states[issue_id] = entry
+        else:
+            states.pop(issue_id, None)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(states, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        return states.get(issue_id)
+def clear_ticket_states(issue_ids=None):
+    """Clear worked/skipped for the given issue_ids, or every ticket when None
+    (the "Clear checkboxes" escape hatch — shared, so it clears for everyone)."""
+    with _ticket_state_lock:
+        path = _ticket_state_path()
+        if issue_ids is None:
+            states = {}
+        else:
+            states = _load_ticket_state()
+            wanted = {str(i or "").strip() for i in issue_ids if str(i or "").strip()}
+            for issue_id in wanted:
+                states.pop(issue_id, None)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(states, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        return states

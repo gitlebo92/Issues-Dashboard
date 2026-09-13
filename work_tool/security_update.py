@@ -302,13 +302,23 @@ def refresh_platform_services(unit):
     ip = None
     errors = ""
 
+    # Kept in sync with PLATFORM_SERVICES / PLATFORM_SERVICES_UNPREFIXED in
+    # diagnostics.py — indexer, rtsp and docker were all missing until
+    # 2026-09-12 (verified live: every real box runs exactly these 16).
+    # docker.service goes first and unprefixed (no {company}- for it) — it
+    # hosts the engine the rest depend on, so it needs to be back before
+    # they are; systemctl restart blocks until systemd reports it started,
+    # so the next line in this script doesn't run until docker actually is.
     commands = [
+        f"echo {scryptSshPass} | sudo -S systemctl restart docker.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-watchdog.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-web.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-metadata.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-images.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-indexer.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-capture.service",
+        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-rtsp.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-smtp.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-alarms.service",
         f"echo {scryptSshPass} | sudo -S systemctl restart {company}-events.service",

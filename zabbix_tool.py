@@ -36,7 +36,7 @@ class Zabbix_Tool_Kit:
             "id": 1
         }
 
-        response_hosts = requests.post(url=self.url, json=payload_hosts)
+        response_hosts = requests.post(url=self.url, json=payload_hosts, timeout=30)
         response_hosts = response_hosts.json()
         data = response_hosts.get("result", [])
         for h in data:
@@ -77,7 +77,7 @@ class Zabbix_Tool_Kit:
             "id": 1
         }
 
-        response_problems = requests.post(url=self.url, json=payload_problems)
+        response_problems = requests.post(url=self.url, json=payload_problems, timeout=30)
         response_problems = response_problems.json()
         
         data = response_problems.get("result", [])
