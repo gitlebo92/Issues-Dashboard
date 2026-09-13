@@ -8047,9 +8047,13 @@
                 cachedEndpoint: "/issues/fleet-shading-status/cached",
                 emptyText: "No cached results yet — click \"Check whole fleet now.\"",
                 sortRank: function (row) {
-                    return { shaded: 0, unknown: 1 }[row.shading_status];
+                    return { shaded: 0 }[row.shading_status];
                 },
                 certainty: function (row) { return row.shading_confidence; },
+                // "unknown" means the check itself couldn't reach a
+                // verdict (no VRM data, insufficient history, etc.) — not
+                // a finding, so it doesn't belong in a report of findings.
+                filterFn: function (row) { return row.shading_status !== "unknown"; },
             },
             deadPanel: {
                 listEl: document.getElementById("dead_panel_list"),
@@ -8061,9 +8065,12 @@
                 cachedEndpoint: "/issues/fleet-dead-panel-status/cached",
                 emptyText: "No cached results yet — click \"Check whole fleet now.\"",
                 sortRank: function (row) {
-                    return { dead_panel: 0, unknown: 1 }[row.dead_panel_status];
+                    return { dead_panel: 0 }[row.dead_panel_status];
                 },
                 certainty: function (row) { return row.dead_panel_confidence; },
+                // Same reasoning as shadedUnits.filterFn above — "unknown"
+                // isn't a finding, it's "couldn't check."
+                filterFn: function (row) { return row.dead_panel_status !== "unknown"; },
             },
             vrmFreshness: {
                 listEl: document.getElementById("vrm_freshness_list"),
@@ -8087,7 +8094,7 @@
         const fleetReportLoadedOnce = {};
 
         function renderFleetReportRows(config, data) {
-            const rows = (data.rows || []).slice();
+            const rows = (config.filterFn ? (data.rows || []).filter(config.filterFn) : (data.rows || []).slice());
             rows.sort(function (a, b) {
                 const ra = config.sortRank(a);
                 const rb = config.sortRank(b);
