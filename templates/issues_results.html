@@ -160,6 +160,19 @@
             padding: 2px 4px;
         }
         .toast .toast-close:hover { color: var(--text); }
+        .toast .toast-action {
+            display: block;
+            margin-top: 6px;
+            background: var(--bg-sunken);
+            color: var(--accent);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 3px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .toast .toast-action:hover { background: var(--border); }
         @keyframes toast-in {
             from { opacity: 0; transform: translateY(6px); }
             to   { opacity: 1; transform: none; }
@@ -2196,7 +2209,7 @@
             return toastStackEl;
         }
 
-        function notify(message, kind) {
+        function notify(message, kind, options) {
             const text = String(message == null ? "" : message).trim();
             if (!text) {
                 return null;
@@ -2205,6 +2218,18 @@
             const toast = document.createElement("div");
             toast.className = "toast" + (kind ? " is-" + kind : "");
             toast.textContent = text;
+
+            if (options && options.actionLabel && options.onAction) {
+                const action = document.createElement("button");
+                action.type = "button";
+                action.className = "toast-action";
+                action.textContent = options.actionLabel;
+                action.addEventListener("click", function () {
+                    options.onAction();
+                    toast.remove();
+                });
+                toast.appendChild(action);
+            }
 
             const close = document.createElement("button");
             close.type = "button";
@@ -5872,6 +5897,65 @@
                     });
             });
             diagMenu.appendChild(historyBtn);
+
+            // Direct answer to "is this unit plugged in" — the same question
+            // ERP files as an "unplugged" ticket subtype. Used to only exist
+            // as a side effect of Battery Outlook under Weather, which
+            // nobody would think to check for this. Always toasts (not just
+            // on warn/fail) since confirming "yes, it's plugged in" is worth
+            // as much as flagging that it isn't.
+            const powerStatusBtn = document.createElement("button");
+            powerStatusBtn.type = "button";
+            powerStatusBtn.className = "action-btn";
+            powerStatusBtn.textContent = "Power Status (Plugged In?)";
+            powerStatusBtn.title = "Best-effort check of AC/shore power — experimental, see detail for how sure";
+            powerStatusBtn.addEventListener("click", function () {
+                powerStatusBtn.disabled = true;
+                powerStatusBtn.textContent = "Checking...";
+                statusEl.textContent = "Power status for " + entry.unit + "...";
+                const subjectForLookup = entry.ticketSubject || entry.subject || "";
+                fetch("/issues/power-status/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ subject: subjectForLookup }),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        consoleLines.push(data.summary);
+                        if (data.ac_power_detail) {
+                            consoleLines.push("  " + data.ac_power_detail);
+                        }
+                        renderConsole(true);
+                        statusEl.textContent = data.summary;
+                        const toastKind = data.status === "fail" ? "error"
+                            : data.status === "warn" ? "warning" : "success";
+                        notify(data.summary, toastKind, {
+                            actionLabel: "View Graphs",
+                            onAction: function () {
+                                openGraphsModal(entry.unit, "battery", subjectForLookup);
+                            },
+                        });
+                    })
+                    .catch(function (error) {
+                        const message = "Power Status failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        powerStatusBtn.disabled = false;
+                        powerStatusBtn.textContent = "Power Status (Plugged In?)";
+                    });
+            });
+            diagMenu.appendChild(powerStatusBtn);
 
             const graphsMenu = appendCommandSubmenu(diagMenu, "Graphs");
 

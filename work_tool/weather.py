@@ -476,13 +476,13 @@ def _vrm_pv_ceiling_and_recent_spike(site_id, victron_token, ceiling_days=21, re
         )
         ceiling_payload = ceiling_resp.json()
     except requests.RequestException:
-        return None, None
+        return None, None, None
     if not ceiling_payload.get("success"):
-        return None, None
+        return None, None, None
     pv_series = ceiling_payload.get("records", {}).get("PVP") or []
     pv_values = [p[1] for p in pv_series if isinstance(p, list) and p[1] is not None]
     if not pv_values:
-        return None, None
+        return None, None, None
     ceiling = max(pv_values)
     threshold = ceiling * margin
 
@@ -498,9 +498,9 @@ def _vrm_pv_ceiling_and_recent_spike(site_id, victron_token, ceiling_days=21, re
         )
         recent_payload = recent_resp.json()
     except requests.RequestException:
-        return None, None
+        return None, None, None
     if not recent_payload.get("success"):
-        return None, None
+        return None, None, None
     recent_records = recent_payload.get("records", {})
     bc_series = recent_records.get("bc") or []
     bv_by_t = {
@@ -525,12 +525,18 @@ def _vrm_pv_ceiling_and_recent_spike(site_id, victron_token, ceiling_days=21, re
         return None, (
             f"No charge power above this trailer's own {round(ceiling)}W solar ceiling "
             f"(observed over {ceiling_days}d) in the last {recent_hours}h"
-        )
+        ), None
     when = datetime.fromtimestamp(peak_time / 1000).strftime("%Y-%m-%d %H:%M")
+    # Confidence scales with how far the reading cleared the ceiling — a
+    # reading right at the margin is weaker evidence than one 40% over it.
+    # This is inference, not a direct reading, so it's capped below what a
+    # direct charger-state match earns, and floored above pure guessing.
+    excess_ratio = peak_power / ceiling if ceiling else 1.0
+    confidence = max(60, min(92, round(50 + (excess_ratio - 1) * 100)))
     return "present", (
         f"Charge power reached {round(peak_power)}W at {when}, above this trailer's own "
         f"{round(ceiling)}W solar ceiling (observed over {ceiling_days}d) — likely AC-fed"
-    )
+    ), confidence
 # cSt (charger "Charge state") values that mean the AC charger is actively
 # receiving usable input power, vs. ones that mean it isn't. Not every
 # trailer has this device at all — plenty are solar+battery only — and even
@@ -547,8 +553,13 @@ def _ac_power_status_from_diagnostics(diagnostics_records):
     """
     Best-effort read of whether a trailer is plugged into AC/shore power,
     from the same /diagnostics response callers already fetched for
-    Battery SOC — no extra VRM call. Returns (status, detail) where status
-    is one of: "present", "not_detected", "uncertain", "no_charger_hardware".
+    Battery SOC — no extra VRM call. Returns (status, detail, confidence)
+    where status is one of "present", "not_detected", "uncertain",
+    "no_charger_hardware", and confidence is a 0-100 "percent likely
+    plugged in" — deliberately coarse (rounded to 5s in spirit, not
+    precise math), since this is telemetry inference, not a direct
+    measurement. A NOC tech treats "60% sure" differently from "95% sure"
+    even when both would otherwise round to the same status.
     """
     charge_state = None
     ac_current = None
@@ -562,7 +573,14 @@ def _ac_power_status_from_diagnostics(diagnostics_records):
                 ac_current = float(match.group(1))
 
     if charge_state is None and ac_current is None:
-        return "no_charger_hardware", "No AC charger reported for this trailer (likely solar+battery only)"
+        # No direct signal at all — not zero evidence either way, so this
+        # isn't 50 (that's reserved for "two signals actively disagree")
+        # and isn't near-zero (that's reserved for "charger says Off").
+        return (
+            "no_charger_hardware",
+            "No AC charger reported for this trailer (likely solar+battery only)",
+            35,
+        )
 
     state_lower = charge_state.lower() if charge_state else ""
     is_off_state = state_lower in _AC_CHARGER_OFF_STATES
@@ -571,12 +589,137 @@ def _ac_power_status_from_diagnostics(diagnostics_records):
     detail = f"charger state: {charge_state or 'unknown'}, AC current: {ac_current if ac_current is not None else '?'} A"
 
     if is_off_state and has_current:
-        return "uncertain", detail + " (state and current disagree)"
+        return "uncertain", detail + " (state and current disagree)", 50
     if is_off_state:
-        return "not_detected", detail
+        return "not_detected", detail, 8
+    if is_active_state and has_current:
+        return "present", detail, 96
     if is_active_state or has_current:
-        return "present", detail
-    return "uncertain", detail
+        return "present", detail, 85
+    return "uncertain", detail, 45
+def _vrm_power_snapshot(unit_key, subject_text):
+    """
+    Shared VRM battery/AC-power read — one installations lookup, one
+    diagnostics call, the direct AC-power read, and (only when that read
+    is absent or self-contradictory) the solar-ceiling fallback. Used by
+    both unit_battery_weather_outlook (adds weather correlation on top)
+    and unit_power_status (the focused Diagnostics-menu check) so a fix
+    to one lands in both rather than needing to be made twice.
+    Returns (installation_name, battery_soc_percent, soc_error,
+    ac_power_status, ac_power_label, ac_power_detail, ac_power_confidence,
+    error).
+    """
+    id_user, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, None, None, None, None, None, None, cred_error
+    site_id, installation_name, site_error = _resolve_vrm_site(unit_key, subject_text, id_user, victron_token)
+    if site_error:
+        return None, None, None, None, None, None, None, site_error
+
+    try:
+        diagnostics_resp = requests.get(
+            f"https://vrmapi.victronenergy.com/v2/installations/{site_id}/diagnostics",
+            headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        return None, None, None, None, None, None, None, f"VRM diagnostics lookup failed: {exc}"
+    if diagnostics_resp.status_code != 200:
+        return (
+            None, None, None, None, None, None, None,
+            f"VRM diagnostics lookup failed: HTTP {diagnostics_resp.status_code}",
+        )
+
+    diagnostics_records = diagnostics_resp.json().get("records") or []
+    battery_soc_percent = None
+    for record in diagnostics_records:
+        if record.get("description") == "Battery SOC":
+            match = re.match(r"\s*(\d+(?:\.\d+)?)\s*%", str(record.get("formattedValue") or ""))
+            if match:
+                battery_soc_percent = float(match.group(1))
+            break
+    # Not fatal: some architectures (checked live — a Hub-1 system with a
+    # 48V/Cerbo GX combo) report battery voltage/current but no percentage
+    # SOC at all. Losing SOC shouldn't also lose the AC-power read below,
+    # which doesn't depend on it.
+    soc_error = None
+    if battery_soc_percent is None:
+        soc_error = f"VRM diagnostics for {installation_name or unit_key} had no Battery SOC reading"
+
+    ac_power_status, ac_power_detail, ac_power_confidence = _ac_power_status_from_diagnostics(diagnostics_records)
+    # Only fall back to the solar-ceiling inference when the direct reading
+    # couldn't give a real answer — it only ever adds evidence on top of
+    # what's already known, never overrides a confident direct reading.
+    if ac_power_status in ("no_charger_hardware", "uncertain"):
+        inferred_status, inferred_detail, inferred_confidence = _vrm_pv_ceiling_and_recent_spike(
+            site_id, victron_token
+        )
+        if inferred_status:
+            ac_power_status = inferred_status
+            ac_power_confidence = inferred_confidence
+            ac_power_detail = (
+                inferred_detail + f" (direct charger reading: {ac_power_detail})"
+                if ac_power_detail else inferred_detail
+            )
+        elif inferred_detail:
+            ac_power_detail = (ac_power_detail + " — " if ac_power_detail else "") + inferred_detail
+
+    ac_power_labels = {
+        "present": "plugged in",
+        "not_detected": "not plugged in",
+        "uncertain": "AC power status uncertain",
+        "no_charger_hardware": "no AC charger on this trailer",
+    }
+    ac_power_label = ac_power_labels.get(ac_power_status, ac_power_status)
+    return (
+        installation_name, battery_soc_percent, soc_error,
+        ac_power_status, ac_power_label, ac_power_detail, ac_power_confidence,
+        None,
+    )
+def unit_power_status(unit, subject=""):
+    """
+    Focused "is this trailer plugged into AC/shore power" check — the
+    Diagnostics-menu answer to a question Battery Outlook could only
+    answer as a side effect of its weather correlation, buried under
+    Weather where nobody would look for it. No forecast call, and SOC is
+    informational rather than required. Returns (info, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+    subject_text = str(subject or "").strip()
+
+    (
+        installation_name, battery_soc_percent, soc_error,
+        ac_power_status, ac_power_label, ac_power_detail, ac_power_confidence,
+        error,
+    ) = _vrm_power_snapshot(unit_key, subject_text)
+    if error:
+        return None, error
+
+    status = {
+        "present": "ok",
+        "no_charger_hardware": "ok",
+        "uncertain": "warn",
+        "not_detected": "fail",
+    }.get(ac_power_status, "ok")
+
+    soc_text = f"{battery_soc_percent:g}%" if battery_soc_percent is not None else "unavailable"
+    confidence_text = f" ({ac_power_confidence}% likely)" if ac_power_confidence is not None else ""
+    summary = f"{unit_key} ({installation_name}) — {ac_power_label}{confidence_text} — battery {soc_text}"
+
+    return {
+        "unit": unit_key,
+        "installation_name": installation_name,
+        "battery_soc_percent": battery_soc_percent,
+        "soc_error": soc_error,
+        "ac_power_status": ac_power_status,
+        "ac_power_label": ac_power_label,
+        "ac_power_detail": ac_power_detail,
+        "ac_power_confidence": ac_power_confidence,
+        "status": status,
+        "summary": summary,
+    }, None
 def unit_battery_weather_outlook(unit, subject=""):
     """
     Correlates a trailer's Victron VRM battery SOC with the multi-day cloud
@@ -597,54 +740,13 @@ def unit_battery_weather_outlook(unit, subject=""):
         return None, f"Invalid unit: {unit}"
     subject_text = str(subject or "").strip()
 
-    id_user, victron_token, cred_error = _vrm_credentials()
-    if cred_error:
-        return None, cred_error
-    site_id, installation_name, site_error = _resolve_vrm_site(unit_key, subject_text, id_user, victron_token)
-    if site_error:
-        return None, site_error
-
-    try:
-        diagnostics_resp = requests.get(
-            f"https://vrmapi.victronenergy.com/v2/installations/{site_id}/diagnostics",
-            headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        return None, f"VRM diagnostics lookup failed: {exc}"
-    if diagnostics_resp.status_code != 200:
-        return None, f"VRM diagnostics lookup failed: HTTP {diagnostics_resp.status_code}"
-
-    diagnostics_records = diagnostics_resp.json().get("records") or []
-    battery_soc_percent = None
-    for record in diagnostics_records:
-        if record.get("description") == "Battery SOC":
-            match = re.match(r"\s*(\d+(?:\.\d+)?)\s*%", str(record.get("formattedValue") or ""))
-            if match:
-                battery_soc_percent = float(match.group(1))
-            break
-    # Not fatal: some architectures (checked live — a Hub-1 system with a
-    # 48V/Cerbo GX combo) report battery voltage/current but no percentage
-    # SOC at all. Losing SOC shouldn't also lose the AC-power read and
-    # weather correlation below, which don't depend on it.
-    soc_error = None
-    if battery_soc_percent is None:
-        soc_error = f"VRM diagnostics for {installation_name or unit_key} had no Battery SOC reading"
-
-    ac_power_status, ac_power_detail = _ac_power_status_from_diagnostics(diagnostics_records)
-    # Only fall back to the solar-ceiling inference when the direct reading
-    # couldn't give a real answer — it only ever adds evidence on top of
-    # what's already known, never overrides a confident direct reading.
-    if ac_power_status in ("no_charger_hardware", "uncertain"):
-        inferred_status, inferred_detail = _vrm_pv_ceiling_and_recent_spike(site_id, victron_token)
-        if inferred_status:
-            ac_power_status = inferred_status
-            ac_power_detail = (
-                inferred_detail + f" (direct charger reading: {ac_power_detail})"
-                if ac_power_detail else inferred_detail
-            )
-        elif inferred_detail:
-            ac_power_detail = (ac_power_detail + " — " if ac_power_detail else "") + inferred_detail
+    (
+        installation_name, battery_soc_percent, soc_error,
+        ac_power_status, ac_power_label, ac_power_detail, ac_power_confidence,
+        error,
+    ) = _vrm_power_snapshot(unit_key, subject_text)
+    if error:
+        return None, error
 
     # Same coordinate resolution as get_unit_weather() (site address, else
     # trailer), duplicated rather than shared — this is an experimental
@@ -684,13 +786,6 @@ def unit_battery_weather_outlook(unit, subject=""):
         else:
             risk = "low"
 
-    ac_power_labels = {
-        "present": "plugged in",
-        "not_detected": "not plugged in",
-        "uncertain": "AC power status uncertain",
-        "no_charger_hardware": "no AC charger on this trailer",
-    }
-
     summary_parts = (
         [f"Battery SOC {battery_soc_percent:g}%"] if battery_soc_percent is not None
         else ["Battery SOC unavailable"]
@@ -699,8 +794,20 @@ def unit_battery_weather_outlook(unit, subject=""):
         summary_parts.append(f"{cloudy_days}/{total_days} cloudy day(s) ahead at {location_label}")
     if risk:
         summary_parts.append(f"risk: {risk}")
-    summary_parts.append(ac_power_labels.get(ac_power_status, ac_power_status))
+    confidence_text = f" ({ac_power_confidence}% likely)" if ac_power_confidence is not None else ""
+    summary_parts.append(ac_power_label + confidence_text)
     summary = f"{unit_key} — " + ", ".join(summary_parts)
+
+    # "not_detected" is the one that matters most operationally — it's the
+    # same condition ERP tickets get filed under as "unplugged" — so it
+    # gets the status that stays on screen until dismissed, not a fading
+    # toast (see appendDiagnosticButton's status->notify mapping).
+    status = {
+        "present": "ok",
+        "no_charger_hardware": "ok",
+        "uncertain": "warn",
+        "not_detected": "fail",
+    }.get(ac_power_status, "ok")
 
     return {
         "unit": unit_key,
@@ -714,8 +821,10 @@ def unit_battery_weather_outlook(unit, subject=""):
         "risk": risk,
         "weather_error": weather_error,
         "ac_power_status": ac_power_status,
-        "ac_power_label": ac_power_labels.get(ac_power_status, ac_power_status),
+        "ac_power_label": ac_power_label,
         "ac_power_detail": ac_power_detail,
+        "ac_power_confidence": ac_power_confidence,
+        "status": status,
         "summary": summary,
     }, None
 # One VRM attribute code per chart the UI offers. VRM's own single-letter/

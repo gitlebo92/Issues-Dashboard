@@ -2059,6 +2059,21 @@ def issues_battery_outlook(unit):
     return jsonify({"ok": True, **info})
 
 
+@app.route("/issues/power-status/<unit>", methods=["POST"])
+def issues_power_status(unit):
+    """Experimental: focused "is this trailer plugged into AC/shore power" check (read-only)."""
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.unit_power_status(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
 @app.route("/issues/battery-history/<unit>", methods=["POST"])
 def issues_battery_history(unit):
     """Experimental: VRM voltage/SOC/current/solar time-series (read-only)."""

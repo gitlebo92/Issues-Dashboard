@@ -2522,7 +2522,19 @@ def unit_context_for_ui(unit):
         has_scrypted,
         scrypted_url,
     ) = _unit_device_info(unit_key)
-    vrm_mu, vrm_url = _vrm_info_from_subject("", unit_key)
+    # No ticket here, so no subject to parse "RD####(MU####)" out of —
+    # _vrm_info_from_subject("") would fall back to searching VRM by the RD
+    # name itself, which is the wrong identifier (VRM installations are
+    # named after the trailer, not the head). Read the trailer straight off
+    # the RD's parent_component in ERP instead — same lookup
+    # resolve_attached_mu_code() already does for the battery/weather
+    # features, just with no subject to try first.
+    mu_code = resolve_attached_mu_code(unit_key, "")
+    if mu_code:
+        vrm_mu = mu_code[2:] if mu_code.upper().startswith("MU") else mu_code
+        vrm_url = f"https://vrm.victronenergy.com/installation-overview?search={mu_code.upper()}"
+    else:
+        vrm_mu, vrm_url = "", ""
     return {
         "ok": True,
         "unit": unit_key,
