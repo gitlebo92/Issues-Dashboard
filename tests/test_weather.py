@@ -363,10 +363,39 @@ class DeadPanelV2Guards(unittest.TestCase):
         self.assertIsNone(found)
         self.assertIn("day(s)", detail)
 
+    def test_healthy_unit_is_not_blocked_by_separation_when_theres_no_shortfall(self):
+        # Regression for a real bug found live (2026-09-13): guard 2 used
+        # to run BEFORE the shortfall check, so any unit whose best-ever
+        # day happened to fall inside the recent window (exactly what a
+        # genuinely healthy unit looks like — its peak keeps recurring)
+        # got "unknown" instead of "healthy". Checked against the live
+        # fleet: 149 of 249 installations were wrongly stuck at
+        # "unknown" for exactly this reason. Guard 2 now only applies
+        # once a real shortfall is already on the table.
+        now = time.time()
+        historical = [
+            (int((now - d * 86400) * 1000), w)
+            for d, w in ((1, 1200), (2, 1190), (3, 1180))
+        ]
+        recent = [
+            (int((now - d * 86400) * 1000), w)
+            for d, w in ((1, 1200), (2, 1190), (3, 1180), (4, 1150), (5, 1140))
+        ]
+        with mock.patch.object(
+            work_tool.weather, "_vrm_pv_history_points",
+            return_value=historical + recent,
+        ):
+            found, detail, confidence, info = work_tool.detect_dead_panel(
+                "site123", "tok", recent_days=14,
+            )
+        self.assertFalse(found)
+        self.assertIn("within normal range", detail)
+
     def test_historical_peak_too_close_to_recent_window_is_insufficient_separation(self):
-        # Guard 2: the historical peak's last day and the recent window's
-        # start need real daylight between them (>= 5 days) — here the
-        # peak was seen just 2 days before the recent window starts.
+        # Guard 2: once a real shortfall is on the table, the historical
+        # peak's last day and the recent window's start still need real
+        # daylight between them (>= 5 days) — here the peak was seen just
+        # 2 days before the recent window starts.
         now = time.time()
         historical = [
             (int((now - d * 86400) * 1000), 1180) for d in (16, 15, 14)

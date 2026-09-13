@@ -8050,10 +8050,11 @@
                     return { shaded: 0 }[row.shading_status];
                 },
                 certainty: function (row) { return row.shading_confidence; },
-                // "unknown" means the check itself couldn't reach a
-                // verdict (no VRM data, insufficient history, etc.) — not
-                // a finding, so it doesn't belong in a report of findings.
-                filterFn: function (row) { return row.shading_status !== "unknown"; },
+                // Only the actual finding — a report titled "Shaded
+                // Units" listing every healthy unit too (or ones the
+                // check couldn't even reach a verdict on) just buries the
+                // ones worth a look.
+                filterFn: function (row) { return row.shading_status === "shaded"; },
             },
             deadPanel: {
                 listEl: document.getElementById("dead_panel_list"),
@@ -8068,9 +8069,10 @@
                     return { dead_panel: 0 }[row.dead_panel_status];
                 },
                 certainty: function (row) { return row.dead_panel_confidence; },
-                // Same reasoning as shadedUnits.filterFn above — "unknown"
-                // isn't a finding, it's "couldn't check."
-                filterFn: function (row) { return row.dead_panel_status !== "unknown"; },
+                // Same reasoning as shadedUnits.filterFn above — a
+                // healthy array (or one the check couldn't reach a
+                // verdict on) isn't a finding.
+                filterFn: function (row) { return row.dead_panel_status === "dead_panel"; },
             },
             vrmFreshness: {
                 listEl: document.getElementById("vrm_freshness_list"),

@@ -1966,10 +1966,16 @@ _SERIES_PAIR_WATTS = _PANEL_NOMINAL_WATTS * 2
 #    trusted to set "expected capacity" at all (previously this only
 #    scaled confidence down, never blocked a verdict outright).
 _DEAD_PANEL_MIN_HISTORICAL_PEAK_DAYS = 3
-# 2. _DEAD_PANEL_MIN_SEPARATION_DAYS — the historical peak's last occurrence
-#    and the recent comparison window need real daylight between them, or
-#    "historical vs. recent" is just comparing overlapping noise from the
-#    same stretch of days.
+# 2. _DEAD_PANEL_MIN_SEPARATION_DAYS — ONLY checked once a shortfall is
+#    already on the table (see detect_dead_panel): the historical peak's
+#    last occurrence and the recent comparison window need real daylight
+#    between them, or the "shortfall" could just be overlapping noise from
+#    the same stretch of days. Deliberately NOT a precondition for the
+#    healthy verdict too — a healthy unit's own peak routinely recurs
+#    inside the recent window (that's what healthy looks like), and an
+#    earlier version that checked this before any shortfall existed wrongly
+#    returned "unknown" for most of the fleet's genuinely fine units
+#    (checked live, 2026-09-13: 149 of 249 installations).
 _DEAD_PANEL_MIN_SEPARATION_DAYS = 5
 # 3. _DEAD_PANEL_TRAILING_* — "recent capability" comes from the trailing
 #    week specifically, not the single best moment anywhere in the wider
@@ -2089,22 +2095,6 @@ def detect_dead_panel(site_id, victron_token, history_days=60, recent_days=14, h
             f"trust it as this trailer's real capability rather than a fluke reading"
         ), None, info
 
-    last_peak_date = max(near_peak_days)
-    recent_window_start_date = datetime.utcfromtimestamp(cutoff).date()
-    separation_days = (recent_window_start_date - last_peak_date).days
-    if separation_days < _DEAD_PANEL_MIN_SEPARATION_DAYS:
-        # DEAD_PANEL_V2 guard 2: the historical evidence and the recent
-        # comparison window overlap (or nearly do) — not enough daylight
-        # between them to call this "before vs. after," so a shortfall
-        # here could just be the SAME stretch of ordinary day-to-day
-        # variance measured against itself.
-        return None, (
-            f"This trailer's historical peak was last seen only {separation_days} day(s) before the "
-            f"recent {recent_days}d comparison window starts — need at least "
-            f"{_DEAD_PANEL_MIN_SEPARATION_DAYS} day(s) of separation for the two windows to be a fair "
-            f"before/after comparison"
-        ), None, info
-
     if not expected_capacity or expected_capacity <= _PANEL_NOMINAL_WATTS:
         # A 1-panel-inferred trailer has nothing to compare against — there
         # is no "missing panel" question when only one was ever expected.
@@ -2121,6 +2111,29 @@ def detect_dead_panel(site_id, victron_token, history_days=60, recent_days=14, h
         return False, (
             f"Recent peak {round(recent_peak)}W is within normal range of the "
             f"{expected_capacity}W expected from an inferred {inferred_panels}-panel array"
+        ), None, info
+
+    # DEAD_PANEL_V2 guard 2: only gates CONFIRMING a shortfall as a dead
+    # panel, not the healthy verdict above — a healthy unit's own peak
+    # routinely recurs inside the recent window (that's what "healthy"
+    # looks like), so requiring separation before EVERY verdict wrongly
+    # returned "unknown" for most of the fleet's genuinely fine units
+    # (checked live, 2026-09-13: 149 of 249 installations, the single
+    # biggest cause of the report showing far fewer rows than it should).
+    # Once there IS an apparent shortfall, though, the historical evidence
+    # and the recent comparison window still need real daylight between
+    # them, or the "shortfall" could just be the SAME stretch of ordinary
+    # day-to-day variance measured against itself.
+    last_peak_date = max(near_peak_days)
+    recent_window_start_date = datetime.utcfromtimestamp(cutoff).date()
+    separation_days = (recent_window_start_date - last_peak_date).days
+    if separation_days < _DEAD_PANEL_MIN_SEPARATION_DAYS:
+        return None, (
+            f"Recent peak {round(recent_peak)}W looks short of the {expected_capacity}W expected, but "
+            f"this trailer's historical peak was last seen only {separation_days} day(s) before the "
+            f"recent {recent_days}d comparison window starts — need at least "
+            f"{_DEAD_PANEL_MIN_SEPARATION_DAYS} day(s) of separation to trust the shortfall as real "
+            f"rather than the same stretch of days compared against itself"
         ), None, info
 
     # For 4+-panel (even) arrays, count the shortfall in series-PAIR units
