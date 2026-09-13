@@ -20,6 +20,11 @@ unit_history.db-wal
 unit_history.db-shm
 data/live/
 data/sandbox/
+# work_tool/locks.py falls back to a data dir next to itself when
+# WORK_TOOL_DATA_DIR isn't set (e.g. a script importing work_tool directly
+# without going through flask_endpoints.py's startup) — unit_notes.json and
+# ticket_state.json can land here instead of the usual data/live|sandbox/.
+work_tool/data/
 uploads/
 # Local operational exports (do not publish)
 false_mu.csv
