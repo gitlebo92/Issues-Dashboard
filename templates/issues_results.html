@@ -770,6 +770,23 @@
         .flap-row-stats.report-status-fail {
             color: var(--danger);
         }
+        .snapshot-task-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 4px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .snapshot-thumb {
+            width: 40px;
+            height: 40px;
+            object-fit: cover;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-strong);
+            cursor: pointer;
+            flex-shrink: 0;
+        }
         .experimental-badge {
             font-size: 10px;
             font-weight: 600;
@@ -1772,8 +1789,10 @@
                     </button>
                     <div class="list-category-options" id="reports_menu_options" role="menu" aria-label="Reports">
                         <button type="button" class="list-category-option" id="reports_menu_flap" role="menuitem" title="Fleet-wide: which units keep bouncing between healthy and unhealthy, not just which are down right now">Flap Report</button>
-                        <button type="button" class="list-category-option" id="reports_menu_unplugged" role="menuitem" title="Every currently-open 'Unit Unplugged' ticket, cross-checked live against VRM">Units Unplugged</button>
-                        <button type="button" class="list-category-option" id="reports_menu_shaded" role="menuitem" title="Every currently-open 'shaded' ticket, cross-checked live against VRM solar history">Shaded Units</button>
+                        <button type="button" class="list-category-option" id="reports_menu_unplugged" role="menuitem" title="Every VRM installation fleet-wide, checked for AC/shore power">Units Unplugged</button>
+                        <button type="button" class="list-category-option" id="reports_menu_shaded" role="menuitem" title="Every VRM installation fleet-wide, checked for a solar-power dip consistent with shading">Shaded Units</button>
+                        <button type="button" class="list-category-option" id="reports_menu_dead_panel" role="menuitem" title="Every VRM installation fleet-wide, checked for a solar ceiling shortfall consistent with a dead panel">Dead Panels</button>
+                        <button type="button" class="list-category-option" id="reports_menu_vrm_freshness" role="menuitem" title="Every VRM installation fleet-wide, by how recently it last reported">VRM Disconnected</button>
                     </div>
                 </div>
                 <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
@@ -1799,10 +1818,10 @@
                 <span class="count" id="units_unplugged_count"></span>
             </h2>
             <div class="flap-report-controls">
-                <button type="button" id="units_unplugged_refresh" class="toolbar-btn">Refresh</button>
+                <button type="button" id="units_unplugged_refresh" class="toolbar-btn">Check whole fleet now</button>
                 <span class="flap-report-db-stats" id="units_unplugged_status"></span>
             </div>
-            <ul id="units_unplugged_list"><li class="empty">Click Refresh to check every open "Unit Unplugged" ticket against VRM...</li></ul>
+            <ul id="units_unplugged_list"><li class="empty">Loading cached results...</li></ul>
             </div>
             <div class="list-section" id="shaded_units_section" data-panel="issues" hidden>
             <h2>
@@ -1810,10 +1829,36 @@
                 <span class="count" id="shaded_units_count"></span>
             </h2>
             <div class="flap-report-controls">
-                <button type="button" id="shaded_units_refresh" class="toolbar-btn">Refresh</button>
+                <button type="button" id="shaded_units_refresh" class="toolbar-btn">Check whole fleet now</button>
+                <button type="button" id="shaded_units_schedule_snapshots" class="toolbar-btn"
+                    title="For every unit below currently flagged shaded: schedule a fisheye-camera snapshot for the following day's peak-shading hour, re-confirming the dip before it fires">
+                    Schedule Snapshots for Shaded Units
+                </button>
                 <span class="flap-report-db-stats" id="shaded_units_status"></span>
             </div>
-            <ul id="shaded_units_list"><li class="empty">Click Refresh to check every open "shaded" ticket against VRM solar history...</li></ul>
+            <ul id="shaded_units_list"><li class="empty">Loading cached results...</li></ul>
+            </div>
+            <div class="list-section" id="dead_panel_section" data-panel="issues" hidden>
+            <h2>
+                Dead Panels <span class="experimental-badge">Experimental</span>
+                <span class="count" id="dead_panel_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="dead_panel_refresh" class="toolbar-btn">Check whole fleet now</button>
+                <span class="flap-report-db-stats" id="dead_panel_status"></span>
+            </div>
+            <ul id="dead_panel_list"><li class="empty">Loading cached results...</li></ul>
+            </div>
+            <div class="list-section" id="vrm_freshness_section" data-panel="issues" hidden>
+            <h2>
+                VRM Disconnected <span class="experimental-badge">Experimental</span>
+                <span class="count" id="vrm_freshness_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="vrm_freshness_refresh" class="toolbar-btn">Check whole fleet now</button>
+                <span class="flap-report-db-stats" id="vrm_freshness_status"></span>
+            </div>
+            <ul id="vrm_freshness_list"><li class="empty">Loading cached results...</li></ul>
             </div>
             <div class="list-section" id="power_infra_section" data-panel="issues" hidden>
             <h2>
@@ -6622,6 +6667,50 @@
             });
             diagMenu.appendChild(shadingStatusBtn);
 
+            // Schedules a fisheye-camera photo of the panels for the
+            // FOLLOWING day's peak-shading hour — never fires same-day,
+            // and re-confirms the dip is actually happening (see
+            // work_tool.verify_shading_dip_now) right before it does,
+            // retrying up to a few days before giving up. Requires
+            // shading to be actively detected right now (runs the check
+            // fresh); see shading_snapshots.py for the whole task model.
+            const scheduleSnapshotBtn = document.createElement("button");
+            scheduleSnapshotBtn.type = "button";
+            scheduleSnapshotBtn.className = "action-btn";
+            scheduleSnapshotBtn.textContent = "Schedule Shading Snapshot";
+            scheduleSnapshotBtn.title = "If shading is currently detected: schedules a fisheye-camera photo for the following day's peak-shading hour";
+            scheduleSnapshotBtn.addEventListener("click", function () {
+                scheduleSnapshotBtn.disabled = true;
+                scheduleSnapshotBtn.textContent = "Scheduling...";
+                statusEl.textContent = "Scheduling shading snapshot for " + entry.unit + "...";
+                const subjectForLookup = entry.ticketSubject || entry.subject || "";
+                scheduleShadingSnapshot(entry.unit, subjectForLookup)
+                    .then(function (data) {
+                        const when = data.next_attempt_at
+                            ? new Date(data.next_attempt_at * 1000).toLocaleString()
+                            : "an upcoming pass";
+                        const message = data.created
+                            ? "Snapshot scheduled for " + entry.unit + " — next attempt " + when
+                            : "A snapshot task for " + entry.unit + " was already pending — next attempt " + when;
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notify(message, "success");
+                    })
+                    .catch(function (error) {
+                        const message = "Schedule Shading Snapshot failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                        notifyError(message);
+                    })
+                    .finally(function () {
+                        scheduleSnapshotBtn.disabled = false;
+                        scheduleSnapshotBtn.textContent = "Schedule Shading Snapshot";
+                    });
+            });
+            diagMenu.appendChild(scheduleSnapshotBtn);
+
             const graphsMenu = appendCommandSubmenu(diagMenu, "Graphs");
 
             const batteryGraphsBtn = document.createElement("button");
@@ -7653,42 +7742,24 @@
             flapReportRefreshBtn.addEventListener("click", loadFlapReport);
         }
 
-        // ---- Units Unplugged / Shaded Units reports (experimental) -----------
-        // Both are ticket-driven, not fleet-wide scans: VRM only gets called
-        // for units that currently have a matching OPEN ticket already
-        // rendered on this page (issueSubtype "Unit Unplugged" / "shaded"),
-        // reusing entries already sitting in commandMenuEntries — the same
-        // small set the Commands-menu plug/shading glyphs would check if you
-        // opened each ticket by hand, just gathered into one list. This is
-        // deliberately NOT a check of every VRM installation in the fleet:
-        // that would mean one or two live VRM calls per SITE (hundreds), for
-        // a button click, against an API this whole session has been careful
-        // to keep to a few calls per check. A ticket already marked with the
-        // subtype is the bounded, already-known-relevant set worth spending
-        // that cost on.
-        function ticketEntriesWithSubtype(matchSubtype) {
-            const wanted = String(matchSubtype || "").toLowerCase();
-            const seen = new Set();
-            const results = [];
-            document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
-                const entry = commandMenuEntries.get(commandMenu);
-                if (!entry || !entry.unit) {
-                    return;
-                }
-                if (String(entry.issueSubtype || "").toLowerCase() !== wanted) {
-                    return;
-                }
-                const key = entry.unit.toUpperCase();
-                if (seen.has(key)) {
-                    return;
-                }
-                seen.add(key);
-                results.push(entry);
-            });
-            return results;
-        }
-
-        function renderTicketCheckRow(entry, data, error) {
+        // ---- Fleet-wide VRM reports (Units Unplugged / Shaded Units / Dead
+        // Panels / VRM Disconnected) — all experimental ------------------------
+        // Every VRM installation the fleet has, not just units with a
+        // matching open ticket — the earlier ticket-scoped version of the
+        // first two reports missed anything without a currently-open
+        // ticket of that exact subtype. A live full-fleet check is
+        // genuinely expensive (a real VRM call per site, run concurrently,
+        // takes on the order of a minute) — see fleet_power_status /
+        // fleet_shading_status / fleet_dead_panel_status /
+        // fleet_vrm_freshness_status in weather.py — so these poll on a
+        // schedule server-side (flask_endpoints.py) into a plain in-memory
+        // cache, not a growing database: "keep it up to date without
+        // refreshing too often, without taking up space" was the ask, and
+        // a dict refreshed on a timer costs zero disk. Opening a report
+        // reads that cache instantly; "Check whole fleet now" forces a
+        // fresh live pass when you want one, same live/cached split
+        // Power & Infra Alerts already uses for the same reason.
+        function renderFleetReportRow(row) {
             const li = document.createElement("li");
             li.className = "ticket-row ticket-row-no-rws";
 
@@ -7697,12 +7768,21 @@
             const openBtn = document.createElement("button");
             openBtn.type = "button";
             openBtn.className = "action-btn";
-            openBtn.textContent = entry.unit;
-            openBtn.title = "Open Commands for " + entry.unit + " in Unit tools";
+            // A bare MU row is a trailer, not a full unit — show and open
+            // its ERP-linked RD/FD head instead when known, the same
+            // RD####(MU####) shape every ticket subject already uses
+            // (not "MU8083", which is what a trailer with no head context
+            // looks like, and reads as if the trailer WERE the unit).
+            const headUnits = row.head_units || [];
+            const openTarget = headUnits.length ? headUnits[0] : row.unit;
+            openBtn.textContent = headUnits.length ? (headUnits[0] + "(" + row.unit + ")") : row.unit;
+            openBtn.title = openTarget === row.unit
+                ? "Open Commands for " + row.unit + " in Unit tools"
+                : "Open Commands for " + openTarget + " (" + row.unit + "'s head unit, via ERP) in Unit tools";
             openBtn.addEventListener("click", function () {
-                listSearchEl.value = entry.unit;
+                listSearchEl.value = openTarget;
                 applyListFilters();
-                loadUnitTools(entry.unit, true);
+                loadUnitTools(openTarget, true);
                 const toolsSection = document.getElementById("unit_tools_section");
                 if (toolsSection && toolsSection.scrollIntoView) {
                     toolsSection.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7713,125 +7793,347 @@
 
             const body = document.createElement("div");
             body.className = "ticket-row-body";
-            const ticketLine = document.createElement("span");
-            ticketLine.className = "flap-row-stats";
-            ticketLine.textContent = entry.ticketSubject || entry.subject || "(no ticket subject)";
-            body.appendChild(ticketLine);
-            body.appendChild(document.createElement("br"));
-            const resultLine = document.createElement("span");
-            resultLine.className = "flap-row-stats report-status-" + (error ? "fail" : (data.status || "warn"));
-            resultLine.textContent = error ? ("Check failed: " + error) : data.summary;
-            body.appendChild(resultLine);
+            const line = document.createElement("span");
+            line.className = "flap-row-stats report-status-" + (row.error ? "fail" : (row.status || "warn"));
+            // row.summary already leads with RD####(MU####) when a head is
+            // known (see fleet_power_status et al.) — no separate "Head
+            // unit" line needed, that would just repeat it.
+            line.textContent = row.error ? ("Check failed: " + row.error) : (row.summary || row.unit);
+            body.appendChild(line);
+
+            // Shaded Units rows only (row.shading_status is only ever set
+            // by _shading_status_for_site) — the snapshot task for this
+            // unit, if one exists, or a one-off Schedule button if the
+            // unit is currently flagged shaded and doesn't have one yet.
+            if (row.shading_status !== undefined) {
+                const snapshotLine = document.createElement("div");
+                snapshotLine.className = "snapshot-task-line";
+                const task = row.snapshot_task;
+                if (task) {
+                    const statusText = document.createElement("span");
+                    statusText.textContent = snapshotTaskStatusText(task);
+                    snapshotLine.appendChild(statusText);
+                    if (task.has_image) {
+                        const thumb = document.createElement("img");
+                        thumb.className = "snapshot-thumb";
+                        thumb.src = "/issues/shading-snapshot-image/" + task.id;
+                        thumb.title = "Click to view full size";
+                        thumb.addEventListener("click", function () {
+                            window.open("/issues/shading-snapshot-image/" + task.id, "_blank");
+                        });
+                        snapshotLine.appendChild(thumb);
+                    }
+                } else if (row.shading_status === "shaded") {
+                    const scheduleBtn = document.createElement("button");
+                    scheduleBtn.type = "button";
+                    scheduleBtn.className = "action-btn";
+                    scheduleBtn.textContent = "Schedule Snapshot";
+                    scheduleBtn.title = "Schedule a fisheye-camera photo for the following day's peak-shading hour";
+                    scheduleBtn.addEventListener("click", function () {
+                        scheduleBtn.disabled = true;
+                        scheduleBtn.textContent = "Scheduling...";
+                        scheduleShadingSnapshot(row.unit, "")
+                            .then(function (data) {
+                                notify(
+                                    "Snapshot scheduled for " + row.unit + " — next attempt "
+                                    + (data.next_attempt_at ? new Date(data.next_attempt_at * 1000).toLocaleString() : "soon"),
+                                    "success"
+                                );
+                                loadFleetReportCached(FLEET_REPORT_CONFIGS.shadedUnits);
+                            })
+                            .catch(function (error) {
+                                notifyError("Schedule Snapshot failed: " + (error.message || error));
+                                scheduleBtn.disabled = false;
+                                scheduleBtn.textContent = "Schedule Snapshot";
+                            });
+                    });
+                    snapshotLine.appendChild(scheduleBtn);
+                }
+                body.appendChild(snapshotLine);
+            }
+
             li.appendChild(body);
             return li;
         }
 
-        function loadTicketSubtypeReport(subtype, endpoint, listEl, countEl, statusEl, emptyText) {
-            listEl.innerHTML = "";
-            const entries = ticketEntriesWithSubtype(subtype);
-            if (!entries.length) {
-                const emptyEl = document.createElement("li");
-                emptyEl.className = "empty";
-                emptyEl.textContent = emptyText;
-                listEl.appendChild(emptyEl);
-                countEl.textContent = "(0)";
-                statusEl.textContent = "";
-                return;
+        function snapshotTaskStatusText(task) {
+            const nextWhen = task.next_attempt_at ? new Date(task.next_attempt_at * 1000).toLocaleString() : "soon";
+            const capturedWhen = task.captured_at ? new Date(task.captured_at * 1000).toLocaleString() : "";
+            if (task.status === "pending") {
+                return "Snapshot scheduled — attempt " + (task.attempts_used + 1) + "/" + task.attempts_total
+                    + " on " + nextWhen;
             }
-            const loadingEl = document.createElement("li");
-            loadingEl.className = "empty";
-            loadingEl.textContent = "Checking " + entries.length + " ticket(s) against VRM...";
-            listEl.appendChild(loadingEl);
-            statusEl.textContent = "";
-            Promise.all(entries.map(function (entry) {
-                const subject = entry.ticketSubject || entry.subject || "";
-                return fetch(endpoint + encodeURIComponent(entry.unit), {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ subject: subject }),
-                })
-                    .then(function (response) { return response.json(); })
-                    .then(function (data) {
-                        return { entry: entry, data: data, error: (!data || !data.ok) ? (data && data.error) || "unknown error" : null };
-                    })
-                    .catch(function (err) {
-                        return { entry: entry, data: null, error: err.message || String(err) };
-                    });
-            })).then(function (results) {
-                listEl.innerHTML = "";
-                results.forEach(function (r) {
-                    listEl.appendChild(renderTicketCheckRow(r.entry, r.data, r.error));
+            if (task.status === "captured") {
+                return "Snapshot captured " + capturedWhen;
+            }
+            if (task.status === "exhausted") {
+                return "Snapshot not captured after " + task.attempts_total + " attempt(s) — "
+                    + (task.last_note || "dip never reconfirmed");
+            }
+            if (task.status === "cancelled") {
+                return "Snapshot task cancelled";
+            }
+            return "Snapshot task: " + task.status;
+        }
+
+        function scheduleShadingSnapshot(unit, subject, cameraTarget) {
+            return fetch("/issues/schedule-shading-snapshot/" + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ subject: subject || "", camera_target: cameraTarget || "fisheye" }),
+            }).then(function (response) {
+                return response.json().then(function (data) {
+                    if (!response.ok || !data.ok) {
+                        throw new Error(data.error || ("HTTP " + response.status));
+                    }
+                    return data;
                 });
-                countEl.textContent = "(" + results.length + ")";
-                const failed = results.filter(function (r) { return r.error; }).length;
-                statusEl.textContent = "Checked " + results.length + " ticket(s)"
-                    + (failed ? ", " + failed + " check(s) failed" : "");
             });
         }
 
-        const unitsUnpluggedSection = document.getElementById("units_unplugged_section");
-        const unitsUnpluggedListEl = document.getElementById("units_unplugged_list");
-        const unitsUnpluggedCountEl = document.getElementById("units_unplugged_count");
-        const unitsUnpluggedStatusEl = document.getElementById("units_unplugged_status");
-        const unitsUnpluggedRefreshBtn = document.getElementById("units_unplugged_refresh");
-
-        // Always re-checks on open (no "loaded once" cache like Flap Report
-        // has) — plug/shading state is exactly the kind of thing that
-        // changes between one look and the next, and the underlying ticket
-        // set can too.
-        function loadUnitsUnpluggedReport() {
-            loadTicketSubtypeReport(
-                "Unit Unplugged", "/issues/power-status/",
-                unitsUnpluggedListEl, unitsUnpluggedCountEl, unitsUnpluggedStatusEl,
-                "No currently-open \"Unit Unplugged\" tickets on this page right now."
-            );
+        const scheduleSnapshotsBulkBtn = document.getElementById("shaded_units_schedule_snapshots");
+        if (scheduleSnapshotsBulkBtn) {
+            scheduleSnapshotsBulkBtn.addEventListener("click", function () {
+                scheduleSnapshotsBulkBtn.disabled = true;
+                scheduleSnapshotsBulkBtn.textContent = "Scheduling...";
+                fetch("/issues/schedule-shading-snapshot-bulk", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({}),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const message = "Scheduled " + data.scheduled.length + " new snapshot task(s)"
+                            + (data.already_pending.length ? ", " + data.already_pending.length + " already pending" : "")
+                            + (data.skipped.length ? ", " + data.skipped.length + " skipped (no current shading data)" : "")
+                            + ".";
+                        consoleLines.push(message);
+                        data.scheduled.forEach(function (item) {
+                            consoleLines.push(
+                                "  " + item.unit + " — next attempt "
+                                + new Date(item.next_attempt_at * 1000).toLocaleString()
+                            );
+                        });
+                        renderConsole(true);
+                        notify(message, "success");
+                        loadFleetReportCached(FLEET_REPORT_CONFIGS.shadedUnits);
+                    })
+                    .catch(function (error) {
+                        notifyError("Schedule Snapshots for Shaded Units failed: " + (error.message || error));
+                    })
+                    .finally(function () {
+                        scheduleSnapshotsBulkBtn.disabled = false;
+                        scheduleSnapshotsBulkBtn.textContent = "Schedule Snapshots for Shaded Units";
+                    });
+            });
         }
 
-        function toggleUnitsUnpluggedSection() {
-            if (!unitsUnpluggedSection) {
+        // sortRank: lower sorts first — puts the actionable finding
+        // (unplugged / shaded / dead panel / disconnected) at the top of
+        // a list that can run into the hundreds, rather than alphabetical.
+        // certainty: within the same finding, highest-confidence rows
+        // sort first — the ones most worth a tech's time before the ones
+        // that are more of a "worth a look."
+        const FLEET_REPORT_CONFIGS = {
+            unitsUnplugged: {
+                listEl: document.getElementById("units_unplugged_list"),
+                countEl: document.getElementById("units_unplugged_count"),
+                statusEl: document.getElementById("units_unplugged_status"),
+                sectionEl: document.getElementById("units_unplugged_section"),
+                refreshBtn: document.getElementById("units_unplugged_refresh"),
+                liveEndpoint: "/issues/fleet-power-status",
+                cachedEndpoint: "/issues/fleet-power-status/cached",
+                emptyText: "No cached results yet — click \"Check whole fleet now.\"",
+                sortRank: function (row) {
+                    return { not_detected: 0, uncertain: 1, unknown: 2 }[row.ac_power_status];
+                },
+                certainty: function (row) { return row.ac_power_confidence; },
+            },
+            shadedUnits: {
+                listEl: document.getElementById("shaded_units_list"),
+                countEl: document.getElementById("shaded_units_count"),
+                statusEl: document.getElementById("shaded_units_status"),
+                sectionEl: document.getElementById("shaded_units_section"),
+                refreshBtn: document.getElementById("shaded_units_refresh"),
+                liveEndpoint: "/issues/fleet-shading-status",
+                cachedEndpoint: "/issues/fleet-shading-status/cached",
+                emptyText: "No cached results yet — click \"Check whole fleet now.\"",
+                sortRank: function (row) {
+                    return { shaded: 0, unknown: 1 }[row.shading_status];
+                },
+                certainty: function (row) { return row.shading_confidence; },
+            },
+            deadPanel: {
+                listEl: document.getElementById("dead_panel_list"),
+                countEl: document.getElementById("dead_panel_count"),
+                statusEl: document.getElementById("dead_panel_status"),
+                sectionEl: document.getElementById("dead_panel_section"),
+                refreshBtn: document.getElementById("dead_panel_refresh"),
+                liveEndpoint: "/issues/fleet-dead-panel-status",
+                cachedEndpoint: "/issues/fleet-dead-panel-status/cached",
+                emptyText: "No cached results yet — click \"Check whole fleet now.\"",
+                sortRank: function (row) {
+                    return { dead_panel: 0, unknown: 1 }[row.dead_panel_status];
+                },
+                certainty: function (row) { return row.dead_panel_confidence; },
+            },
+            vrmFreshness: {
+                listEl: document.getElementById("vrm_freshness_list"),
+                countEl: document.getElementById("vrm_freshness_count"),
+                statusEl: document.getElementById("vrm_freshness_status"),
+                sectionEl: document.getElementById("vrm_freshness_section"),
+                refreshBtn: document.getElementById("vrm_freshness_refresh"),
+                liveEndpoint: "/issues/fleet-vrm-freshness",
+                cachedEndpoint: "/issues/fleet-vrm-freshness/cached",
+                emptyText: "No cached results yet — click \"Check whole fleet now.\"",
+                sortRank: function (row) {
+                    return { disconnected: 0, stale: 1, unknown: 2, aging: 3 }[row.vrm_freshness];
+                },
+                // No confidence score here (freshness is elapsed time, not
+                // a probabilistic read) — use how overdue the site is as
+                // the certainty proxy: longer silence sorts first within
+                // the same tier.
+                certainty: function (row) { return row.vrm_last_seen_seconds_ago; },
+            },
+        };
+        const fleetReportLoadedOnce = {};
+
+        function renderFleetReportRows(config, data) {
+            const rows = (data.rows || []).slice();
+            rows.sort(function (a, b) {
+                const ra = config.sortRank(a);
+                const rb = config.sortRank(b);
+                const aRanked = ra !== undefined;
+                const bRanked = rb !== undefined;
+                if (aRanked && bRanked && ra !== rb) {
+                    return ra - rb;
+                }
+                if (aRanked !== bRanked) {
+                    return aRanked ? -1 : 1;
+                }
+                // Same finding (or both unranked) — highest certainty first.
+                const ca = config.certainty ? config.certainty(a) : undefined;
+                const cb = config.certainty ? config.certainty(b) : undefined;
+                const aHasC = typeof ca === "number";
+                const bHasC = typeof cb === "number";
+                if (aHasC && bHasC && ca !== cb) {
+                    return cb - ca;
+                }
+                if (aHasC !== bHasC) {
+                    return aHasC ? -1 : 1;
+                }
+                return String(a.unit).localeCompare(String(b.unit));
+            });
+            config.listEl.innerHTML = "";
+            if (!rows.length) {
+                const emptyEl = document.createElement("li");
+                emptyEl.className = "empty";
+                emptyEl.textContent = config.emptyText;
+                config.listEl.appendChild(emptyEl);
+            } else {
+                rows.forEach(function (row) {
+                    config.listEl.appendChild(renderFleetReportRow(row));
+                });
+            }
+            config.countEl.textContent = "(" + rows.length + ")";
+            if (data.fetched_at) {
+                const ageSeconds = Date.now() / 1000 - data.fetched_at;
+                config.statusEl.textContent = "As of " + formatAgeShort(ageSeconds) + " ago"
+                    + (data.error ? " — last poll failed: " + data.error : "");
+            } else {
+                config.statusEl.textContent = data.error ? ("Last poll failed: " + data.error) : "";
+            }
+        }
+
+        function loadFleetReportCached(config) {
+            config.listEl.innerHTML = "";
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Loading cached results...";
+            config.listEl.appendChild(loadingEl);
+            fetch(config.cachedEndpoint)
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (!data || !data.ok) {
+                        throw new Error((data && data.error) || "unknown error");
+                    }
+                    renderFleetReportRows(config, data);
+                })
+                .catch(function (error) {
+                    config.listEl.innerHTML = "";
+                    const errEl = document.createElement("li");
+                    errEl.className = "empty";
+                    errEl.textContent = "Failed to load cached results: " + (error.message || error);
+                    config.listEl.appendChild(errEl);
+                });
+        }
+
+        function loadFleetReportLive(config) {
+            config.refreshBtn.disabled = true;
+            const originalLabel = config.refreshBtn.textContent;
+            config.refreshBtn.textContent = "Checking whole fleet...";
+            config.listEl.innerHTML = "";
+            const loadingEl = document.createElement("li");
+            loadingEl.className = "empty";
+            loadingEl.textContent = "Checking every VRM installation fleet-wide — this takes about a minute...";
+            config.listEl.appendChild(loadingEl);
+            fetch(config.liveEndpoint)
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        if (!response.ok || !data.ok) {
+                            throw new Error((data && data.error) || ("HTTP " + response.status));
+                        }
+                        return data;
+                    });
+                })
+                .then(function (data) {
+                    renderFleetReportRows(config, data);
+                })
+                .catch(function (error) {
+                    config.listEl.innerHTML = "";
+                    const errEl = document.createElement("li");
+                    errEl.className = "empty";
+                    errEl.textContent = "Fleet check failed: " + (error.message || error);
+                    config.listEl.appendChild(errEl);
+                })
+                .finally(function () {
+                    config.refreshBtn.disabled = false;
+                    config.refreshBtn.textContent = originalLabel;
+                });
+        }
+
+        function toggleFleetReportSection(key) {
+            const config = FLEET_REPORT_CONFIGS[key];
+            if (!config || !config.sectionEl) {
                 return;
             }
-            unitsUnpluggedSection.hidden = !unitsUnpluggedSection.hidden;
-            if (!unitsUnpluggedSection.hidden) {
-                loadUnitsUnpluggedReport();
-                if (unitsUnpluggedSection.scrollIntoView) {
-                    unitsUnpluggedSection.scrollIntoView({ behavior: "smooth", block: "start" });
+            config.sectionEl.hidden = !config.sectionEl.hidden;
+            if (!config.sectionEl.hidden) {
+                if (!fleetReportLoadedOnce[key]) {
+                    fleetReportLoadedOnce[key] = true;
+                    loadFleetReportCached(config);
+                }
+                if (config.sectionEl.scrollIntoView) {
+                    config.sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
                 }
             }
         }
-        if (unitsUnpluggedRefreshBtn) {
-            unitsUnpluggedRefreshBtn.addEventListener("click", loadUnitsUnpluggedReport);
-        }
 
-        const shadedUnitsSection = document.getElementById("shaded_units_section");
-        const shadedUnitsListEl = document.getElementById("shaded_units_list");
-        const shadedUnitsCountEl = document.getElementById("shaded_units_count");
-        const shadedUnitsStatusEl = document.getElementById("shaded_units_status");
-        const shadedUnitsRefreshBtn = document.getElementById("shaded_units_refresh");
-
-        function loadShadedUnitsReport() {
-            loadTicketSubtypeReport(
-                "shaded", "/issues/shading-status/",
-                shadedUnitsListEl, shadedUnitsCountEl, shadedUnitsStatusEl,
-                "No currently-open \"shaded\" tickets on this page right now."
-            );
-        }
-
-        function toggleShadedUnitsSection() {
-            if (!shadedUnitsSection) {
-                return;
+        Object.keys(FLEET_REPORT_CONFIGS).forEach(function (key) {
+            const config = FLEET_REPORT_CONFIGS[key];
+            if (config.refreshBtn) {
+                config.refreshBtn.addEventListener("click", function () {
+                    loadFleetReportLive(config);
+                });
             }
-            shadedUnitsSection.hidden = !shadedUnitsSection.hidden;
-            if (!shadedUnitsSection.hidden) {
-                loadShadedUnitsReport();
-                if (shadedUnitsSection.scrollIntoView) {
-                    shadedUnitsSection.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-            }
-        }
-        if (shadedUnitsRefreshBtn) {
-            shadedUnitsRefreshBtn.addEventListener("click", loadShadedUnitsReport);
-        }
+        });
 
         // ---- Reports menu (Flap Report / Units Unplugged / Shaded Units) -----
         const reportsMenuWrap = document.getElementById("reports_menu_wrap");
@@ -7866,12 +8168,22 @@
             });
             document.getElementById("reports_menu_unplugged").addEventListener("click", function (event) {
                 event.stopPropagation();
-                toggleUnitsUnpluggedSection();
+                toggleFleetReportSection("unitsUnplugged");
                 closeReportsMenu();
             });
             document.getElementById("reports_menu_shaded").addEventListener("click", function (event) {
                 event.stopPropagation();
-                toggleShadedUnitsSection();
+                toggleFleetReportSection("shadedUnits");
+                closeReportsMenu();
+            });
+            document.getElementById("reports_menu_dead_panel").addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleFleetReportSection("deadPanel");
+                closeReportsMenu();
+            });
+            document.getElementById("reports_menu_vrm_freshness").addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleFleetReportSection("vrmFreshness");
                 closeReportsMenu();
             });
             document.addEventListener("click", function (event) {

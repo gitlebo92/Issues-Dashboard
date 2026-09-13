@@ -33,6 +33,7 @@ from urllib.parse import quote
 import urllib3
 
 from ._core import (  # noqa: F401  (re-exported dependencies)
+    _erp_heads_for_mu_trailers,
     _fetch_erp_site_doc_raw,
     _fetch_mu_component_doc,
     _normalize_netsheet_unit,
@@ -544,50 +545,116 @@ def _vrm_pv_ceiling_by_hour(pv_points, hour_tolerance=1):
     return ceiling_by_hour, flat_ceiling
 
 
-# How far below its own hour-of-day ceiling a reading has to fall before it
-# counts as a shading dip rather than ordinary cloud-driven variance — see
-# detect_solar_shading. Checked live against a real "shaded" ERP ticket
-# (RD3421/MU8064, ISS-2026-10642, opened 2026-08-26): the day the ticket was
-# filed, several daylight hours read 6-37% of what that same trailer
-# produced in those same hours on later (unshaded) days — comfortably past
-# this cutoff — while the trailer's healthy days never dropped this far
-# below their own recent ceiling.
+def _vrm_pv_typical_by_hour(pv_points, hour_tolerance=1):
+    """
+    typical_by_hour from a list of (timestamp_ms, watts) points — the
+    MEDIAN of non-zero PVP readings seen in each UTC hour, +/-hour_tolerance.
+
+    Deliberately the median, not the max (_vrm_pv_ceiling_by_hour above,
+    which the AC-power spike check correctly wants as a strict upper
+    bound). Checked live (2026-09-13) running a fleet-wide shading pass:
+    ~58% of the fleet came back "shaded," almost entirely at dawn/dusk
+    hours. A max-based ceiling at a twilight hour is set by whichever
+    single day in the window happened to have the earliest sunrise/latest
+    sunset — one MU1002 hour had a 117W max ceiling made of one outlier
+    reading, while the other 20 days in the same window never broke 63W in
+    that hour. Every normal day then reads as "way below ceiling" by
+    comparison — the false positive was in the ceiling, not the shading
+    check's logic. The median is robust to that one-off day and reflects
+    what the hour actually, typically looks like.
+    """
+    from statistics import median
+    by_hour_values = {}
+    for t, value in pv_points:
+        if value <= 0:
+            continue
+        hour = datetime.utcfromtimestamp(t / 1000).hour
+        for offset in range(-hour_tolerance, hour_tolerance + 1):
+            bucket = (hour + offset) % 24
+            by_hour_values.setdefault(bucket, []).append(value)
+    return {hour: median(values) for hour, values in by_hour_values.items()}
+
+
+# How far below its own hour-of-day TYPICAL output (median, not max — see
+# _vrm_pv_typical_by_hour) a reading has to fall before it counts as a
+# shading dip rather than ordinary cloud-driven variance. Checked live
+# against a real "shaded" ERP ticket (RD3421/MU8064, ISS-2026-10642, opened
+# 2026-08-26): the day the ticket was filed, several daylight hours read
+# 6-37% of what that same trailer typically produced in those same hours on
+# other days — comfortably past this cutoff.
 _SHADE_DEFICIT_RATIO = 0.35
-# Only judge hours this trailer's own history shows are genuinely
-# productive — a low ratio against a 20W dawn/dusk ceiling is meaningless
-# noise, not shading. 100W is comfortably above dawn/dusk fringe readings
-# (checked live: this trailer's dawn hour ceiling was 66W, not flagged at
-# this cutoff) and well below a real midday ceiling (200-460W on the same
-# unit).
-_SHADE_MIN_PRODUCTIVE_CEILING_WATTS = 100
+# Only judge hours this trailer's own history shows are genuinely, TYPICALLY
+# productive — a low ratio against a near-zero median is meaningless noise,
+# not shading. Raised from an earlier max-based 100W after the false-positive
+# finding above: a median-based baseline runs lower than a max-based one for
+# the same hour by construction, so this needed to move too. 150W sits above
+# every dawn/dusk median observed live (all under 110W) and comfortably below
+# a real midday median (200W+ on the same units).
+_SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS = 150
 # A single noisy sample shouldn't read as "shaded" — require the deficit to
 # hold for at least this many consecutive readings.
 _SHADE_MIN_CONSECUTIVE_POINTS = 2
+# SHADED_V2 (2026-09-13 rule-improvement pass): moving shade (a tree branch
+# in wind, a passing cloud edge) can produce one brief non-dip reading in
+# the middle of an otherwise-real shading run — a strict "any non-dip
+# breaks the run" rule was too easily defeated by that flicker. Each real
+# dip earns exactly one grace point that tolerates the very next reading
+# even if it isn't itself a dip; a second consecutive non-dip still ends
+# the run. Deliberately NOT the looser "2 of any 4 readings" a sliding-
+# window count would give — that let a run drift forward through readings
+# nowhere near shaded once two dips happened to be anywhere in its recent
+# past (checked against this file's own fixtures: it stretched the classic
+# morning-ramp case forward through two fully-normal hours). One grace
+# point per dip stays bounded and self-corrects the moment shading
+# actually stops.
+_SHADE_FLICKER_TOLERANCE = 1
+# SHADED_V2: how much of the WHOLE ceiling_days baseline has to also read
+# as a dip at the run's worst hour before this stops looking like a new,
+# transient dip and starts looking like it's been there the entire
+# window — see detect_solar_shading's exclusion and
+# detect_persistent_obstruction (PERSISTENT_OBSTRUCTION_V1) below.
+_SHADE_PERSISTENT_EXCLUSION_DAY_FRACTION = 0.80
+# SHADED_V2: how close to its own typical a neighboring hour has to hold
+# for the deficit to count as angle-dependent (shading) rather than
+# hour-independent (more consistent with hardware — see detect_dead_panel's
+# mirror-image proportional-loss check).
+_SHADE_ANGLE_DEPENDENCE_NEIGHBOR_RATIO = 0.70
 
 
-def _find_shading_dip_run(points, ceiling_by_hour):
+def _find_shading_dip_run(points, typical_by_hour):
     """
     Pure logic half of detect_solar_shading, split out so it's testable
     without a live VRM call: given chronological (timestamp_ms, watts)
-    points and an hour -> ceiling-watts map, find the longest contiguous
-    run of points where watts fall below _SHADE_DEFICIT_RATIO of that
-    hour's ceiling, restricted to hours whose ceiling clears
-    _SHADE_MIN_PRODUCTIVE_CEILING_WATTS (skips dawn/dusk/night hours, where
-    a low ratio against a near-zero ceiling is meaningless). Returns a list
-    of (t, value, ceiling) tuples — empty if nothing qualifies.
+    points and an hour -> typical-watts map (see _vrm_pv_typical_by_hour),
+    find the longest contiguous run of points where watts fall below
+    _SHADE_DEFICIT_RATIO of that hour's typical output, restricted to hours
+    whose typical output clears _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS (skips
+    dawn/dusk/night hours, where a low ratio against a near-zero baseline is
+    meaningless). Tolerates a single non-dip reading immediately after a
+    real dip (see _SHADE_FLICKER_TOLERANCE) so one flickery recovery point
+    doesn't split an otherwise-continuous shading run in two. Returns a
+    list of (t, value, typical) tuples — empty if nothing qualifies; a
+    tolerated non-dip point is included (it's part of the shaded window),
+    but never counts as the run's OWN dip evidence on its own.
     """
     run = []
     best_run = []
+    gap_budget = 0
     for t, value in sorted(points):
         hour = datetime.utcfromtimestamp(t / 1000).hour
-        ceiling = ceiling_by_hour.get(hour, 0)
-        is_dip = ceiling >= _SHADE_MIN_PRODUCTIVE_CEILING_WATTS and value < ceiling * _SHADE_DEFICIT_RATIO
+        typical = typical_by_hour.get(hour, 0)
+        is_dip = typical >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS and value < typical * _SHADE_DEFICIT_RATIO
         if is_dip:
-            run.append((t, value, ceiling))
+            run.append((t, value, typical))
+            gap_budget = _SHADE_FLICKER_TOLERANCE
+        elif run and gap_budget > 0:
+            run.append((t, value, typical))
+            gap_budget -= 1
         else:
             if len(run) > len(best_run):
                 best_run = run
             run = []
+            gap_budget = 0
     if len(run) > len(best_run):
         best_run = run
     return best_run
@@ -624,7 +691,7 @@ def detect_solar_shading(site_id, victron_token, ceiling_days=21, recent_hours=3
     ceiling_points = _vrm_pv_history_points(site_id, victron_token, ceiling_days)
     if not ceiling_points:
         return None, "No solar-power history available to build a baseline", None, None
-    ceiling_by_hour, _flat_ceiling = _vrm_pv_ceiling_by_hour(ceiling_points, hour_tolerance)
+    typical_by_hour = _vrm_pv_typical_by_hour(ceiling_points, hour_tolerance)
 
     # _vrm_pv_history_points fetches in whole days; round up and add a day
     # of buffer so a sub-24h or non-whole-day recent_hours still gets full
@@ -638,25 +705,68 @@ def detect_solar_shading(site_id, victron_token, ceiling_days=21, recent_hours=3
     if not recent_points:
         return None, "No solar-power data in the requested recent window", None, None
 
-    best_run = _find_shading_dip_run(recent_points, ceiling_by_hour)
+    best_run = _find_shading_dip_run(recent_points, typical_by_hour)
 
     if len(best_run) < _SHADE_MIN_CONSECUTIVE_POINTS:
         return False, (
             f"No sustained solar-power deficit found in the last {recent_hours}h "
-            f"(checked against this trailer's own {ceiling_days}-day hour-of-day ceiling)"
+            f"(checked against this trailer's own {ceiling_days}-day hour-of-day typical output)"
         ), None, None
+
+    worst = min(best_run, key=lambda row: row[1] / row[2])
+    worst_t, worst_value, worst_typical = worst
+    worst_ratio = worst_value / worst_typical
+    worst_hour = datetime.utcfromtimestamp(worst_t / 1000).hour
 
     # best_run is contiguous by construction (a non-dip point resets the run),
     # so its first/last points ARE the dip's actual time window, not just a
-    # sample of hours it touched.
+    # sample of hours it touched. worst_hour_utc is the single deepest point
+    # in that window — the hour a scheduled snapshot should aim for, not
+    # just any hour the dip touched.
     window = {
         "start_ts_ms": best_run[0][0],
         "end_ts_ms": best_run[-1][0],
         "hours_utc": sorted({datetime.utcfromtimestamp(t / 1000).hour for t, _, _ in best_run}),
+        "worst_hour_utc": worst_hour,
     }
-    worst = min(best_run, key=lambda row: row[1] / row[2])
-    worst_t, worst_value, worst_ceiling = worst
-    worst_ratio = worst_value / worst_ceiling
+
+    # SHADED_V2 exclusion: if the worst hour ALSO reads as a dip on most
+    # days across the whole ceiling_days baseline (not just the recent
+    # window this run came from), it didn't just start — it's been there
+    # the whole time this function has history for. That's
+    # PERSISTENT_OBSTRUCTION_V1's territory (a fixed obstruction), not a
+    # new transient shading event, so decline rather than mislabel it.
+    #
+    # Deliberately compares against this hour's own MAX-ever reading
+    # (ceiling), not the median typical used above — a majority of days
+    # can never read below a fraction of their own MEDIAN by definition
+    # (that's what a median is), so a median-based version of this check
+    # could never actually fire above ~50%. The ceiling doesn't have that
+    # problem: a chronically-obstructed hour can sit well below its own
+    # best-ever day on 80%+ of days without contradiction.
+    ceiling_by_hour_for_exclusion, _ = _vrm_pv_ceiling_by_hour(ceiling_points, hour_tolerance)
+    worst_hour_ceiling = ceiling_by_hour_for_exclusion.get(worst_hour, worst_typical)
+    by_day_worst_hour = {}
+    for t, v in ceiling_points:
+        if datetime.utcfromtimestamp(t / 1000).hour != worst_hour:
+            continue
+        day = datetime.utcfromtimestamp(t / 1000).date()
+        by_day_worst_hour[day] = max(by_day_worst_hour.get(day, 0), v)
+    total_days_observed = len(by_day_worst_hour)
+    persistent_dip_days = sum(
+        1 for v in by_day_worst_hour.values() if v < worst_hour_ceiling * _SHADE_DEFICIT_RATIO
+    )
+    if (
+        total_days_observed
+        and persistent_dip_days / total_days_observed >= _SHADE_PERSISTENT_EXCLUSION_DAY_FRACTION
+    ):
+        return False, (
+            f"Hour {worst_hour}:00 (UTC) reads this low on {persistent_dip_days} of "
+            f"{total_days_observed} day(s) in the {ceiling_days}d baseline itself, not just the recent "
+            f"window — this predates any recent change, so it's not a new transient dip. Check for a "
+            f"persistent obstruction at that hour instead"
+        ), None, None
+
     # utcfromtimestamp, not fromtimestamp — this box's local clock is
     # US Mountain (UTC-7 year-round, same as Arizona), which happens to
     # equal Pacific Daylight Time's offset in September and would silently
@@ -665,20 +775,256 @@ def detect_solar_shading(site_id, victron_token, ceiling_days=21, recent_hours=3
     start_when = datetime.utcfromtimestamp(window["start_ts_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
     end_when = datetime.utcfromtimestamp(window["end_ts_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
     # Confidence scales with how deep the deficit ran and how long it held —
-    # a two-point dip to 30% of ceiling is weaker evidence than an
+    # a two-point dip to 30% of typical is weaker evidence than an
     # eight-point dip to 5%. Capped below the AC-power checks' ceiling
     # (see docstring: cloud cover is an unresolved confound here) and
     # floored above pure noise.
     depth_score = max(0, (_SHADE_DEFICIT_RATIO - worst_ratio) / _SHADE_DEFICIT_RATIO)
     length_score = min(1.0, len(best_run) / 8)
     confidence = round(35 + depth_score * 30 + length_score * 15)
+
+    # SHADED_V2 signal: does the deficit vary across surrounding hours
+    # (angle-dependent — the shading signature) or hit the neighbors about
+    # as hard (more consistent with a uniform, hour-independent cause —
+    # see detect_dead_panel's own proportional-loss check for the mirror
+    # image of this same idea)? Only speaks up when there's actual recent
+    # data for a neighbor hour to compare; silent otherwise rather than
+    # guessing.
+    recent_by_hour = {}
+    for t, v in recent_points:
+        recent_by_hour[datetime.utcfromtimestamp(t / 1000).hour] = v
+    neighbor_ratios = []
+    for neighbor_hour in (worst_hour - 1, worst_hour + 1):
+        neighbor_hour %= 24
+        neighbor_typical = typical_by_hour.get(neighbor_hour, 0)
+        neighbor_value = recent_by_hour.get(neighbor_hour)
+        if neighbor_typical >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS and neighbor_value is not None:
+            neighbor_ratios.append(neighbor_value / neighbor_typical)
+    angle_dependence_note = ""
+    if neighbor_ratios:
+        neighbor_avg_ratio = sum(neighbor_ratios) / len(neighbor_ratios)
+        if neighbor_avg_ratio >= _SHADE_ANGLE_DEPENDENCE_NEIGHBOR_RATIO:
+            confidence = min(95, confidence + 10)
+            angle_dependence_note = (
+                f" Neighboring hours held {round(neighbor_avg_ratio * 100)}% of their own typical — "
+                f"angle-dependent, consistent with shading rather than a hardware-wide loss."
+            )
+        elif neighbor_avg_ratio < _SHADE_DEFICIT_RATIO:
+            confidence = max(20, confidence - 10)
+            angle_dependence_note = (
+                f" Neighboring hours are also running low ({round(neighbor_avg_ratio * 100)}% of "
+                f"typical) — worth checking for a hardware-wide cause (see the dead-panel check) "
+                f"rather than assuming shading alone."
+            )
+
     detail = (
         f"Solar power ran {round(worst_ratio * 100)}% or less of this trailer's own hour-of-day "
-        f"ceiling from {start_when} to {end_when} (UTC) — worst point {round(worst_value)}W vs a "
-        f"{round(worst_ceiling)}W ceiling for that hour (observed over {ceiling_days}d) — "
-        f"consistent with shading, but a broadly cloudy day would look similar"
+        f"typical output from {start_when} to {end_when} (UTC) — worst point {round(worst_value)}W vs a "
+        f"typical {round(worst_typical)}W for that hour (observed over {ceiling_days}d) — "
+        f"consistent with shading, but a broadly cloudy day would look similar."
+        f"{angle_dependence_note}"
     )
     return True, detail, confidence, window
+
+
+# PERSISTENT_OBSTRUCTION_V1 (2026-09-13 rule-improvement pass): a fixed
+# obstruction (a building, another trailer, a sign) that has been blocking
+# one specific sun-angle hour for the ENTIRE lookback window is invisible
+# to detect_solar_shading above — that function's baseline is this same
+# hour's own history, and if the obstruction predates the whole window,
+# the "typical" for that hour already reflects the blockage. There is no
+# dip to find against a baseline that's already suppressed.
+#
+# This compares a day's reading at hour h against its IMMEDIATE NEIGHBOR
+# HOURS' reading THE SAME DAY instead of against hour h's own history — a
+# fixed obstruction depresses one hour's angle to the sun without touching
+# the hours right next to it, and unlike a passing cloud, it does this on
+# nearly every clear day, not an occasional one.
+_OBSTRUCTION_RATIO = 0.60
+# A neighbor only counts as a fair "what a normal day looks like" baseline
+# if it itself reached close to its own typical that day — otherwise the
+# whole day (not just hour h) was cloudy, and that's not evidence of a
+# fixed obstruction.
+_OBSTRUCTION_NEIGHBOR_NORMAL_RATIO = 0.85
+# How much of hour h's history has to fit the pattern before this reads as
+# a real, standing obstruction rather than a handful of coincidentally bad
+# days. ~18 of 21 days, expressed as a fraction so it scales with a
+# different `days` argument.
+_OBSTRUCTION_MIN_DAY_FRACTION = 18 / 21
+# Need enough "clean" (neighbors-normal) days to trust the pattern at all —
+# a handful of clean days out of 21 isn't enough to say anything.
+_OBSTRUCTION_MIN_CLEAN_DAYS = 10
+
+
+def detect_persistent_obstruction(site_id, victron_token, days=21, hour_tolerance=0):
+    """
+    Looks for an hour that reads persistently low against its OWN
+    IMMEDIATE NEIGHBOR HOURS on the same day, across most of the last
+    `days` — the signature of a fixed obstruction that predates the whole
+    lookback window (see the module comment above for why
+    detect_solar_shading can't see this case).
+
+    Real limitations, stated plainly rather than papered over:
+    - Works best away from the steep morning/evening ramp, where adjacent
+      hours can legitimately differ a lot with no obstruction at all — a
+      false positive there (mistaking normal ramp shape for obstruction)
+      is the likeliest failure mode of this specific check.
+    - Validated so far against exactly ONE real case (RD3439/MU8024,
+      2026-09-13) — treat the specific day-count and ratio cutoffs
+      (_OBSTRUCTION_RATIO, _OBSTRUCTION_MIN_DAY_FRACTION) as provisional
+      until a second confirmed example is checked against them.
+    - Not currently wired into any fleet report or Commands-menu button —
+      reachable directly for now, pending that second real example.
+
+    Returns (found, detail, confidence, info).
+    """
+    points = _vrm_pv_history_points(site_id, victron_token, days)
+    if not points:
+        return None, "No solar-power history available", None, None
+    typical_by_hour = _vrm_pv_typical_by_hour(points, hour_tolerance)
+    # Neighbors have to be reliably productive on their OWN history
+    # (median-based) to serve as a trustworthy same-day reference. The
+    # CANDIDATE hour itself deliberately does NOT use this same median
+    # gate below — if it's obstructed on a majority of days, its own
+    # median is already dragged down by the very thing being detected, so
+    # gating candidacy on it would make an obstruction present on >50% of
+    # days undetectable by construction. Its own best-ever (ceiling)
+    # reading is used for candidacy instead.
+    productive_hours = {
+        hour for hour, watts in typical_by_hour.items() if watts >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS
+    }
+    ceiling_by_hour, _ = _vrm_pv_ceiling_by_hour(points, hour_tolerance)
+    candidate_hours = {
+        hour for hour, watts in ceiling_by_hour.items() if watts >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS
+    }
+    if len(candidate_hours) < 3:
+        return None, (
+            "Not enough productive hours in this trailer's own history to compare hour-to-hour"
+        ), None, None
+
+    # This day's reading at each hour — the max, if more than one point
+    # landed in the same hour bucket, matching this file's other
+    # peak-style day/hour groupings.
+    value_by_day_hour = {}
+    for t, v in points:
+        dt = datetime.utcfromtimestamp(t / 1000)
+        day_values = value_by_day_hour.setdefault(dt.date(), {})
+        day_values[dt.hour] = max(day_values.get(dt.hour, 0), v)
+
+    best = None  # (hour, obstructed_days, clean_days, avg_ratio)
+    for hour in sorted(candidate_hours):
+        neighbors = [h for h in (hour - 1, hour + 1) if h in productive_hours]
+        if len(neighbors) < 2:
+            # Only judge hours with a REAL neighbor on both sides — an
+            # edge hour with just one neighbor is too easy to fool with
+            # ordinary sunrise/sunset ramp shape.
+            continue
+        clean_days = 0
+        obstructed_days = 0
+        ratios = []
+        for hours_map in value_by_day_hour.values():
+            if hour not in hours_map or any(n not in hours_map for n in neighbors):
+                continue
+            if not all(
+                hours_map[n] >= typical_by_hour[n] * _OBSTRUCTION_NEIGHBOR_NORMAL_RATIO
+                for n in neighbors
+            ):
+                continue  # not a clean comparison day — a neighbor was itself low
+            clean_days += 1
+            neighbor_avg = sum(hours_map[n] for n in neighbors) / len(neighbors)
+            ratio = hours_map[hour] / neighbor_avg if neighbor_avg else 1.0
+            ratios.append(ratio)
+            if ratio < _OBSTRUCTION_RATIO:
+                obstructed_days += 1
+        if clean_days < _OBSTRUCTION_MIN_CLEAN_DAYS:
+            continue
+        if obstructed_days / clean_days < _OBSTRUCTION_MIN_DAY_FRACTION:
+            continue
+        candidate = (hour, obstructed_days, clean_days, sum(ratios) / len(ratios))
+        if best is None or obstructed_days > best[1]:
+            best = candidate
+
+    if best is None:
+        return False, (
+            f"No hour reads persistently low against its own immediate neighbor hours across the "
+            f"{days}d window"
+        ), None, None
+
+    hour, obstructed_days, clean_days, avg_ratio = best
+    confidence = max(30, min(80, round(30 + (obstructed_days / clean_days) * 40 + (1 - avg_ratio) * 20)))
+    detail = (
+        f"Hour {hour}:00 (UTC) read under {round(_OBSTRUCTION_RATIO * 100)}% of its immediate neighbor "
+        f"hours' own same-day output on {obstructed_days} of {clean_days} clean-weather day(s) in the "
+        f"last {days}d — consistent with a fixed obstruction at that specific sun angle that predates "
+        f"this whole window, not a new or weather-driven dip. Validated against limited real data so "
+        f"far — worth a look, not a confirmed diagnosis."
+    )
+    info = {
+        "hour_utc": hour,
+        "obstructed_days": obstructed_days,
+        "clean_days_observed": clean_days,
+        "average_ratio_vs_neighbors": round(avg_ratio, 3),
+        "window_days": days,
+    }
+    return True, detail, confidence, info
+
+
+def verify_shading_dip_now(unit_key, subject_text, hour_utc, ceiling_days=21):
+    """
+    Lightweight, single-point re-check for the shading-snapshot scheduler
+    (work_tool.shading_snapshots): is this trailer's solar reading, RIGHT
+    NOW, still consistent with a dip at hour_utc? A snapshot task already
+    knows which hour to aim for (the worst hour from a past
+    detect_solar_shading run); before spending a camera fetch on it, this
+    confirms the dip is actually happening THIS occurrence too — the
+    shading pattern may have moved, cleared, or that specific day may just
+    be generally cloudy in a way that isn't really "shading" at all.
+
+    Reuses the same ratio/threshold detect_solar_shading itself uses
+    (_SHADE_DEFICIT_RATIO, _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS) so a
+    verified "yes" here means the same thing a fresh detection would have
+    found, just cheaper (one short recent-history call instead of a full
+    ceiling+run search).
+
+    Returns (is_dip, detail, current_watts, typical_watts). is_dip is None
+    on a data problem (no credentials, no VRM site, no usable history) —
+    never treated as "dip confirmed."
+    """
+    id_user, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error, None, None
+    site_id, installation_name, _last_seen, _tz, site_error = _resolve_vrm_site(
+        unit_key, subject_text, id_user, victron_token
+    )
+    if site_error:
+        return None, site_error, None, None
+
+    ceiling_points = _vrm_pv_history_points(site_id, victron_token, ceiling_days)
+    if not ceiling_points:
+        return None, "No solar-power history available to verify against", None, None
+    typical_by_hour = _vrm_pv_typical_by_hour(ceiling_points)
+    typical = typical_by_hour.get(hour_utc, 0)
+    if typical < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
+        return None, f"Hour {hour_utc}:00 (UTC) isn't a productive hour in this trailer's own history", None, round(typical)
+
+    recent_points = _vrm_pv_history_points(site_id, victron_token, days=1)
+    if not recent_points:
+        return None, "No current solar-power reading available", None, round(typical)
+    # Prefer a reading whose OWN hour is the one being checked — the
+    # scheduler's fetch can land a little early or late relative to the
+    # scheduled minute; falling back to the single newest point overall
+    # only if nothing landed in the target hour yet.
+    same_hour_points = [
+        (t, v) for t, v in recent_points if datetime.utcfromtimestamp(t / 1000).hour == hour_utc
+    ]
+    newest_t, newest_value = max(same_hour_points or recent_points, key=lambda p: p[0])
+    is_dip = newest_value < typical * _SHADE_DEFICIT_RATIO
+    ratio_pct = round(newest_value / typical * 100) if typical else 0
+    detail = (
+        f"Current reading {round(newest_value)}W vs this hour's typical {round(typical)}W "
+        f"({ratio_pct}%) — {'dip confirmed' if is_dip else 'no dip right now'}"
+    )
+    return is_dip, detail, round(newest_value), round(typical)
 
 
 def _vrm_pv_ceiling_and_recent_spike(
@@ -961,6 +1307,115 @@ def _ac_power_status_from_diagnostics(diagnostics_records):
     if is_active_state or has_power_evidence:
         return "present", detail, 85, charger_data_age_seconds
     return "uncertain", detail, 45, charger_data_age_seconds
+
+
+def _charger_state_from_diagnostics(diagnostics_records):
+    """
+    Just the charger's reported state string ("Bulk", "Fault", "Off", ...)
+    from a /diagnostics records payload. Split out from
+    _ac_power_status_from_diagnostics so a caller that already has this
+    same records list can cheaply check for the Fault case (see
+    _vrm_power_snapshot_for_site's UNPLUGGED_V2 SOC-trend cross-check)
+    without re-implementing the parsing or changing that function's
+    tested 4-tuple return shape.
+    """
+    for record in diagnostics_records:
+        if record.get("code") == "cSt":
+            return str(record.get("formattedValue") or "").strip()
+    return None
+
+
+# UNPLUGGED_V2 (2026-09-13 rule-improvement pass): a Fault-state charger
+# with real DC output (_ac_power_status_from_diagnostics's "present, may
+# not be reaching the battery" case) is ambiguous on the charger reading
+# alone — it can't tell "charging is real and working, fault is cosmetic"
+# from "AC is present but the battery genuinely isn't accepting the
+# charge." SOC over time settles that: a battery actually charging rises;
+# one that isn't, doesn't, regardless of what the charger claims.
+_SOC_TREND_LOOKBACK_HOURS = 4
+# How much SOC has to visibly RISE over the lookback window to count as
+# "really charging" rather than meter jitter/rounding noise.
+_SOC_TREND_RISE_THRESHOLD_PCT = 1.0
+# How far SOC has to have FALLEN to positively flag "not accepting charge
+# despite real output" — kept a soft signal, not a hard contradiction: a
+# real load (fridge, inverter) can outpace a modest real charge without
+# the charger itself being at fault.
+_SOC_TREND_FALL_THRESHOLD_PCT = -2.0
+
+
+def _soc_trend_verdict(soc_now, soc_earlier):
+    """
+    Pure comparator for the UNPLUGGED_V2 Fault-state cross-check: given
+    current SOC and SOC from _SOC_TREND_LOOKBACK_HOURS ago, says whether
+    that supports "charging is real and working" (rising), "battery not
+    accepting charge despite real DC output" (falling), or is inconclusive
+    ("flat" — a near-full battery has nowhere to rise to, and normal load
+    can offset a real but modest charge). Returns (label, delta_pct);
+    label is None (with delta also None) if either reading is missing.
+    """
+    if soc_now is None or soc_earlier is None:
+        return None, None
+    delta = soc_now - soc_earlier
+    if delta >= _SOC_TREND_RISE_THRESHOLD_PCT:
+        return "rising", delta
+    if delta <= _SOC_TREND_FALL_THRESHOLD_PCT:
+        return "falling", delta
+    return "flat", delta
+
+
+def _vrm_soc_points(site_id, victron_token, hours, end=None):
+    """
+    Hourly Battery SOC (%) points over the last `hours` — same shape and
+    failure handling as _vrm_pv_history_points, for the UNPLUGGED_V2
+    SOC-trend cross-check: /diagnostics alone only ever gives the current
+    instant, and "is the battery actually accepting charge" needs SOC now
+    vs. SOC some hours ago.
+    """
+    end = end if end is not None else int(time.time())
+    try:
+        response = requests.get(
+            f"https://vrmapi.victronenergy.com/v2/installations/{site_id}/stats",
+            headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
+            params=[
+                ("type", "custom"), ("start", end - hours * 3600), ("end", end),
+                ("interval", "hours"), ("attributeCodes[]", "bs"),
+            ],
+            timeout=30,
+        )
+        payload = response.json()
+    except requests.RequestException:
+        return None
+    if not payload.get("success"):
+        return None
+    series = payload.get("records", {}).get("bs") or []
+    points = [(p[0], p[1]) for p in series if isinstance(p, list) and p[1] is not None]
+    return points or None
+
+
+def _soc_trend_for_fault_cross_check(site_id, victron_token, soc_now, end=None):
+    """
+    Network half of the UNPLUGGED_V2 cross-check: fetches the SOC point
+    closest to _SOC_TREND_LOOKBACK_HOURS ago and runs it through
+    _soc_trend_verdict against the current reading already on hand (no
+    extra call needed for "now" — the caller already has it from
+    /diagnostics). Returns (label, delta_pct, soc_earlier); label is None
+    (with the others also None) when there's no usable earlier point —
+    e.g. a data gap left only much-older or much-newer readings, so
+    nothing near the target time is close enough to trust.
+    """
+    end = end if end is not None else int(time.time())
+    points = _vrm_soc_points(site_id, victron_token, _SOC_TREND_LOOKBACK_HOURS + 1, end=end)
+    if not points:
+        return None, None, None
+    target_t = end - _SOC_TREND_LOOKBACK_HOURS * 3600
+    closest = min(points, key=lambda p: abs(p[0] / 1000 - target_t))
+    if abs(closest[0] / 1000 - target_t) > (_SOC_TREND_LOOKBACK_HOURS * 3600) / 2:
+        return None, None, None
+    soc_earlier = closest[1]
+    label, delta = _soc_trend_verdict(soc_now, soc_earlier)
+    return label, delta, soc_earlier
+
+
 def _vrm_power_snapshot(unit_key, subject_text):
     """
     Shared VRM battery/AC-power read — one installations lookup, one
@@ -1001,6 +1456,20 @@ def _vrm_power_snapshot(unit_key, subject_text):
     )
     if site_error:
         return None, site_error
+    return _vrm_power_snapshot_for_site(site_id, installation_name, vrm_last_seen_seconds_ago, victron_token)
+
+
+def _vrm_power_snapshot_for_site(site_id, installation_name, vrm_last_seen_seconds_ago, victron_token):
+    """
+    The part of _vrm_power_snapshot that runs once a VRM site is already
+    resolved — split out so a fleet-wide pass (fleet_power_status) can
+    reuse the exact same diagnostics-read + solar-ceiling-fallback logic
+    for every installation from ONE bulk installations call, instead of
+    each unit re-fetching that same bulk list just to find its own row in
+    it (which is what _resolve_vrm_site does, correctly, for the
+    single-unit case, but would be wasteful repeated ~250 times).
+    Returns (snapshot, error) — same shape as _vrm_power_snapshot.
+    """
     vrm_freshness = _vrm_freshness_tier(vrm_last_seen_seconds_ago)
 
     try:
@@ -1030,9 +1499,41 @@ def _vrm_power_snapshot(unit_key, subject_text):
     if battery_soc_percent is None:
         soc_error = f"VRM diagnostics for {installation_name or unit_key} had no Battery SOC reading"
 
-    ac_power_status, ac_power_detail, ac_power_confidence, _charger_age = (
+    ac_power_status, ac_power_detail, ac_power_confidence, charger_age_seconds = (
         _ac_power_status_from_diagnostics(diagnostics_records)
     )
+
+    # UNPLUGGED_V2: the Fault-with-real-output case reads "present" on the
+    # charger alone, but that can't distinguish a cosmetic fault from a
+    # battery that genuinely isn't accepting the charge — cross-check
+    # against the SOC trend, which can. Only fires for that specific case;
+    # every other verdict is unaffected.
+    charge_state_for_soc_check = _charger_state_from_diagnostics(diagnostics_records)
+    if (
+        ac_power_status == "present"
+        and charge_state_for_soc_check
+        and charge_state_for_soc_check.lower() in _AC_CHARGER_FAULT_STATES
+        and battery_soc_percent is not None
+    ):
+        soc_trend_label, soc_trend_delta, soc_earlier = _soc_trend_for_fault_cross_check(
+            site_id, victron_token, battery_soc_percent
+        )
+        if soc_trend_label == "rising":
+            ac_power_confidence = max(ac_power_confidence or 0, 90)
+            ac_power_detail += (
+                f" — SOC rose {round(soc_earlier)}%→{round(battery_soc_percent)}% over the last "
+                f"{_SOC_TREND_LOOKBACK_HOURS}h, so the charge is real despite the fault code"
+            )
+        elif soc_trend_label == "falling":
+            ac_power_confidence = min(ac_power_confidence or 100, 55)
+            ac_power_detail += (
+                f" — SOC fell {round(soc_earlier)}%→{round(battery_soc_percent)}% over the last "
+                f"{_SOC_TREND_LOOKBACK_HOURS}h despite the claimed output; battery may not actually be "
+                f"accepting the charge (could also be load outpacing a weak charge)"
+            )
+        # "flat" or missing SOC-trend data: no change — inconclusive either
+        # way, and the direct charger reading stands as-is.
+
     # Fall back to the solar-ceiling inference whenever the direct reading
     # couldn't give a real answer — absent, self-contradictory, or too old
     # to trust (see _ac_power_status_from_diagnostics). This only ever
@@ -1062,11 +1563,25 @@ def _vrm_power_snapshot(unit_key, subject_text):
         # exactly the failure mode this whole review called out.
         if not fallback_has_data:
             ac_power_status = "unknown"
+        elif charger_age_seconds is not None and charger_age_seconds > _VRM_STALE_SEC:
+            # Checked live (2026-09-13): ~40% of the fleet has a charger
+            # sub-device that last reported WEEKS to MONTHS ago (not just
+            # a couple hours) — these are almost certainly solar+battery
+            # trailers whose charger registration is a dead leftover, not
+            # units with a genuinely ambiguous CURRENT reading. Lumping
+            # both under "uncertain" buried the real handful of units
+            # worth a look under ~100 that aren't. Once the charger has
+            # been silent longer than the same "disconnected" cutoff used
+            # everywhere else in this module, treat it the same as never
+            # having reported at all — the battery's own solar-only
+            # behavior (checked above, no AC-sized spike) is the real,
+            # current evidence, same as a true no_charger_hardware case.
+            ac_power_status = "no_charger_hardware"
         else:
             # The fallback DID have current battery-current data and found
             # no AC-sized draw — real (if soft) evidence the trailer
             # probably isn't drawing extra power right now even though the
-            # charger sub-device itself has gone quiet.
+            # charger sub-device itself has gone quiet recently.
             ac_power_status = "uncertain"
 
     ac_power_labels = {
@@ -1112,7 +1627,18 @@ def unit_power_status(unit, subject=""):
     snapshot, error = _vrm_power_snapshot(unit_key, subject_text)
     if error:
         return None, error
+    return _power_status_dict_from_snapshot(unit_key, snapshot)
 
+
+def _power_status_dict_from_snapshot(unit_key, snapshot):
+    """
+    The summary/ok-warn-fail enrichment unit_power_status builds on top of
+    a raw _vrm_power_snapshot(_for_site) result — split out so
+    fleet_power_status can build the exact same shape per installation
+    instead of a fleet row silently missing "summary"/"status" (found live
+    testing this report: without this split, every fleet row rendered with
+    no result text at all — the raw snapshot dict was never enriched).
+    """
     # "unknown" is deliberately not "fail" — it means the data needed to
     # tell present from not_detected isn't currently available, which is a
     # different (and less actionable) problem than a confirmed reading.
@@ -1173,8 +1699,20 @@ def unit_shading_status(unit, subject=""):
     )
     if site_error:
         return None, site_error
-    vrm_freshness = _vrm_freshness_tier(vrm_last_seen_seconds_ago)
+    return _shading_status_for_site(
+        unit_key, site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name, victron_token
+    )
 
+
+def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name, victron_token):
+    """
+    The part of unit_shading_status that runs once a VRM site is already
+    resolved — split out for the same reason as _vrm_power_snapshot_for_site
+    (see its docstring): fleet_shading_status reuses this per installation
+    from one bulk installations call instead of each site re-resolving the
+    whole list. Returns (snapshot, error) — same shape as unit_shading_status.
+    """
+    vrm_freshness = _vrm_freshness_tier(vrm_last_seen_seconds_ago)
     found, detail, confidence, window = detect_solar_shading(site_id, victron_token)
     window_label = None
     if window:
@@ -1227,11 +1765,610 @@ def unit_shading_status(unit, subject=""):
         "shading_window_utc": window_label,
         "status": ui_status,
         "shading_window_hours_utc": window["hours_utc"] if window else [],
+        # The single deepest hour in the dip, not just any hour it
+        # touched — what a scheduled snapshot should aim for (see
+        # work_tool.shading_snapshots).
+        "shading_worst_hour_utc": window["worst_hour_utc"] if window else None,
         "installation_timezone": timezone_name,
         "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
         "vrm_freshness": vrm_freshness,
         "summary": summary,
     }, None
+def _fleet_vrm_installations_with_heads():
+    """
+    One bulk installations call (site_id/name/last_timestamp for every
+    installation) plus one bulk (chunked) ERP crosswalk for their RD/FD
+    heads — the shared setup for fleet_power_status and
+    fleet_shading_status, so checking the whole fleet for two different
+    things only fetches the installation list and resolves the ERP
+    crosswalk once between them, not once each.
+    Returns (installations, mu_to_heads, error). installations is a list of
+    {site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name}.
+    """
+    id_user, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, None, cred_error
+    try:
+        response = requests.get(
+            f"https://vrmapi.victronenergy.com/v2/users/{id_user}/installations",
+            headers={"idUser": id_user, "X-Authorization": f"Token {victron_token}"},
+            params={"extended": 1},
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        return None, None, f"VRM installations lookup failed: {exc}"
+    if response.status_code != 200:
+        return None, None, f"VRM installations lookup failed: HTTP {response.status_code}"
+
+    installations = []
+    for record in response.json().get("records") or []:
+        name = str(record.get("name") or "").strip()
+        if not name:
+            continue
+        last_timestamp = record.get("last_timestamp") or None
+        installations.append({
+            "site_id": record.get("idSite"),
+            "installation_name": name,
+            "vrm_last_seen_seconds_ago": (time.time() - last_timestamp) if last_timestamp else None,
+            "timezone_name": str(record.get("timezone") or "").strip() or None,
+        })
+
+    mu_names = [i["installation_name"] for i in installations if i["installation_name"].upper().startswith("MU")]
+    mu_to_heads = {}
+    if mu_names:
+        mu_to_heads, crosswalk_error = _erp_heads_for_mu_trailers(mu_names)
+        mu_to_heads = mu_to_heads or {}
+        if crosswalk_error:
+            print(f"_fleet_vrm_installations_with_heads: ERP head crosswalk failed: {crosswalk_error}")
+    return installations, mu_to_heads, None
+
+
+def fleet_power_status(max_workers=10):
+    """
+    AC-power status for every VRM installation in the fleet, concurrently —
+    backs the "Units Unplugged" report. Reuses the exact same
+    _vrm_power_snapshot_for_site logic (diagnostics read + solar-ceiling
+    fallback) a single-unit check uses, so a fleet-wide result and a
+    hand-checked single unit can never disagree about how the verdict was
+    reached — this function only changes WHERE the installation list and
+    ERP crosswalk come from (fetched once, not once per site).
+
+    Cost: ~1-2 setup calls + one VRM request per installation, run
+    concurrently. Checked live (2026-09-13): ~250 installations fleet-wide
+    — meant for a scheduled background poll (see
+    FLEET_POWER_STATUS_REFRESH_SECONDS in flask_endpoints.py), not a live
+    button click; a full pass takes on the order of a minute, not seconds.
+    Returns (rows, error). Each row has "unit" (the installation/MU name),
+    "head_units" (its ERP-linked RD/FD head(s), if any), and every key
+    _vrm_power_snapshot_for_site returns (or "error" if that one site's
+    check itself failed — the rest of the fleet still comes back).
+    """
+    installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
+    if error:
+        return None, error
+    _, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error
+
+    def check_one(installation):
+        head_units = mu_to_heads.get(installation["installation_name"].upper(), [])
+        row = {"unit": installation["installation_name"], "head_units": head_units}
+        snapshot, snap_error = _vrm_power_snapshot_for_site(
+            installation["site_id"], installation["installation_name"],
+            installation["vrm_last_seen_seconds_ago"], victron_token,
+        )
+        if snap_error:
+            row["error"] = snap_error
+        else:
+            # The summary text reads as "RD3315(MU8083) — plugged in..."
+            # when this trailer's ERP-linked head is known, the same
+            # RD####(MU####) shape every ticket subject already uses —
+            # not "MU8083 (MU8083)", which is what a bare installation
+            # name fed in twice looks like, and is what fleet rows showed
+            # before this: nothing here resolves a head on its own, so
+            # without it every trailer looked identity-less.
+            display_unit = head_units[0] if head_units else installation["installation_name"]
+            enriched, _err = _power_status_dict_from_snapshot(display_unit, snapshot)
+            row.update(enriched)
+            row["unit"] = installation["installation_name"]
+        return row
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        rows = list(pool.map(check_one, installations))
+    return rows, None
+
+
+def fleet_shading_status(max_workers=6):
+    """
+    Shading status for every VRM installation, concurrently — backs the
+    "Shaded Units" report. Lower default concurrency than
+    fleet_power_status: each site costs TWO /stats calls here (a multi-day
+    ceiling window, a recent window) versus one /diagnostics call there,
+    so the same worker count would roughly double simultaneous VRM load.
+    Same reuse principle as fleet_power_status — see its docstring.
+    Returns (rows, error).
+    """
+    installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
+    if error:
+        return None, error
+    _, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error
+
+    def check_one(installation):
+        head_units = mu_to_heads.get(installation["installation_name"].upper(), [])
+        row = {"unit": installation["installation_name"], "head_units": head_units}
+        # See fleet_power_status's check_one for why unit_key is the
+        # resolved head (RD3315(MU8083), not MU8083 (MU8083)) when known.
+        display_unit = head_units[0] if head_units else installation["installation_name"]
+        snapshot, snap_error = _shading_status_for_site(
+            display_unit, installation["site_id"], installation["installation_name"],
+            installation["vrm_last_seen_seconds_ago"], installation["timezone_name"], victron_token,
+        )
+        if snap_error:
+            row["error"] = snap_error
+        else:
+            row.update(snapshot)
+            row["unit"] = installation["installation_name"]
+        return row
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        rows = list(pool.map(check_one, installations))
+    return rows, None
+
+
+# A single panel's nominal max output — the one fixed number this whole
+# check is built on ("1 panel = up to 300W" per the fleet's own hardware).
+# Panel COUNT is never assumed from the unit number (checked earlier this
+# session: it isn't reliably guessable — 7000-series usually 2, 8000-series
+# usually 4, but real exceptions exist on both, including 3-panel units) —
+# only inferred from what a trailer has actually, demonstrably produced.
+_PANEL_NOMINAL_WATTS = 300
+
+
+def _infer_panel_count(historical_peak_watts):
+    """
+    Best-guess panel count from a trailer's own best-ever-observed solar
+    output. Rounds to the nearest multiple of _PANEL_NOMINAL_WATTS, floored
+    at 1. Deliberately an estimate, not a lookup — stated plainly where
+    it's used: if every panel this trailer has died before the history
+    window this checks even begins, the true count is underestimated,
+    since there is no install record to check it against instead.
+
+    Peak-wattage inference itself is unaffected by how the panels are
+    wired (series vs. parallel doesn't change a healthy array's total
+    power) — it's the downstream "how many panels does a shortfall imply"
+    math in detect_dead_panel that has to account for wiring; see
+    _SERIES_PAIR_WATTS below.
+    """
+    if historical_peak_watts is None or historical_peak_watts <= 0:
+        return None
+    return max(1, round(historical_peak_watts / _PANEL_NOMINAL_WATTS))
+
+
+# 4-panel units are wired as two series-connected PAIRS (2S2P), not four
+# independent parallel panels (per-fleet detail, confirmed 2026-09-13).
+# That matters for how a shortfall maps to a physical panel count: in a
+# series string, the string's current is capped by its weakest panel, so
+# one dead panel doesn't just cost its own ~300W — it drags its series
+# partner's output down too, costing roughly a whole PAIR's worth (~600W).
+# A naive shortfall/300W count would read that as "2 panels missing" and
+# overstate the repair. Used only for 4+-panel (even-count) units below;
+# 2-panel units aren't known to have this series complication.
+_SERIES_PAIR_WATTS = _PANEL_NOMINAL_WATTS * 2
+
+# DEAD_PANEL_V2 (2026-09-13 rule-improvement pass) — four added guards on
+# top of the original shortfall check, each closing a specific false-
+# positive path found reviewing real data:
+#
+# 1. _DEAD_PANEL_MIN_HISTORICAL_PEAK_DAYS — the historical peak has to be a
+#    real, repeated capability, not a single lucky reading, BEFORE it's
+#    trusted to set "expected capacity" at all (previously this only
+#    scaled confidence down, never blocked a verdict outright).
+_DEAD_PANEL_MIN_HISTORICAL_PEAK_DAYS = 3
+# 2. _DEAD_PANEL_MIN_SEPARATION_DAYS — the historical peak's last occurrence
+#    and the recent comparison window need real daylight between them, or
+#    "historical vs. recent" is just comparing overlapping noise from the
+#    same stretch of days.
+_DEAD_PANEL_MIN_SEPARATION_DAYS = 5
+# 3. _DEAD_PANEL_TRAILING_* — "recent capability" comes from the trailing
+#    week specifically, not the single best moment anywhere in the wider
+#    recent_days window (freshness — a good day from early in a 14-day
+#    window shouldn't stand in for "now"), and from that week's SECOND-
+#    highest daily peak, not its outright best (persistence — one glitchy
+#    high reading, or one unusually good day, shouldn't get to clear an
+#    otherwise-persistent shortfall by itself; a real recovery has to show
+#    up more than once).
+_DEAD_PANEL_TRAILING_WINDOW_DAYS = 7
+_DEAD_PANEL_MIN_TRAILING_DAYS_OBSERVED = 5
+# 4. _DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD — the new signal that actually
+#    distinguishes hardware from shading: a dead panel/pair caps output
+#    roughly EQUALLY across every productive hour (low stdev in the
+#    recent/historical ratio hour-to-hour); shading is hour-specific (high
+#    stdev). Checked against a real case (RD3439/MU8024, 2026-09-13): a
+#    genuine dead-panel unit held 68.3% +/- 3.1% of typical across all six
+#    productive UTC hours (16-21) — comfortably under this threshold.
+#    Caveat, stated plainly: validated against that ONE real case so far;
+#    treat this specific cutoff as provisional until a second confirmed
+#    example is checked.
+_DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD = 0.10
+_DEAD_PANEL_MIN_PRODUCTIVE_HOURS_FOR_STDEV = 4
+
+
+def detect_dead_panel(site_id, victron_token, history_days=60, recent_days=14, hour_tolerance=1):
+    """
+    Compares a trailer's best-ever solar output (used to infer how many
+    panels it has) against its best RECENT output, looking for a shortfall
+    consistent with one or more panels having died or gone dark — the
+    same "1 panel ~300W" rule of thumb given for this check: a 2-panel
+    unit should clear 300W, a 4-panel unit 600W+, and a sustained failure
+    to do so (not just one off day) is worth a look. On a 4-panel unit
+    that shortfall shows up in ~600W (one series-pair) increments rather
+    than ~300W ones — see _SERIES_PAIR_WATTS — so a single dead panel
+    there reads as "1 pair down," not "2 panels missing."
+
+    Uses peak watts, not a hour-of-day baseline like detect_solar_shading —
+    a dead panel caps the trailer's ceiling everywhere, all day, so the
+    simplest fair comparison is "best it's ever done" vs "best it's done
+    lately," not an hour-by-hour profile.
+
+    Real limitations, stated plainly rather than papered over:
+    - A panel that died before the history window began is invisible to
+      this — the historical peak already reflects the reduced capacity,
+      so there is nothing to compare it against.
+    - A long cloudy stretch in the recent window suppresses the recent
+      peak the same way a dead panel would; this cannot independently
+      tell the two apart from telemetry alone, so confidence is capped
+      and the detail says so.
+
+    Returns (found, detail, confidence, info). info carries the raw
+    numbers (historical/recent peak, inferred panel count, expected
+    capacity) for display regardless of the verdict.
+    """
+    long_points = _vrm_pv_history_points(site_id, victron_token, history_days)
+    if not long_points:
+        return None, "No solar-power history available", None, None
+    historical_peak = max(v for _, v in long_points)
+    # How many distinct days actually reached near that peak — a single
+    # lucky 15-minute reading shouldn't get to set "expected capacity" on
+    # its own.
+    near_peak_days = {
+        datetime.utcfromtimestamp(t / 1000).date()
+        for t, v in long_points if v >= historical_peak * 0.9
+    }
+    inferred_panels = _infer_panel_count(historical_peak)
+    expected_capacity = inferred_panels * _PANEL_NOMINAL_WATTS if inferred_panels else None
+
+    cutoff = int(time.time()) - recent_days * 24 * 3600
+    recent_points = [(t, v) for t, v in long_points if t / 1000 >= cutoff]
+    if not recent_points:
+        return None, "No recent solar-power data available", None, None
+
+    info = {
+        "historical_peak_watts": round(historical_peak),
+        "historical_peak_days_observed": len(near_peak_days),
+        "inferred_panels": inferred_panels,
+        "expected_capacity_watts": expected_capacity,
+        "history_days": history_days,
+        "recent_days": recent_days,
+    }
+
+    # DEAD_PANEL_V2 guard 3: "recent capability" comes from the trailing
+    # week specifically (freshness — a good day from early in a 14-day
+    # recent_days window shouldn't get to stand in for "now"), and from
+    # the SECOND-highest daily peak in that week, not the single best
+    # moment (persistence — one glitchy high reading, or one unusually
+    # good day sandwiched between bad ones, shouldn't get to clear an
+    # otherwise-persistent shortfall on its own; the recovery has to show
+    # up more than once to count).
+    trailing_cutoff = int(time.time()) - _DEAD_PANEL_TRAILING_WINDOW_DAYS * 24 * 3600
+    trailing_peak_by_day = {}
+    for t, v in recent_points:
+        if t / 1000 < trailing_cutoff:
+            continue
+        day = datetime.utcfromtimestamp(t / 1000).date()
+        trailing_peak_by_day[day] = max(trailing_peak_by_day.get(day, 0), v)
+    if len(trailing_peak_by_day) < _DEAD_PANEL_MIN_TRAILING_DAYS_OBSERVED:
+        return None, (
+            f"Only {len(trailing_peak_by_day)} day(s) of solar data in the trailing "
+            f"{_DEAD_PANEL_TRAILING_WINDOW_DAYS}d — need at least "
+            f"{_DEAD_PANEL_MIN_TRAILING_DAYS_OBSERVED} to confirm a shortfall holds across the week "
+            f"rather than reflecting a single day's reading"
+        ), None, info
+    sorted_trailing_peaks = sorted(trailing_peak_by_day.values(), reverse=True)
+    recent_peak = sorted_trailing_peaks[1] if len(sorted_trailing_peaks) >= 2 else sorted_trailing_peaks[0]
+    info["recent_peak_watts"] = round(recent_peak)
+
+    if len(near_peak_days) < _DEAD_PANEL_MIN_HISTORICAL_PEAK_DAYS:
+        # DEAD_PANEL_V2 guard 1: a hard gate, not just a confidence
+        # penalty — an under-observed "peak" isn't trustworthy enough to
+        # build an expected-capacity comparison on at all.
+        return None, (
+            f"Historical peak {round(historical_peak)}W was only seen on {len(near_peak_days)} day(s) "
+            f"in the last {history_days}d — need at least {_DEAD_PANEL_MIN_HISTORICAL_PEAK_DAYS} to "
+            f"trust it as this trailer's real capability rather than a fluke reading"
+        ), None, info
+
+    last_peak_date = max(near_peak_days)
+    recent_window_start_date = datetime.utcfromtimestamp(cutoff).date()
+    separation_days = (recent_window_start_date - last_peak_date).days
+    if separation_days < _DEAD_PANEL_MIN_SEPARATION_DAYS:
+        # DEAD_PANEL_V2 guard 2: the historical evidence and the recent
+        # comparison window overlap (or nearly do) — not enough daylight
+        # between them to call this "before vs. after," so a shortfall
+        # here could just be the SAME stretch of ordinary day-to-day
+        # variance measured against itself.
+        return None, (
+            f"This trailer's historical peak was last seen only {separation_days} day(s) before the "
+            f"recent {recent_days}d comparison window starts — need at least "
+            f"{_DEAD_PANEL_MIN_SEPARATION_DAYS} day(s) of separation for the two windows to be a fair "
+            f"before/after comparison"
+        ), None, info
+
+    if not expected_capacity or expected_capacity <= _PANEL_NOMINAL_WATTS:
+        # A 1-panel-inferred trailer has nothing to compare against — there
+        # is no "missing panel" question when only one was ever expected.
+        return False, (
+            f"Best-ever output {round(historical_peak)}W is consistent with a single panel "
+            f"— nothing to compare a shortfall against"
+        ), None, info
+
+    shortfall = expected_capacity - recent_peak
+    # A shortfall has to be close to a full panel's worth to count — small
+    # gaps (dust, panel angle, a slightly hazy week) are normal and
+    # shouldn't read as a hardware failure.
+    if shortfall < _PANEL_NOMINAL_WATTS * 0.7:
+        return False, (
+            f"Recent peak {round(recent_peak)}W is within normal range of the "
+            f"{expected_capacity}W expected from an inferred {inferred_panels}-panel array"
+        ), None, info
+
+    # For 4+-panel (even) arrays, count the shortfall in series-PAIR units
+    # (see _SERIES_PAIR_WATTS) rather than single-panel units — a dead
+    # panel there costs its whole pair, so dividing by one panel's wattage
+    # would double-count the pair's healthy partner as also missing.
+    wired_in_series_pairs = inferred_panels >= 4 and inferred_panels % 2 == 0
+    loss_unit_watts = _SERIES_PAIR_WATTS if wired_in_series_pairs else _PANEL_NOMINAL_WATTS
+    max_units = (inferred_panels // 2) if wired_in_series_pairs else inferred_panels
+    missing_units = max(1, min(round(shortfall / loss_unit_watts), max_units))
+    # Confidence: higher when the historical peak was reached on several
+    # different days (a real, repeatable capability, not a fluke reading)
+    # and when the shortfall lines up cleanly with a whole number of
+    # panels (or pairs) rather than an odd fraction more consistent with
+    # cloud cover.
+    consistency_score = min(1.0, len(near_peak_days) / 3)
+    cleanliness = 1.0 - min(1.0, abs((shortfall / loss_unit_watts) - missing_units))
+    confidence = max(30, min(90, round(40 + consistency_score * 25 + cleanliness * 25)))
+    if wired_in_series_pairs:
+        missing_panels = missing_units  # 1 dead panel per affected pair, not 2
+        shortfall_phrase = (
+            f"roughly {missing_units} series pair('s) worth short — on this wiring (2 panels per "
+            f"series string) that's consistent with {missing_units} physically dead panel(s) each "
+            f"dragging its series partner down, not {missing_units * 2}"
+        )
+    else:
+        missing_panels = missing_units
+        shortfall_phrase = f"roughly {missing_units} panel('s) worth short"
+    detail = (
+        f"Best-ever output {round(historical_peak)}W (seen on {len(near_peak_days)} day(s) in the last "
+        f"{history_days}d) implies {inferred_panels} panel(s), ~{expected_capacity}W expected — recent "
+        f"best is only {round(recent_peak)}W in the last {recent_days}d, {shortfall_phrase}. Could also "
+        f"be a stretch of cloudy weather rather than a dead panel — check the trend over more days "
+        f"before assuming hardware."
+    )
+    info["missing_panels"] = missing_panels
+    info["wired_in_series_pairs"] = wired_in_series_pairs
+
+    # DEAD_PANEL_V2 guard 4 / new signal: does the loss hold roughly
+    # EQUALLY across every productive hour (hardware — a dead panel caps
+    # output the same amount at 10am and at 2pm) or does it vary a lot by
+    # hour (more consistent with sun-angle-specific shading)? Reuses the
+    # exact hour-of-day typical machinery detect_solar_shading already
+    # has, just comparing the recent window's own typical against the
+    # historical window's, hour by hour.
+    # The "historical" side of this comparison must exclude the recent
+    # window itself, or a trailer whose recent data happens to be part of
+    # long_points (it always is — recent_points is a subset) would be
+    # compared partly against itself.
+    older_points = [(t, v) for t, v in long_points if t / 1000 < cutoff]
+    historical_typical_by_hour = _vrm_pv_typical_by_hour(older_points, hour_tolerance)
+    recent_typical_by_hour = _vrm_pv_typical_by_hour(recent_points, hour_tolerance)
+    hour_ratios = [
+        recent_typical_by_hour[hour] / historical_typical_by_hour[hour]
+        for hour in historical_typical_by_hour
+        if historical_typical_by_hour[hour] >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS
+        and hour in recent_typical_by_hour
+    ]
+    if len(hour_ratios) >= _DEAD_PANEL_MIN_PRODUCTIVE_HOURS_FOR_STDEV:
+        from statistics import pstdev, mean
+        ratio_stdev = pstdev(hour_ratios)
+        ratio_mean = mean(hour_ratios)
+        info["hour_ratio_stdev"] = round(ratio_stdev, 3)
+        info["hour_ratio_mean"] = round(ratio_mean, 3)
+        info["productive_hours_compared"] = len(hour_ratios)
+        if ratio_stdev >= _DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD:
+            # Loss is hour-specific, not proportional — route to shading
+            # rather than confidently calling this hardware. Validated
+            # against only one real case so far (see the constant's
+            # comment); this is a soft rejection, not a confident "no."
+            return False, (
+                f"Power loss varies by hour ({round(ratio_mean * 100)}% of typical +/- "
+                f"{round(ratio_stdev * 100)}pp across {len(hour_ratios)} productive hours) rather than "
+                f"holding steady — more consistent with sun-angle-specific shading than a hardware "
+                f"fault that would cap output equally all day; check solar-shading status instead"
+            ), None, info
+        confidence = min(95, confidence + 5)
+        detail += (
+            f" Loss is proportional across {len(hour_ratios)} productive hours ({round(ratio_mean * 100)}% "
+            f"of typical +/- {round(ratio_stdev * 100)}pp) — consistent with hardware, not shading."
+        )
+
+    return True, detail, confidence, info
+
+
+def unit_dead_panel_status(unit, subject=""):
+    """
+    Diagnostics-menu / on-demand version of detect_dead_panel for one
+    unit. Returns (info, error) — same summary/status/confidence shape as
+    unit_power_status and unit_shading_status.
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+    subject_text = str(subject or "").strip()
+
+    id_user, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error
+    site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name, site_error = _resolve_vrm_site(
+        unit_key, subject_text, id_user, victron_token
+    )
+    if site_error:
+        return None, site_error
+    return _dead_panel_status_for_site(
+        unit_key, installation_name, vrm_last_seen_seconds_ago, site_id, victron_token
+    )
+
+
+def _dead_panel_status_for_site(unit_key, installation_name, vrm_last_seen_seconds_ago, site_id, victron_token):
+    """The part of unit_dead_panel_status that runs once a VRM site is
+    already resolved — see _vrm_power_snapshot_for_site's docstring for
+    why this split exists (fleet_dead_panel_status reuses it per site from
+    one bulk installations call)."""
+    vrm_freshness = _vrm_freshness_tier(vrm_last_seen_seconds_ago)
+    found, detail, confidence, info = detect_dead_panel(site_id, victron_token)
+
+    # A site that has stopped reporting looks IDENTICAL to a dead panel on
+    # this metric — both show "no recent peak worth mentioning" — but they
+    # are different problems with different fixes (a comms issue vs a
+    # hardware one). Checked live (2026-09-13): two real installations
+    # flagged "dead panel" with a 14-day recent peak of 11W and 0W were
+    # both actually VRM-disconnected for 3.5+ and 10+ days respectively —
+    # not a panel failure, just no data to measure one. Don't let a
+    # confident hardware verdict stand on stale evidence; downgrade to
+    # "unknown" instead, same principle as _vrm_power_snapshot's "unknown".
+    if found and vrm_freshness in ("stale", "disconnected"):
+        found = None
+        detail = (
+            f"VRM data for this site is {vrm_freshness} ({_format_age(vrm_last_seen_seconds_ago)} old) — "
+            f"a low recent peak here is at least as likely to mean the site isn't reporting as it is a "
+            f"dead panel; {detail}"
+        )
+        confidence = None
+
+    if found is None:
+        status = "unknown"
+        label = "cannot check for a dead panel — no usable/current VRM solar data"
+    elif found:
+        status = "dead_panel"
+        panels = (info or {}).get("inferred_panels")
+        label = f"possible dead/underperforming panel (of ~{panels} inferred)" if panels else "possible dead/underperforming panel"
+    else:
+        status = "ok"
+        label = "solar output consistent with a healthy array"
+
+    confidence_text = f" ({confidence}% confidence)" if confidence is not None else ""
+    summary = f"{unit_key} ({installation_name}) — {label}{confidence_text}"
+    if vrm_freshness not in ("fresh", "aging"):
+        summary += f" — VRM data {_format_age(vrm_last_seen_seconds_ago)} old, take with caution"
+
+    ui_status = {"dead_panel": "fail", "ok": "ok", "unknown": "warn"}.get(status, "warn")
+
+    return {
+        "unit": unit_key,
+        "installation_name": installation_name,
+        "dead_panel_status": status,
+        "dead_panel_label": label,
+        "dead_panel_detail": detail,
+        "dead_panel_confidence": confidence,
+        "dead_panel_info": info,
+        "status": ui_status,
+        "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
+        "vrm_freshness": vrm_freshness,
+        "summary": summary,
+    }, None
+
+
+def fleet_dead_panel_status(max_workers=10):
+    """
+    Dead-panel status for every VRM installation, concurrently — backs a
+    "Dead Panels" report the same way fleet_power_status/
+    fleet_shading_status back theirs. One /stats call per site (a single
+    ~60-day peak-watts pull covers both the historical and recent windows
+    detect_dead_panel needs), so this is closer to fleet_power_status's
+    cost than fleet_shading_status's. Returns (rows, error).
+    """
+    installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
+    if error:
+        return None, error
+    _, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error
+
+    def check_one(installation):
+        head_units = mu_to_heads.get(installation["installation_name"].upper(), [])
+        row = {"unit": installation["installation_name"], "head_units": head_units}
+        # See fleet_power_status's check_one for why unit_key is the
+        # resolved head when known.
+        display_unit = head_units[0] if head_units else installation["installation_name"]
+        snapshot, snap_error = _dead_panel_status_for_site(
+            display_unit, installation["installation_name"],
+            installation["vrm_last_seen_seconds_ago"], installation["site_id"], victron_token,
+        )
+        if snap_error:
+            row["error"] = snap_error
+        else:
+            row.update(snapshot)
+            row["unit"] = installation["installation_name"]
+        return row
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        rows = list(pool.map(check_one, installations))
+    return rows, None
+
+
+def fleet_vrm_freshness_status():
+    """
+    VRM data freshness for every installation, fleet-wide — backs a "VRM
+    Disconnected" report. Unlike the other three fleet_* checks, this
+    needs no per-site follow-up call at all: freshness comes straight off
+    the one bulk installations call's last_timestamp (see
+    _fleet_vrm_installations_with_heads), so it's the cheapest of the
+    fleet reports by a wide margin — safe to refresh far more often, and
+    the one report here that could reasonably run live on a button click
+    instead of waiting on a scheduled poll.
+    Returns (rows, error).
+    """
+    installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
+    if error:
+        return None, error
+    rows = []
+    for installation in installations:
+        freshness = _vrm_freshness_tier(installation["vrm_last_seen_seconds_ago"])
+        age = installation["vrm_last_seen_seconds_ago"]
+        age_label = f"last seen {_format_age(age)} ago" if age is not None else "never reported"
+        head_units = mu_to_heads.get(installation["installation_name"].upper(), [])
+        # RD3315(MU8083), not MU8083 — see fleet_power_status's check_one
+        # for why: this trailer's ERP-linked head is the identifier a
+        # ticket would actually use, when one is known.
+        display_unit = (
+            f"{head_units[0]}({installation['installation_name']})" if head_units
+            else installation["installation_name"]
+        )
+        rows.append({
+            "unit": installation["installation_name"],
+            "head_units": head_units,
+            "vrm_last_seen_seconds_ago": age,
+            "vrm_freshness": freshness,
+            "status": {
+                "fresh": "ok", "aging": "ok", "stale": "warn",
+                "disconnected": "fail", "unknown": "warn",
+            }.get(freshness, "warn"),
+            "summary": f"{display_unit} — VRM {freshness} ({age_label})",
+        })
+    return rows, None
+
+
 def unit_battery_weather_outlook(unit, subject=""):
     """
     Correlates a trailer's Victron VRM battery SOC with the multi-day cloud

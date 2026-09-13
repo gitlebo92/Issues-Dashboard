@@ -886,6 +886,147 @@ def _zabbix_call(method, params):
 # (SNUC-PVE/SNUC-Watch/SNUC-Win), so this anchors on the unit prefix
 # (RD/FD/MU + digits) rather than trying to enumerate every device type.
 _ZABBIX_HOST_UNIT_RE = re.compile(r"^((?:RD|FD|MU)\d+)-(.+)$", re.IGNORECASE)
+
+
+# Rough, FIXED (no DST) UTC offset per region code — good enough to place a
+# Zabbix event in "early morning" vs "midday," not precise to the hour.
+# Zabbix hosts carry no per-unit timezone the way VRM installations do (see
+# _resolve_vrm_site's timezone_name), so this is the best available without
+# one. PHX is exact year-round (Arizona doesn't observe DST); the others
+# drift up to an hour off during DST (roughly March-November) — stated
+# here rather than silently assumed away.
+_REGION_UTC_OFFSET_HOURS = {
+    "PHX": -7,
+    "LAX": -8, "OAK": -8,
+    "SLC": -7, "DEN": -7,
+    "HOU": -6,
+}
+# A down-event has to START in this LOCAL hour range to count as
+# "early morning" — before a reasonable sunrise, fleet-wide.
+_EARLY_MORNING_DOWN_HOURS = (3, 6)
+# ...and recover (resolve) within this LOCAL hour range — mid-morning,
+# consistent with solar output ramping back up enough to run the unit
+# again. Wide on purpose: exact recovery time depends on season and how
+# depleted the battery got, not just sunrise.
+_EARLY_MORNING_RECOVERY_HOURS = (7, 12)
+# A single occurrence could be anything (a real network blip, a manual
+# reboot). Require it on at least this many DISTINCT days in the lookback
+# window before calling it a pattern.
+_EARLY_MORNING_MIN_DAYS = 3
+# Reachability-flavored trigger names worth checking — deliberately a
+# substring allowlist, not every Zabbix trigger on the host (a CPU or swap
+# alarm firing at 4am says nothing about power).
+_REACHABILITY_TRIGGER_SUBSTRINGS = ("unavailable", "not available", "no response")
+
+
+def detect_early_morning_outage_pattern(unit, region_code=None, days=21):
+    """
+    For a unit with NO VRM trailer to check directly — the telemetry-free
+    equivalent of detect_solar_shading / detect_dead_panel, using what
+    Zabbix can see instead: if overnight battery reserve isn't enough to
+    last until the sun is back up, the unit browns out and its NUC/router
+    goes unreachable, then it comes back once solar starts producing
+    again. Looks for that specific pattern — unreachable starting in the
+    early-morning hours, recovering mid-morning — recurring on multiple
+    distinct days, using each Zabbix event's own r_eventid to pair a
+    problem with its actual resolution (not just sequential guessing).
+
+    This does NOT distinguish shading from a dead panel from an
+    undersized battery for that site's load — all three would produce the
+    same reachability signature. It also cannot fire for a unit with no
+    resolvable region (no PHX/LAX/OAK/HOU/SLC/DEN in its subject) since
+    there's nothing to place "early morning" against.
+
+    Returns (found, detail, confidence, matching_days) where found is
+    True/False/None (a lookup problem — see detail), matching_days lists
+    the dates (as strings) the pattern was seen on.
+    """
+    region = str(region_code or "").strip().upper()
+    utc_offset = _REGION_UTC_OFFSET_HOURS.get(region)
+    if utc_offset is None:
+        return None, f"No resolvable region for this unit's local time (checked: {region or 'none'})", None, []
+
+    unit_key = str(unit or "").strip().upper()
+    if not unit_key:
+        return None, "Invalid unit", None, []
+    try:
+        hosts = _zabbix_call("host.get", {
+            "output": ["hostid", "host"],
+            "search": {"host": unit_key},
+        })
+    except Exception as exc:
+        return None, f"Zabbix host lookup failed: {exc}", None, []
+    # Router is present on every unit regardless of NUC vs PVE; NUC/SNUC-*
+    # cover the compute side on units that have one.
+    reachability_hosts = [
+        h for h in (hosts or [])
+        if h.get("host", "").upper().startswith(unit_key + "-")
+        and any(tag in h["host"].upper() for tag in ("ROUTER", "NUC", "SNUC"))
+    ]
+    if not reachability_hosts:
+        return None, f"No Zabbix Router/NUC host found for {unit_key}", None, []
+    hostids = [h["hostid"] for h in reachability_hosts]
+
+    try:
+        events = _zabbix_call("event.get", {
+            "output": ["eventid", "clock", "value", "name", "r_eventid"],
+            "hostids": hostids,
+            "source": 0, "object": 0,
+            "time_from": int(time.time()) - days * 86400,
+            "sortfield": ["clock"], "sortorder": "ASC",
+        })
+    except Exception as exc:
+        return None, f"Zabbix event lookup failed: {exc}", None, []
+
+    problems_by_id = {
+        e["eventid"]: e for e in (events or [])
+        if e.get("value") == "1"
+        and any(tag in str(e.get("name") or "").lower() for tag in _REACHABILITY_TRIGGER_SUBSTRINGS)
+    }
+    resolutions_by_id = {e["eventid"]: e for e in (events or []) if e.get("value") == "0"}
+    if not problems_by_id:
+        return False, (
+            f"No reachability problem events (ICMP/agent unavailable) on {unit_key}'s "
+            f"Router/NUC host(s) in the last {days}d"
+        ), None, []
+
+    matching_dates = set()
+    total_reachability_events = len(problems_by_id)
+    for problem in problems_by_id.values():
+        r_id = problem.get("r_eventid")
+        resolution = resolutions_by_id.get(r_id) if r_id and r_id != "0" else None
+        if not resolution:
+            continue  # still open, or resolved by a resolution event outside this window
+        down_local_hour = (datetime.utcfromtimestamp(int(problem["clock"])) + timedelta(hours=utc_offset)).hour
+        up_time = datetime.utcfromtimestamp(int(resolution["clock"])) + timedelta(hours=utc_offset)
+        up_local_hour = up_time.hour
+        if (_EARLY_MORNING_DOWN_HOURS[0] <= down_local_hour <= _EARLY_MORNING_DOWN_HOURS[1]
+                and _EARLY_MORNING_RECOVERY_HOURS[0] <= up_local_hour <= _EARLY_MORNING_RECOVERY_HOURS[1]):
+            matching_dates.add(up_time.date().isoformat())
+
+    if len(matching_dates) < _EARLY_MORNING_MIN_DAYS:
+        return False, (
+            f"{len(matching_dates)} early-morning-down/mid-morning-recovery day(s) in the last {days}d "
+            f"({total_reachability_events} reachability event(s) total) — below the "
+            f"{_EARLY_MORNING_MIN_DAYS}-day pattern threshold"
+        ), None, sorted(matching_dates)
+
+    # Confidence scales with how many distinct days showed the pattern —
+    # capped well short of certain, same principle as the VRM-based
+    # checks: this is a recurring-symptom match, not a direct measurement,
+    # and a genuine network/ISP issue at the same time of day (not power)
+    # would look identical here.
+    confidence = max(35, min(80, round(35 + len(matching_dates) * 6)))
+    detail = (
+        f"{len(matching_dates)} day(s) in the last {days}d where {unit_key} went unreachable "
+        f"between {_EARLY_MORNING_DOWN_HOURS[0]}-{_EARLY_MORNING_DOWN_HOURS[1]} (approx. local, region {region}) "
+        f"and recovered between {_EARLY_MORNING_RECOVERY_HOURS[0]}-{_EARLY_MORNING_RECOVERY_HOURS[1]} — "
+        f"consistent with insufficient overnight battery reserve (shading, a dead panel, or an "
+        f"undersized array for this site's load all look the same here)"
+    )
+    return True, detail, confidence, sorted(matching_dates)
+
+
 def zabbix_active_problems_by_unit():
     """
     Every currently-active Zabbix problem, fleet-wide in two calls, grouped

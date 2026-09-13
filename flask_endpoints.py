@@ -126,6 +126,18 @@ try:
 except Exception as _alarm_history_exc:  # never block startup on history
     print(f"Alarm history prune skipped: {_alarm_history_exc}")
 
+# Scheduled "photograph the panels while they're actually shaded" tasks —
+# see shading_snapshots.py's module docstring. One week is plenty of time
+# for someone to have looked at a captured photo.
+SHADING_SNAPSHOT_RETENTION_DAYS = int(
+    (os.getenv("SHADING_SNAPSHOT_RETENTION_DAYS") or "7").strip() or "7"
+)
+import shading_snapshots
+try:
+    shading_snapshots.prune_old(retention_days=SHADING_SNAPSHOT_RETENTION_DAYS)
+except Exception as _shading_snapshot_exc:  # never block startup on history
+    print(f"Shading snapshot prune skipped: {_shading_snapshot_exc}")
+
 issue_jobs = {}
 stream_jobs = issue_jobs  # shared job store for streamed validations
 issues_validation_lock = threading.Lock()
@@ -143,6 +155,26 @@ ERP_POLL_THROTTLE_SECONDS = 29.5 * 60
 # what the frontend actually polls; the scheduled loop is what keeps it warm.
 _power_infra_cache = {"rows": [], "fetched_at": None, "zabbix_error": None, "vrm_error": None}
 _power_infra_cache_lock = threading.Lock()
+
+# Same shape, x4, for the fleet-wide VRM checks behind the Reports menu's
+# Units Unplugged / Shaded Units / Dead Panels / VRM Disconnected reports.
+# Each covers every VRM installation the fleet has, not just units with a
+# matching open ticket (an earlier version of the first two reports only
+# checked ticket-scoped units; broadened on request). In-memory only, by
+# design — the ask was "keep these up to date without refreshing too often,
+# without taking up a lot of space," and a plain dict refreshed on a timer
+# costs zero disk and answers exactly that, the same way _power_infra_cache
+# already does for Zabbix/VRM alerts. If per-unit HISTORY (not just current
+# state) is wanted later, that's a different, bigger ask — see
+# alarm_history.py's episode model for the precedent.
+_fleet_power_status_cache = {"rows": [], "fetched_at": None, "error": None}
+_fleet_power_status_cache_lock = threading.Lock()
+_fleet_shading_status_cache = {"rows": [], "fetched_at": None, "error": None}
+_fleet_shading_status_cache_lock = threading.Lock()
+_fleet_dead_panel_cache = {"rows": [], "fetched_at": None, "error": None}
+_fleet_dead_panel_cache_lock = threading.Lock()
+_fleet_vrm_freshness_cache = {"rows": [], "fetched_at": None, "error": None}
+_fleet_vrm_freshness_cache_lock = threading.Lock()
 
 ISSUE_RESULT_KEYS = (
     "false_positives",
@@ -1992,6 +2024,141 @@ def issues_power_infra_alerts_cached():
     })
 
 
+def _fleet_cache_route(check_fn, cache, cache_lock, augment_fn=None):
+    """Shared body for a fleet-wide report's live (POST-style semantics,
+    GET verb — read-only, matches the Power & Infra Alerts precedent)
+    endpoint: run the check now, refresh the cache, return the result.
+    `augment_fn`, if given, runs on the rows AFTER caching but before the
+    response — for data that changes independently of the fleet check
+    itself (see _augment_shading_rows_with_snapshot_tasks), so it's never
+    baked into the stored cache and always reflects the current state."""
+    rows, error = check_fn()
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    with cache_lock:
+        cache["rows"] = rows or []
+        cache["fetched_at"] = time.time()
+        cache["error"] = None
+    out_rows = augment_fn(rows or []) if augment_fn else (rows or [])
+    return jsonify({"ok": True, "rows": out_rows, "fetched_at": cache["fetched_at"]})
+
+
+def _fleet_cached_route(cache, cache_lock, augment_fn=None):
+    """Shared body for a fleet-wide report's instant cached read — never
+    calls VRM itself, backed by the scheduled poll (or the last live
+    Refresh)."""
+    with cache_lock:
+        snapshot = dict(cache)
+    rows = snapshot.get("rows") or []
+    return jsonify({
+        "ok": True,
+        "rows": augment_fn(rows) if augment_fn else rows,
+        "fetched_at": snapshot.get("fetched_at"),
+        "error": snapshot.get("error"),
+    })
+
+
+def _snapshot_task_public(task):
+    """Trim a shading_snapshots task row to what the UI needs — no internal
+    subject text, just enough to render a status line + thumbnail link."""
+    if not task:
+        return None
+    return {
+        "id": task["id"],
+        "status": task["status"],
+        "camera_target": task["camera_target"],
+        "peak_hour_utc": task["peak_hour_utc"],
+        "attempts_used": task["attempts_used"],
+        "attempts_total": task["attempts_total"],
+        "next_attempt_at": task["next_attempt_at"],
+        "captured_at": task["captured_at"],
+        "last_note": task["last_note"],
+        "has_image": bool(task["image_filename"]),
+    }
+
+
+def _augment_shading_rows_with_snapshot_tasks(rows):
+    """Attach each row's own most recent shading-snapshot task (if any) —
+    read fresh every time, since a task's status can change between fleet
+    shading polls (they're on different, independent clocks)."""
+    units = [row.get("unit") for row in rows if row.get("unit")]
+    tasks_by_unit = shading_snapshots.latest_tasks_by_unit(units) if units else {}
+    for row in rows:
+        task = tasks_by_unit.get(str(row.get("unit") or "").strip().upper())
+        row["snapshot_task"] = _snapshot_task_public(task)
+    return rows
+
+
+@app.route("/issues/fleet-power-status", methods=["GET"])
+def issues_fleet_power_status():
+    """
+    Experimental: AC-power status for every VRM installation, fleet-wide —
+    live (takes about a minute; runs concurrently). Backs the Units
+    Unplugged report's manual Refresh; the scheduled poll (every
+    FLEET_POWER_STATUS_REFRESH_SECONDS) is what keeps /cached warm day to
+    day.
+    """
+    return _fleet_cache_route(
+        work_tool.fleet_power_status, _fleet_power_status_cache, _fleet_power_status_cache_lock
+    )
+
+
+@app.route("/issues/fleet-power-status/cached", methods=["GET"])
+def issues_fleet_power_status_cached():
+    """Instant cached read for the Units Unplugged report — see issues_fleet_power_status."""
+    return _fleet_cached_route(_fleet_power_status_cache, _fleet_power_status_cache_lock)
+
+
+@app.route("/issues/fleet-shading-status", methods=["GET"])
+def issues_fleet_shading_status():
+    """Experimental: shading status for every VRM installation, fleet-wide — live. Backs the Shaded Units report."""
+    return _fleet_cache_route(
+        work_tool.fleet_shading_status, _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
+        augment_fn=_augment_shading_rows_with_snapshot_tasks,
+    )
+
+
+@app.route("/issues/fleet-shading-status/cached", methods=["GET"])
+def issues_fleet_shading_status_cached():
+    """Instant cached read for the Shaded Units report — see issues_fleet_shading_status."""
+    return _fleet_cached_route(
+        _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
+        augment_fn=_augment_shading_rows_with_snapshot_tasks,
+    )
+
+
+@app.route("/issues/fleet-dead-panel-status", methods=["GET"])
+def issues_fleet_dead_panel_status():
+    """Experimental: dead/underperforming-panel status for every VRM installation, fleet-wide — live. Backs the Dead Panels report."""
+    return _fleet_cache_route(
+        work_tool.fleet_dead_panel_status, _fleet_dead_panel_cache, _fleet_dead_panel_cache_lock
+    )
+
+
+@app.route("/issues/fleet-dead-panel-status/cached", methods=["GET"])
+def issues_fleet_dead_panel_status_cached():
+    """Instant cached read for the Dead Panels report — see issues_fleet_dead_panel_status."""
+    return _fleet_cached_route(_fleet_dead_panel_cache, _fleet_dead_panel_cache_lock)
+
+
+@app.route("/issues/fleet-vrm-freshness", methods=["GET"])
+def issues_fleet_vrm_freshness():
+    """
+    Experimental: VRM data freshness for every installation, fleet-wide —
+    live, and cheap (no per-site VRM calls — see fleet_vrm_freshness_status).
+    Backs the VRM Disconnected report.
+    """
+    return _fleet_cache_route(
+        work_tool.fleet_vrm_freshness_status, _fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock
+    )
+
+
+@app.route("/issues/fleet-vrm-freshness/cached", methods=["GET"])
+def issues_fleet_vrm_freshness_cached():
+    """Instant cached read for the VRM Disconnected report — see issues_fleet_vrm_freshness."""
+    return _fleet_cached_route(_fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock)
+
+
 @app.route("/issues/network-latency-history/<unit>", methods=["POST"])
 def issues_network_latency_history(unit):
     """Experimental: Router/Switch ICMP ping response time & loss over time, from Zabbix."""
@@ -2176,6 +2343,162 @@ def issues_shading_status(unit):
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/schedule-shading-snapshot/<unit>", methods=["POST"])
+def issues_schedule_shading_snapshot(unit):
+    """
+    Schedule a snapshot task aimed at this trailer's own worst shading
+    hour — requires shading to be CURRENTLY detected (runs the check
+    fresh); there's no "peak hour" to aim at otherwise. The task itself
+    doesn't fire until the following day, and only after re-confirming
+    the dip is still happening — see shading_snapshots.py's module
+    docstring and work_tool.verify_shading_dip_now.
+    """
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or request.args.get("subject") or "").strip()
+    camera_target = str(payload.get("camera_target") or "fisheye").strip() or "fisheye"
+
+    info, error = work_tool.unit_shading_status(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    if info.get("shading_status") != "shaded" or info.get("shading_worst_hour_utc") is None:
+        return jsonify({
+            "ok": False,
+            "error": (
+                "No active shading detected right now for this unit — run \"Check Shade\" first, "
+                "or try again once a dip shows up."
+            ),
+        }), 400
+
+    task_id, created, next_attempt_at = shading_snapshots.schedule_task(
+        info["unit"], subject, camera_target, info["shading_worst_hour_utc"],
+    )
+    if task_id is None:
+        return jsonify({"ok": False, "error": "Could not schedule the snapshot task"}), 500
+    return jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "created": created,
+        "unit": info["unit"],
+        "camera_target": camera_target,
+        "peak_hour_utc": info["shading_worst_hour_utc"],
+        "next_attempt_at": next_attempt_at,
+    })
+
+
+@app.route("/issues/schedule-shading-snapshot-bulk", methods=["POST"])
+def issues_schedule_shading_snapshot_bulk():
+    """
+    Same as issues_schedule_shading_snapshot, but for every unit the
+    Shaded Units report CURRENTLY lists as "shaded" — reads the cached
+    fleet shading rows (whatever's already on screen), it does not
+    re-check the whole fleet live. Units already carrying a pending task
+    are left alone (schedule_task's own de-dup), so re-clicking this
+    doesn't pile up repeats.
+    """
+    payload = request.get_json(silent=True) or {}
+    camera_target = str(payload.get("camera_target") or "fisheye").strip() or "fisheye"
+
+    with _fleet_shading_status_cache_lock:
+        rows = list(_fleet_shading_status_cache.get("rows") or [])
+
+    scheduled, already_pending, skipped = [], [], []
+    for row in rows:
+        if row.get("shading_status") != "shaded":
+            continue
+        unit = row.get("unit")
+        worst_hour = row.get("shading_worst_hour_utc")
+        if not unit or worst_hour is None:
+            skipped.append(unit or "(unknown)")
+            continue
+        task_id, created, next_attempt_at = shading_snapshots.schedule_task(
+            unit, "", camera_target, worst_hour,
+        )
+        if task_id is None:
+            skipped.append(unit)
+        elif created:
+            scheduled.append({"unit": unit, "task_id": task_id, "next_attempt_at": next_attempt_at})
+        else:
+            already_pending.append(unit)
+
+    return jsonify({
+        "ok": True,
+        "scheduled": scheduled,
+        "already_pending": already_pending,
+        "skipped": skipped,
+    })
+
+
+@app.route("/issues/shading-snapshot-task/<unit>", methods=["GET"])
+def issues_shading_snapshot_task(unit):
+    """Latest snapshot task (if any) for one unit — for the Diagnostics panel."""
+    tasks = shading_snapshots.latest_tasks_by_unit([unit])
+    task = tasks.get(str(unit or "").strip().upper())
+    return jsonify({"ok": True, "task": _snapshot_task_public(task)})
+
+
+@app.route("/issues/shading-snapshot-image/<int:task_id>", methods=["GET"])
+def issues_shading_snapshot_image(task_id):
+    path = shading_snapshots.image_path_for(task_id)
+    if not path:
+        return "No image for this task", 404
+    with open(path, "rb") as fh:
+        image = fh.read()
+    response = Response(image, mimetype="image/jpeg")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
+@app.route("/issues/cancel-shading-snapshot/<int:task_id>", methods=["POST"])
+def issues_cancel_shading_snapshot(task_id):
+    ok = shading_snapshots.cancel_task(task_id)
+    return jsonify({"ok": ok})
+
+
+@app.route("/issues/outage-pattern/<unit>", methods=["POST"])
+def issues_outage_pattern(unit):
+    """
+    Experimental, newer and less field-validated than the VRM-based
+    plug/shading/dead-panel checks: for a unit with no VRM trailer to
+    check directly, looks in Zabbix's own event history for a recurring
+    early-morning-unreachable / mid-morning-recovered pattern — see
+    work_tool.detect_early_morning_outage_pattern for the reasoning and
+    its explicit limitations (can't tell shading from a dead panel from
+    an undersized array, and needs a resolvable region for local time).
+    Read-only against Zabbix.
+    """
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    days = payload.get("days") or request.args.get("days") or 21
+    region = work_tool.region_code_from_subject(subject)
+    found, detail, confidence, matching_days = work_tool.detect_early_morning_outage_pattern(
+        unit, region, days=int(days)
+    )
+    unit_key = str(unit or "").strip().upper()
+    if found is None:
+        status, label = "warn", "cannot check — " + detail
+    elif found:
+        status, label = "fail", "recurring early-morning outage pattern detected"
+    else:
+        status, label = "ok", "no recurring early-morning outage pattern found"
+    confidence_text = f" ({confidence}% confidence)" if confidence is not None else ""
+    summary = f"{unit_key} — {label}{confidence_text}"
+    return jsonify({
+        "ok": True,
+        "unit": unit_key,
+        "region": region,
+        "found": found,
+        "detail": detail,
+        "confidence": confidence,
+        "matching_days": matching_days,
+        "status": status,
+        "summary": summary,
+    })
 
 
 @app.route("/issues/battery-history/<unit>", methods=["POST"])
@@ -3235,6 +3558,16 @@ def _start_arizona_validation_scheduler():
                 "Power & Infra Alerts (Zabbix + VRM) poll scheduled every "
                 f"{POWER_INFRA_ALERTS_REFRESH_SECONDS // 60} minutes"
             )
+        for loop_fn, thread_name, refresh_seconds, label in (
+            (_fleet_power_status_loop, "fleet-power-status", FLEET_POWER_STATUS_REFRESH_SECONDS, "Units Unplugged"),
+            (_fleet_shading_status_loop, "fleet-shading-status", FLEET_SHADING_STATUS_REFRESH_SECONDS, "Shaded Units"),
+            (_fleet_dead_panel_loop, "fleet-dead-panel", FLEET_DEAD_PANEL_REFRESH_SECONDS, "Dead Panels"),
+            (_fleet_vrm_freshness_loop, "fleet-vrm-freshness", FLEET_VRM_FRESHNESS_REFRESH_SECONDS, "VRM Disconnected"),
+        ):
+            fleet_thread = threading.Thread(target=loop_fn, daemon=True, name=thread_name)
+            fleet_thread.start()
+            if not automated_tasks_paused():
+                print(f"Fleet {label} report poll scheduled every {refresh_seconds // 60} minutes")
 
 def _run_scheduled_art_recovery_report():
     if automated_tasks_paused():
@@ -3311,21 +3644,228 @@ def _power_infra_alerts_loop():
         time.sleep(POWER_INFRA_ALERTS_REFRESH_SECONDS)
 
 
+def _run_fleet_check(label, check_fn, cache, cache_lock):
+    """
+    Shared body for the four fleet-wide VRM poll loops below: fetch, cache,
+    log one line. Never lets a bad poll wipe out a good cache — on error,
+    the previous rows just stay in place for the next read (only
+    cache["error"] updates, so the UI can still show "data as of a while
+    ago" instead of nothing).
+    """
+    if automated_tasks_paused():
+        return
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    try:
+        rows, error = check_fn()
+    except Exception as exc:
+        print(f"[{when}] Fleet {label} poll failed: {exc}")
+        with cache_lock:
+            cache["error"] = str(exc)
+        return
+    if error:
+        print(f"[{when}] Fleet {label} poll failed: {error}")
+        with cache_lock:
+            cache["error"] = error
+        return
+    with cache_lock:
+        cache["rows"] = rows or []
+        cache["fetched_at"] = time.time()
+        cache["error"] = None
+    print(f"[{when}] Fleet {label}: checked {len(rows or [])} installation(s)")
+
+
+def _fleet_power_status_loop():
+    # Staggered startup delays (120/150/180/60s) so the four fleet polls —
+    # each a genuine minute-plus of concurrent VRM calls — don't all launch
+    # in the same instant as each other or as the lighter existing pollers.
+    time.sleep(120)
+    while True:
+        try:
+            _run_fleet_check(
+                "power status", work_tool.fleet_power_status,
+                _fleet_power_status_cache, _fleet_power_status_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet power status poll failed: {exc}")
+        time.sleep(FLEET_POWER_STATUS_REFRESH_SECONDS)
+
+
+def _fleet_shading_status_loop():
+    time.sleep(150)
+    while True:
+        try:
+            _run_fleet_check(
+                "shading status", work_tool.fleet_shading_status,
+                _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet shading status poll failed: {exc}")
+        time.sleep(FLEET_SHADING_STATUS_REFRESH_SECONDS)
+
+
+def _fleet_dead_panel_loop():
+    time.sleep(180)
+    while True:
+        try:
+            _run_fleet_check(
+                "dead panel", work_tool.fleet_dead_panel_status,
+                _fleet_dead_panel_cache, _fleet_dead_panel_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet dead panel poll failed: {exc}")
+        time.sleep(FLEET_DEAD_PANEL_REFRESH_SECONDS)
+
+
+def _fleet_vrm_freshness_loop():
+    # No per-site VRM calls at all (see fleet_vrm_freshness_status), so
+    # this one can run often without adding real load.
+    time.sleep(60)
+    while True:
+        try:
+            _run_fleet_check(
+                "VRM freshness", work_tool.fleet_vrm_freshness_status,
+                _fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet VRM freshness poll failed: {exc}")
+        time.sleep(FLEET_VRM_FRESHNESS_REFRESH_SECONDS)
+
+
+def _run_due_shading_snapshot_tasks():
+    """
+    Process every snapshot task whose scheduled attempt has arrived:
+    re-verify the dip is actually happening right now (see
+    work_tool.verify_shading_dip_now), and only THEN spend a camera fetch
+    on it. Either outcome consumes one attempt — see shading_snapshots'
+    own record_attempt_failure/record_captured for the retry-vs-exhausted
+    logic.
+    """
+    for task in shading_snapshots.due_tasks():
+        task_id = task["id"]
+        unit = task["unit"]
+        subject = task.get("subject") or ""
+        hour_utc = task["peak_hour_utc"]
+        try:
+            is_dip, detail, _current_watts, _typical_watts = work_tool.verify_shading_dip_now(
+                unit, subject, hour_utc
+            )
+        except Exception as exc:
+            shading_snapshots.record_attempt_failure(task_id, f"Verification error: {exc}")
+            continue
+        if not is_dip:
+            shading_snapshots.record_attempt_failure(
+                task_id, f"Not captured: {detail or 'could not verify a current dip'}"
+            )
+            continue
+        try:
+            image, error = work_tool.camera_snapshot(unit, task["camera_target"])
+        except Exception as exc:
+            image, error = None, str(exc)
+        if error or not image:
+            shading_snapshots.record_attempt_failure(
+                task_id, f"Dip confirmed ({detail}) but camera fetch failed: {error}"
+            )
+            continue
+        shading_snapshots.record_captured(task_id, image, f"Captured — {detail}")
+
+
+def _shading_snapshot_scheduler_loop():
+    # Brief startup delay so the service finishes boot before the first
+    # pass. Deliberately does NOT check automated_tasks_paused() like the
+    # fleet-report loops above: each task here is a specific, user-
+    # scheduled one-off (a button click created it, aimed at a specific
+    # future day), not a recurring automatic poll, and it only ever does
+    # read-only VRM/camera GETs plus writes to this app's own local
+    # snapshot store — none of what PAUSE_AUTOMATED_TASKS exists to hold
+    # off (ERP polling/writes, the 4 AM validation jobs). Running it in
+    # sandbox too is also how this feature gets exercised there at all —
+    # unlike the fleet-report pollers, its own startup isn't gated behind
+    # WORK_TOOL_ENV != "sandbox" either (see _start_shading_snapshot_scheduler).
+    time.sleep(90)
+    while True:
+        try:
+            _run_due_shading_snapshot_tasks()
+        except Exception as exc:
+            print(f"Shading snapshot scheduler pass failed: {exc}")
+        try:
+            shading_snapshots.prune_old(SHADING_SNAPSHOT_RETENTION_DAYS)
+        except Exception as exc:
+            print(f"Shading snapshot prune failed: {exc}")
+        time.sleep(SHADING_SNAPSHOT_POLL_SECONDS)
+
+
+_shading_snapshot_scheduler_started = False
+_shading_snapshot_scheduler_lock = threading.Lock()
+
+
+def _start_shading_snapshot_scheduler():
+    global _shading_snapshot_scheduler_started
+    with _shading_snapshot_scheduler_lock:
+        if _shading_snapshot_scheduler_started:
+            return
+        _shading_snapshot_scheduler_started = True
+        thread = threading.Thread(
+            target=_shading_snapshot_scheduler_loop, daemon=True, name="shading-snapshot-scheduler",
+        )
+        thread.start()
+        print(
+            "Shading snapshot scheduler checking for due tasks every "
+            f"{SHADING_SNAPSHOT_POLL_SECONDS // 60} minute(s)"
+        )
+
+
 ART_REPORT_REFRESH_SECONDS = int(
     (os.getenv("ART_REPORT_REFRESH_SECONDS") or "3600").strip() or "3600"
 )
 POWER_INFRA_ALERTS_REFRESH_SECONDS = int(
     (os.getenv("POWER_INFRA_ALERTS_REFRESH_SECONDS") or "600").strip() or "600"
 )
+# Longer than POWER_INFRA_ALERTS_REFRESH_SECONDS on purpose — each of these
+# costs a real fan-out of VRM calls across the whole fleet (a minute or more
+# wall-clock, not a couple of seconds), so polling them as often would mean
+# a near-continuous background load against VRM's API for marginal freshness
+# gain. VRM freshness itself is the exception — see its loop above.
+FLEET_POWER_STATUS_REFRESH_SECONDS = int(
+    (os.getenv("FLEET_POWER_STATUS_REFRESH_SECONDS") or "1800").strip() or "1800"
+)
+FLEET_SHADING_STATUS_REFRESH_SECONDS = int(
+    (os.getenv("FLEET_SHADING_STATUS_REFRESH_SECONDS") or "3600").strip() or "3600"
+)
+FLEET_DEAD_PANEL_REFRESH_SECONDS = int(
+    (os.getenv("FLEET_DEAD_PANEL_REFRESH_SECONDS") or "3600").strip() or "3600"
+)
+FLEET_VRM_FRESHNESS_REFRESH_SECONDS = int(
+    (os.getenv("FLEET_VRM_FRESHNESS_REFRESH_SECONDS") or "600").strip() or "600"
+)
+# How often the shading-snapshot scheduler checks for due tasks. Short,
+# unlike the fleet-report polls above — a task's own next_attempt_at is
+# already a full day out, so there's no cost to checking often, and it's
+# what keeps a scheduled capture from missing its window by more than a
+# few minutes.
+SHADING_SNAPSHOT_POLL_SECONDS = int(
+    (os.getenv("SHADING_SNAPSHOT_POLL_SECONDS") or "300").strip() or "300"
+)
 
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ != "__main__":
     if WORK_TOOL_ENV != "sandbox":
         _start_arizona_validation_scheduler()
+    # Unlike the line above, no sandbox exclusion — see
+    # _shading_snapshot_scheduler_loop's own comment for why.
+    _start_shading_snapshot_scheduler()
 
 if __name__ == "__main__":
     debug = WORK_TOOL_ENV == "sandbox"
     if not debug and WORK_TOOL_ENV != "sandbox":
         _start_arizona_validation_scheduler()
+    # debug=True (sandbox only) means app.run() below uses Werkzeug's
+    # reloader, which re-executes this whole script in a child process
+    # with WERKZEUG_RUN_MAIN=true — the PARENT ("watcher") process reaches
+    # this same line too but never actually serves requests, so it must
+    # not start a real background thread here. Without this check, sandbox
+    # would run two live copies of the scheduler (one that never serves,
+    # one that does), each independently hitting VRM/cameras.
+    if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _start_shading_snapshot_scheduler()
     # Loopback by default. The dashboard has no authentication and holds
     # switch / NUC / PVE / Scrypted credentials plus live camera proxies, so
     # binding every interface is opt-in rather than the default it used to be.
