@@ -6258,11 +6258,11 @@
             },
             {
                 id: "switch_uptime",
-                label: "Uptime",
+                label: "Switch Uptime",
                 title: "Switch / Robofiber uptime",
                 busyLabel: "…",
                 run: function (entry, btn) {
-                    quickFetch(btn, "Uptime", "/issues/robofiber-uptime/" + encodeURIComponent(entry.unit), function (data) {
+                    quickFetch(btn, "Switch Uptime", "/issues/robofiber-uptime/" + encodeURIComponent(entry.unit), function (data) {
                         const head = "Switch uptime " + (data.unit || entry.unit)
                             + (data.ip ? (" (" + data.ip + ")") : "");
                         const body = (data.lines || []).filter(Boolean).join("\n") || data.output || "";
@@ -8327,7 +8327,7 @@
             const uptimeBtn = document.createElement("button");
             uptimeBtn.type = "button";
             uptimeBtn.className = "action-btn";
-            uptimeBtn.textContent = "Uptime";
+            uptimeBtn.textContent = "Switch Uptime";
             uptimeBtn.addEventListener("click", function () {
                 uptimeBtn.disabled = true;
                 uptimeBtn.textContent = "Checking...";
@@ -8360,7 +8360,7 @@
                         statusEl.textContent = data.uptime || data.output || header;
                     })
                     .catch(function (error) {
-                        const message = "Uptime failed: " + (error.message || error);
+                        const message = "Switch Uptime failed: " + (error.message || error);
                         consoleLines.push(message);
                         renderConsole(true);
                         statusEl.textContent = message;
@@ -8368,7 +8368,7 @@
                     })
                     .finally(function () {
                         uptimeBtn.disabled = false;
-                        uptimeBtn.textContent = "Uptime";
+                        uptimeBtn.textContent = "Switch Uptime";
                     });
             });
             switchMenu.appendChild(uptimeBtn);
@@ -12981,7 +12981,7 @@
                     const uptimeBtn = document.createElement("button");
                     uptimeBtn.type = "button";
                     uptimeBtn.className = "action-btn";
-                    uptimeBtn.textContent = "Uptime";
+                    uptimeBtn.textContent = "Switch Uptime";
                     if (!entry.unit) {
                         uptimeBtn.disabled = true;
                         uptimeBtn.title = "No unit on this ticket";
@@ -13029,7 +13029,7 @@
                             })
                             .catch(function (error) {
                                 const message =
-                                    "Uptime failed: "
+                                    "Switch Uptime failed: "
                                     + (error.message || error);
                                 consoleLines.push(message);
                                 renderConsole(true);
@@ -13038,7 +13038,7 @@
                             })
                             .finally(function () {
                                 uptimeBtn.disabled = false;
-                                uptimeBtn.textContent = "Uptime";
+                                uptimeBtn.textContent = "Switch Uptime";
                             });
                     });
                     switchMenu.appendChild(uptimeBtn);
