@@ -507,14 +507,20 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertEqual(info["verdict"], "power_outage")
 
     def test_inconclusive_when_neither_edge_matches(self):
-        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
-        start = end - dt.timedelta(minutes=30)
+        # Switch rebooted INSIDE the window itself — genuinely ambiguous
+        # (could be power loss mid-outage, could be an unrelated
+        # coincidental reboot). Distinct from the switch rebooting well
+        # AFTER the window already ended, which now gets its own hedged
+        # cell_outage read — see test_hedged_cell_outage_when_switch_
+        # rebooted_after_an_older_window below.
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10)
+        start = end - dt.timedelta(minutes=40)
+        reboot_time = start + dt.timedelta(minutes=15)
+        uptime_seconds = int((dt.datetime.now(dt.timezone.utc) - reboot_time).total_seconds())
         with (
             mock.patch.object(
                 work_tool.diagnostics, "get_robofiber_uptime",
-                # Rebooted 2 hours ago — well inside the window, matching
-                # neither its start nor its end.
-                return_value=({"uptime": "Uptime: 0 Days 2 Hours 0 Mins 0 Secs"}, None),
+                return_value=({"uptime": f"Uptime: 0 Days 0 Hours 0 Mins {uptime_seconds} Secs"}, None),
             ),
             mock.patch.object(
                 work_tool.diagnostics, "unit_network_latency_history",
@@ -526,6 +532,33 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
             info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
         self.assertIsNone(error)
         self.assertEqual(info["verdict"], "inconclusive")
+
+    def test_hedged_cell_outage_when_switch_rebooted_after_an_older_window(self):
+        # Reported live (RD3020, 2026-09-14): the switch's current uptime
+        # traced back only a few hours, entirely unrelated to a real
+        # outage from the day before. Per Andrew's own read, a window the
+        # current uptime doesn't reach back to at all — the switch has
+        # SINCE rebooted again for some other reason — still points to
+        # cellular, just hedged rather than certain.
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        start = end - dt.timedelta(minutes=30)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                # Rebooted 2 hours ago — the window ended a full day ago.
+                return_value=({"uptime": "Uptime: 0 Days 2 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": self._loss_points(start, end)}}}, None,
+                ),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "cell_outage")
+        self.assertIn("since rebooted again", info["reason"])
 
     def test_no_recent_outage_when_no_high_loss_window(self):
         with (
@@ -613,23 +646,32 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         # polls, so a switch that came up 40 minutes after the window
         # "ended" (well outside the native 15-minute tolerance, but inside
         # the widened one for this resolution) should still resolve as a
-        # real power-outage match, not inconclusive.
+        # real power-outage match, not inconclusive. The window here is
+        # 10 days old — outside the native (7-day) phase's own range, so
+        # unit_power_vs_cell_outage's two-phase lookup only finds it on
+        # the older, hourly-trend fallback (see NetworkLatencyHistoryLossAggregate
+        # and unit_power_vs_cell_outage's own native-then-older design).
         end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)
         start = end - dt.timedelta(hours=3)
         uptime_seconds = int(
             (dt.datetime.now(dt.timezone.utc) - (end + dt.timedelta(minutes=40))).total_seconds()
         )
         points = self._loss_points(start, end)
+
+        def fake_latency_history(unit, hours, loss_aggregate="avg"):
+            if hours >= 24 * 14:
+                return (
+                    {"charts": {"router_loss": {"points": points}}, "resolution": "hourly average"},
+                    None,
+                )
+            # Native (7-day) phase — the real window is 10 days old, well
+            # outside this range, so it genuinely finds nothing.
+            return {"charts": {"router_loss": {"points": []}}, "resolution": "native (~3min)"}, None
+
         with (
             mock.patch.object(
                 work_tool.diagnostics, "unit_network_latency_history",
-                return_value=(
-                    {
-                        "charts": {"router_loss": {"points": points}},
-                        "resolution": "hourly average",
-                    },
-                    None,
-                ),
+                side_effect=fake_latency_history,
             ),
             mock.patch.object(
                 work_tool.diagnostics, "get_robofiber_uptime",
@@ -639,6 +681,62 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
             info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999", hours=24 * 14)
         self.assertIsNone(error)
         self.assertEqual(info["verdict"], "power_outage")
+
+    def test_native_window_preferred_over_older_trend_data(self):
+        # Reported live (RD3124, 2026-09-14): a real, precise ~101-minute
+        # outage 3 days old — well within native range — was getting
+        # coarsened to a meaningless single-hour window because the
+        # 2-week DEFAULT lookback alone pushed the whole query into
+        # hourly-trend mode, regardless of how recent the event actually
+        # was. The native (7-day) phase must be tried FIRST and, once it
+        # finds a window, used as-is — the older/trend phase must not run
+        # at all in that case (asserted here via a side_effect that raises
+        # if it's ever asked for a >7-day window).
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+        start = end - dt.timedelta(minutes=101)
+        uptime_seconds = int((dt.datetime.now(dt.timezone.utc) - end).total_seconds())
+        native_points = self._loss_points(start, end)
+
+        def fake_latency_history(unit, hours, loss_aggregate="avg"):
+            if hours > 24 * 7:
+                raise AssertionError("older/trend phase should not run when native already found a window")
+            return {"charts": {"router_loss": {"points": native_points}}, "resolution": "native (~3min)"}, None
+
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                side_effect=fake_latency_history,
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": f"Uptime: 0 Days 0 Hours 0 Mins {uptime_seconds} Secs"}, None),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "power_outage")
+        # The precise native window (within one ~3-min poll step), not a
+        # coarsened, hour-bucket-collapsed one.
+        self.assertAlmostEqual(info["loss_window_end"], end.timestamp(), delta=200)
+
+
+class RebootBounceNote(unittest.TestCase):
+    def test_no_note_when_no_data_near_reboot(self):
+        # No Zabbix points at all near the reboot — a data gap, not
+        # evidence of a clean bounce; stays silent rather than asserting one.
+        note = work_tool.diagnostics._reboot_bounce_note(1000.0, [], 900)
+        self.assertIsNone(note)
+
+    def test_no_note_when_elevated_loss_nearby(self):
+        loss_points = [{"t": 1000_000, "v": 45.0}]  # 45% loss at t=1000s
+        note = work_tool.diagnostics._reboot_bounce_note(1000.0, loss_points, 900)
+        self.assertIsNone(note)
+
+    def test_note_when_flat_near_reboot(self):
+        loss_points = [{"t": 1000_000, "v": 0.0}, {"t": 1100_000, "v": 5.0}]
+        note = work_tool.diagnostics._reboot_bounce_note(1000.0, loss_points, 900)
+        self.assertIsNotNone(note)
+        self.assertIn("bounce", note)
 
 
 if __name__ == "__main__":

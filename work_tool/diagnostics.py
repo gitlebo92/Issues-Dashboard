@@ -1369,6 +1369,13 @@ def _parse_switch_uptime_seconds(text):
         total += value * seconds_per
         found = True
     return total if found else None
+# Arizona (Phoenix) never observes DST, so this fixed -7 offset is correct
+# year-round — see work_tool.weather's identical _ARIZONA_TZ. Used for
+# every timestamp unit_power_vs_cell_outage shows a tech, not UTC — found
+# live (2026-09-14): a real 8:04 AM MST outage read as "8:00 AM" in a UTC
+# label was mistaken for the same local hour, when it was actually 1:00 AM
+# MST, a routine source of exactly this kind of confusion.
+_ARIZONA_TZ = timezone(timedelta(hours=-7), "MST")
 # How close "the switch came back up" has to land to the loss window's
 # start/end to count as a match rather than coincidence — wide enough to
 # cover the switch's own boot time after power returns plus Zabbix's own
@@ -1390,6 +1397,39 @@ _POWER_VS_CELL_TOLERANCE_SECONDS_COARSE = 90 * 60
 # plateau, with a little headroom so one missed/late poll doesn't split a
 # real full outage into two separate windows.
 _POWER_VS_CELL_LOSS_THRESHOLD = 90.0
+def _all_high_loss_windows(points, threshold=_POWER_VS_CELL_LOSS_THRESHOLD):
+    """
+    Every contiguous run of points at/above `threshold`% loss, by
+    timestamp, oldest first — same run-detection _latest_high_loss_window
+    always used, just returning every qualifying run instead of only the
+    newest one (see unit_power_vs_cell_outage's older-window reasoning,
+    which needs to see all of them, not just the latest). Returns a list
+    of (start_ms, end_ms, point_count) tuples, empty if no point in the
+    whole series ever reached the threshold.
+    """
+    ordered = sorted(
+        (p for p in (points or []) if p.get("t") is not None), key=lambda p: p["t"]
+    )
+    windows = []
+    run_start = None
+    run_end = None
+    run_count = 0
+    for point in ordered:
+        value = point.get("v")
+        if value is not None and value >= threshold:
+            if run_start is None:
+                run_start = point["t"]
+                run_count = 0
+            run_count += 1
+            run_end = point["t"]
+        else:
+            if run_start is not None:
+                windows.append((run_start, run_end, run_count))
+            run_start = None
+            run_count = 0
+    if run_start is not None:
+        windows.append((run_start, run_end, run_count))
+    return windows
 def _latest_high_loss_window(points, threshold=_POWER_VS_CELL_LOSS_THRESHOLD):
     """
     The most recent contiguous run of points at/above `threshold`% loss,
@@ -1399,24 +1439,41 @@ def _latest_high_loss_window(points, threshold=_POWER_VS_CELL_LOSS_THRESHOLD):
     (start_ms, end_ms, point_count), or None if no point in the whole
     series ever reached the threshold.
     """
-    ordered = sorted(
-        (p for p in (points or []) if p.get("t") is not None), key=lambda p: p["t"]
+    windows = _all_high_loss_windows(points, threshold)
+    return windows[-1] if windows else None
+# How much loss counts as worth noting near a reboot boundary even when it
+# never reached the full outage threshold above — see _reboot_bounce_note.
+# Lower than _POWER_VS_CELL_LOSS_THRESHOLD on purpose: the question here
+# isn't "was this a full outage" (that's the threshold above), it's "was
+# there ANY real network trouble at all right when the switch came up," so
+# a modest, genuine blip should still count as "not a clean bounce."
+_POWER_VS_CELL_BOUNCE_LOSS_FLOOR = 30.0
+def _reboot_bounce_note(switch_up_since, loss_points, tolerance_seconds):
+    """
+    Andrew's second half of this: a switch reboot with NO corresponding
+    Zabbix loss reading anywhere near it — not even a modest one, let
+    alone a real outage — is best explained by a manual/relay power-cycle
+    (a "bounce") brief enough that Zabbix's own ~3-minute poll cadence
+    never caught it, rather than an actual network outage that happened
+    to leave no trace. Returns a short supporting note, or None when
+    there WAS some elevated reading nearby (so this stays silent rather
+    than asserting a bounce over real, if inconclusive, evidence).
+    """
+    if switch_up_since is None:
+        return None
+    nearby = [
+        p for p in (loss_points or [])
+        if p.get("t") is not None and p.get("v") is not None
+        and abs(p["t"] / 1000 - switch_up_since) <= tolerance_seconds
+    ]
+    if not nearby:
+        return None
+    if any(p["v"] >= _POWER_VS_CELL_BOUNCE_LOSS_FLOOR for p in nearby):
+        return None
+    return (
+        "no elevated router loss anywhere near when the switch came up either — "
+        "consistent with a manual/relay bounce, not a network outage that went unlogged"
     )
-    best = None
-    run_start = None
-    run_count = 0
-    for point in ordered:
-        value = point.get("v")
-        if value is not None and value >= threshold:
-            if run_start is None:
-                run_start = point["t"]
-                run_count = 0
-            run_count += 1
-            best = (run_start, point["t"], run_count)
-        else:
-            run_start = None
-            run_count = 0
-    return best
 def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     """
     Power outage vs. cell/carrier outage for a down unit — automates the
@@ -1431,6 +1488,24 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
       even STARTED -> it never lost power at all, so whatever broke
       connectivity has to be upstream of it -> CELL (carrier/backhaul)
       OUTAGE.
+    - Switch's CURRENT uptime starts well AFTER the (most recent) loss
+      window already ended — it's since rebooted again for some other,
+      unrelated reason. Reported live (RD3020, 2026-09-14): the switch's
+      current uptime traced back only ~5.5h, entirely unrelated to a real
+      ~29-minute outage the day before — but per Andrew's own read
+      ("prior to rebooting, switch uptime was 83 days... a Zabbix outage
+      [then] means it was cellular"), a window that predates the current
+      reboot AND has no reboot of its own between it and now still points
+      to cellular, since whatever caused it didn't coincide with a switch
+      restart. This can't be as certain as the two cases above — the
+      switch's own log doesn't retain reboot history far enough back to
+      independently confirm no OTHER reboot happened in between (checked
+      live: this fleet's Netonix syslogs are a few hours of DHCP-renewal
+      noise, not a real history) — so it's still reported as CELL OUTAGE
+      (same verdict, not a new one) but with a hedged reason spelling out
+      that dependency, plus (see _reboot_bounce_note) whether the
+      switch's OWN reboot shows any Zabbix signal at all, which is
+      supporting-not-decisive evidence either way.
     - Anything else (switch rebooted mid-window for some unrelated
       reason, no clear full-loss window in range, uptime text didn't
       parse) comes back inconclusive rather than guessed at — a lead,
@@ -1461,27 +1536,47 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     # at all. SSH'ing into every switch just to throw the answer away for
     # units with nothing to explain would turn a fleet-wide sweep into a
     # genuinely slow, needless SSH hammering of the whole switch fleet.
-    # loss_aggregate="max" — see unit_network_latency_history's own
-    # comment: past 7 days this pulls hourly-trend data, and the default
-    # hourly AVERAGE dilutes a real, sustained-but-shorter-than-an-hour
-    # outage below the 90% threshold below, silently missing it. The
-    # hour's own peak loss doesn't have that failure mode.
-    latency_info, latency_error = unit_network_latency_history(unit, hours, loss_aggregate="max")
+    #
+    # Two-phase, native precision preferred: query native ~3-minute
+    # history for whatever portion of the request falls in the last 7
+    # days (Zabbix's own raw-history retention ceiling), and ONLY fall
+    # back to coarser hourly-trend data (loss_aggregate="max" — see
+    # unit_network_latency_history's own comment on why max, not avg) for
+    # the older remainder past that, and only if the native phase found
+    # nothing. Reported live, 2026-09-14 (RD3124): a real, continuous
+    # 101-minute 100%-loss outage from 3 days earlier — well within native
+    # range — collapsed to a meaningless "8:00-8:00 UTC" single-hour
+    # window, because the 2-week DEFAULT lookback alone pushed the whole
+    # query into hourly-trend mode regardless of how recent the actual
+    # event turned out to be. Always preferring native data when it's
+    # available avoids coarsening a precise, recent event just because the
+    # requested window also happens to reach further back.
+    native_hours = min(hours, 24 * 7)
+    latency_info, latency_error = unit_network_latency_history(unit, native_hours)
     if latency_error:
         return None, latency_error
     loss_points = (
         ((latency_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
     )
-    # Which tolerance applies depends on what resolution the loss window
-    # itself was actually found in — see _POWER_VS_CELL_TOLERANCE_SECONDS_
-    # COARSE's own comment.
-    tolerance_seconds = (
-        _POWER_VS_CELL_TOLERANCE_SECONDS_COARSE
-        if (latency_info or {}).get("resolution") == "hourly average"
-        else _POWER_VS_CELL_TOLERANCE_SECONDS
-    )
-    window = _latest_high_loss_window(loss_points)
-    if window is None:
+    tolerance_seconds = _POWER_VS_CELL_TOLERANCE_SECONDS
+    windows = _all_high_loss_windows(loss_points)
+    if not windows and hours > 24 * 7:
+        older_info, older_error = unit_network_latency_history(unit, hours, loss_aggregate="max")
+        if older_error:
+            return None, older_error
+        older_points = (
+            ((older_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
+        )
+        # Only the portion older than what the native phase above already
+        # covered — the native call is authoritative for its own range;
+        # re-finding the same stretch at coarser precision here would
+        # only make an already-checked window worse, never better.
+        native_cutoff_ms = (time.time() - native_hours * 3600) * 1000
+        loss_points = [p for p in older_points if (p.get("t") or 0) < native_cutoff_ms]
+        windows = _all_high_loss_windows(loss_points)
+        if windows:
+            tolerance_seconds = _POWER_VS_CELL_TOLERANCE_SECONDS_COARSE
+    if not windows:
         return {
             "unit": unit,
             "verdict": "no_recent_outage",
@@ -1515,13 +1610,17 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     now = time.time()
     switch_up_since = now - switch_uptime_seconds
     switch_uptime_label = _format_switch_uptime_seconds(switch_uptime_seconds)
-    switch_up_since_label = datetime.fromtimestamp(switch_up_since, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    switch_up_since_label = datetime.fromtimestamp(switch_up_since, tz=_ARIZONA_TZ).strftime("%Y-%m-%d %H:%M %Z")
 
-    window_start_ms, window_end_ms, window_points = window
+    # Most recent window first — same precise edge-matching as always;
+    # older windows (if any) only come into play in the "since rebooted
+    # for some other reason" branch below.
+    window_start_ms, window_end_ms, window_points = windows[-1]
+    older_window_count = len(windows) - 1
     window_start = window_start_ms / 1000
     window_end = window_end_ms / 1000
-    window_start_label = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    window_end_label = datetime.fromtimestamp(window_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    window_start_label = datetime.fromtimestamp(window_start, tz=_ARIZONA_TZ).strftime("%Y-%m-%d %H:%M %Z")
+    window_end_label = datetime.fromtimestamp(window_end, tz=_ARIZONA_TZ).strftime("%H:%M %Z")
 
     if abs(switch_up_since - window_end) <= tolerance_seconds:
         verdict = "power_outage"
@@ -1529,7 +1628,32 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     elif switch_up_since <= window_start - tolerance_seconds:
         verdict = "cell_outage"
         reason = "switch has been up continuously since before the outage began"
+    elif switch_up_since > window_end + tolerance_seconds:
+        # The switch's CURRENT uptime doesn't reach back to this window
+        # at all — it's since rebooted again for some other reason. See
+        # the docstring's third case: this window's own cause didn't
+        # coincide with a switch restart we can see, which points to
+        # cellular, hedged because we can't rule out an unlogged reboot
+        # in between.
+        verdict = "cell_outage"
+        reason = (
+            "switch's current uptime starts well after this loss window ended (it's "
+            "since rebooted again for an unrelated reason) — likely cellular, since "
+            "whatever caused this window didn't coincide with a switch restart, though "
+            "this can't rule out an earlier reboot this check has no record of"
+        )
+        if older_window_count:
+            reason += (
+                f"; {older_window_count} earlier {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ window(s) "
+                f"also found in the last {hours}h, same read likely applies to those too"
+            )
+        bounce_note = _reboot_bounce_note(switch_up_since, loss_points, tolerance_seconds)
+        if bounce_note:
+            reason += f"; the switch's own reboot {bounce_note}"
     else:
+        # Switch rebooted somewhere INSIDE the window itself — genuinely
+        # ambiguous (could be power loss mid-outage, could be an
+        # unrelated coincidental reboot); not enough to lean either way.
         verdict = "inconclusive"
         reason = "switch's own uptime doesn't line up with either edge of the loss window"
 
