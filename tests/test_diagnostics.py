@@ -397,6 +397,59 @@ class LatestHighLossWindow(unittest.TestCase):
         self.assertEqual(window, (1000, 2000, 2))
 
 
+class NetworkLatencyHistoryLossAggregate(unittest.TestCase):
+    # Reported live (2026-09-14, RD3020): a real ~29-minute 100%-loss
+    # window averaged down to ~25-32% per hour once unit_power_vs_cell_
+    # outage's 2-week default pushed the lookup into Zabbix's hourly-trend
+    # data — well under the 90% detection threshold, silently missing a
+    # real outage. loss_aggregate="max" (what that check now asks for)
+    # uses each hour's own peak loss instead of its average.
+    def _fake_zabbix_call(self, method, params):
+        if method == "host.get":
+            return [
+                {"hostid": "1", "host": "RD9999-Router"},
+                {"hostid": "2", "host": "RD9999-Switch"},
+            ]
+        if method == "item.get":
+            return [
+                {"itemid": "10", "key_": "icmppingsec", "value_type": 0, "hostid": "1"},
+                {"itemid": "11", "key_": "icmppingloss", "value_type": 0, "hostid": "1"},
+                {"itemid": "12", "key_": "icmppingsec", "value_type": 0, "hostid": "2"},
+                {"itemid": "13", "key_": "icmppingloss", "value_type": 0, "hostid": "2"},
+            ]
+        if method == "trend.get":
+            # Every trend point has a real 25% average alongside a 100%
+            # max — the same shape a genuine ~15-minute-per-hour outage
+            # produces once bucketed hourly.
+            return [{"clock": 1000, "value_avg": "25.0", "value_max": "100.0"}]
+        raise AssertionError(f"unexpected Zabbix method: {method}")
+
+    def test_max_aggregate_uses_peak_loss_not_average(self):
+        with mock.patch.object(
+            work_tool.diagnostics, "_zabbix_call", side_effect=self._fake_zabbix_call,
+        ):
+            info, error = work_tool.diagnostics.unit_network_latency_history(
+                "RD9999", hours=24 * 14, loss_aggregate="max",
+            )
+        self.assertIsNone(error)
+        self.assertEqual(info["resolution"], "hourly average")
+        self.assertEqual(info["charts"]["router_loss"]["points"][0]["v"], 100.0)
+        self.assertEqual(info["charts"]["switch_loss"]["points"][0]["v"], 100.0)
+        # Response-time metrics are unaffected by loss_aggregate — still avg.
+        self.assertEqual(info["charts"]["router_response"]["points"][0]["v"], 25.0)
+
+    def test_default_aggregate_still_uses_average(self):
+        with mock.patch.object(
+            work_tool.diagnostics, "_zabbix_call", side_effect=self._fake_zabbix_call,
+        ):
+            info, error = work_tool.diagnostics.unit_network_latency_history(
+                "RD9999", hours=24 * 14,
+            )
+        self.assertIsNone(error)
+        self.assertEqual(info["charts"]["router_loss"]["points"][0]["v"], 25.0)
+        self.assertEqual(info["charts"]["switch_loss"]["points"][0]["v"], 25.0)
+
+
 class PowerVsCellOutageVerdict(unittest.TestCase):
     # The exact real-world example Andrew described: a unit whose switch
     # has been up 18 days, with a ~100% router-loss window from
@@ -535,8 +588,9 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         # actually explained it was simply older than the window checked.
         captured = {}
 
-        def fake_latency_history(unit, hours):
+        def fake_latency_history(unit, hours, loss_aggregate="avg"):
             captured["hours"] = hours
+            captured["loss_aggregate"] = loss_aggregate
             return {"charts": {"router_loss": {"points": []}}}, None
 
         with mock.patch.object(
@@ -547,6 +601,10 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(captured["hours"], 24 * 14)
         self.assertIn("336h", info["reason"])
+        # See NetworkLatencyHistoryLossAggregate — "avg" would dilute a
+        # real sustained outage shorter than an hour below the 90%
+        # threshold once this pushes into Zabbix's hourly-trend data.
+        self.assertEqual(captured["loss_aggregate"], "max")
 
     def test_coarse_tolerance_applies_to_an_hourly_trend_window(self):
         # Past 7 days, unit_network_latency_history falls back to Zabbix

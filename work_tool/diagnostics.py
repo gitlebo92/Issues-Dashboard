@@ -1218,13 +1218,28 @@ NETWORK_LATENCY_METRICS = (
     ("switch_response", "Switch", "icmppingsec", "Switch Ping Response Time", "s"),
     ("switch_loss", "Switch", "icmppingloss", "Switch Ping Loss", "%"),
 )
-def unit_network_latency_history(unit, hours=24):
+def unit_network_latency_history(unit, hours=24, loss_aggregate="avg"):
     """
     Router/Switch ICMP ping response time and loss over time, from Zabbix's
     own history — the same checks behind "ICMP Ping: High ping loss/response
     time", the single most common active-problem type on this fleet (see
     combined_power_infra_alerts's real numbers). A live SSH/ping snapshot
     only answers "is it up right now"; this answers "has it been flaky."
+
+    loss_aggregate only affects the two *_loss charts once hours pushes
+    past 7 days into Zabbix's hourly-trend data (see use_trends below) —
+    "avg" (default, what the Network Latency Graphs display uses) shows a
+    genuine flat plateau for an outage that spans most of an hour, but
+    dilutes a real, sustained SHORTER outage (say, 20-40 minutes) down
+    below any meaningful threshold once averaged across the other quiet
+    minutes in that same hour — found live (2026-09-14): a real ~29-minute
+    100%-loss window on RD3020 averaged to ~25-32% per hour bucket, well
+    under unit_power_vs_cell_outage's 90% cutoff, so that check silently
+    missed a real outage older than 7 days. "max" (what that check now
+    asks for) uses the hour's own peak loss instead, which a real
+    high-loss stretch of any length within the hour still hits — response-
+    time metrics are unaffected either way; averaging is still the right
+    read for those.
     Returns (info, error).
     """
     unit = str(unit or "").strip().upper()
@@ -1288,7 +1303,8 @@ def unit_network_latency_history(unit, hours=24):
                     "sortfield": "clock",
                     "sortorder": "ASC",
                 })
-                value_key = "value_avg"
+                is_loss_metric = key.endswith("_loss")
+                value_key = "value_max" if (is_loss_metric and loss_aggregate == "max") else "value_avg"
             else:
                 raw = _zabbix_call("history.get", {
                     "itemids": item["itemid"],
@@ -1445,7 +1461,12 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     # at all. SSH'ing into every switch just to throw the answer away for
     # units with nothing to explain would turn a fleet-wide sweep into a
     # genuinely slow, needless SSH hammering of the whole switch fleet.
-    latency_info, latency_error = unit_network_latency_history(unit, hours)
+    # loss_aggregate="max" — see unit_network_latency_history's own
+    # comment: past 7 days this pulls hourly-trend data, and the default
+    # hourly AVERAGE dilutes a real, sustained-but-shorter-than-an-hour
+    # outage below the 90% threshold below, silently missing it. The
+    # hour's own peak loss doesn't have that failure mode.
+    latency_info, latency_error = unit_network_latency_history(unit, hours, loss_aggregate="max")
     if latency_error:
         return None, latency_error
     loss_points = (
