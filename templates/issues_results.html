@@ -3556,20 +3556,41 @@
             { value: "projects_in_progress", label: "In Progress" },
             { value: "projects_prep", label: "Deployment Prep" },
         ];
+        // Same All-lists/One-list shape as Issues/Projects, for Reports —
+        // each of the seven fleet-wide checks is its own "list" here too.
+        // value is the report's own <ul> id (not a listState key — reports
+        // don't use listState; their row count comes straight off the
+        // rendered DOM instead, see reportListRowCount).
+        const reportCategoryOptions = [
+            { value: "flap_report_list", label: "Flap Report" },
+            { value: "units_unplugged_list", label: "Units Unplugged" },
+            { value: "shaded_units_list", label: "Shaded Units" },
+            { value: "dead_panel_list", label: "Dead Panels" },
+            { value: "vrm_freshness_list", label: "VRM Disconnected" },
+            { value: "power_infra_list", label: "Power & Infra Alerts" },
+            { value: "alarm_frequency_list", label: "Alarm Frequency" },
+        ];
+        const reportListIds = reportCategoryOptions.map(function (item) { return item.value; });
 
         // Which lists are currently selected. An empty set means "no filter"
         // — every list shows. The stats strip at the top of the page is the
         // filter UI: its chips are the buttons, so there is no separate row.
         let selectedIssueLists = new Set();
         let selectedProjectLists = new Set();
+        let selectedReportLists = new Set();
         // Complete-state per list, previously stashed on the <option> elements
         // the old category dropdown owned.
         const listCompleteState = {};
 
         function currentSelectedLists() {
-            return currentPanelMode() === "projects"
-                ? selectedProjectLists
-                : selectedIssueLists;
+            const mode = currentPanelMode();
+            if (mode === "projects") {
+                return selectedProjectLists;
+            }
+            if (mode === "reports") {
+                return selectedReportLists;
+            }
+            return selectedIssueLists;
         }
 
         function toggleListFilter(id) {
@@ -3599,9 +3620,24 @@
         }
 
         function currentCategoryOptions() {
-            return currentPanelMode() === "projects"
-                ? projectCategoryOptions
-                : issueCategoryOptions;
+            const mode = currentPanelMode();
+            if (mode === "projects") {
+                return projectCategoryOptions;
+            }
+            if (mode === "reports") {
+                return reportCategoryOptions;
+            }
+            return issueCategoryOptions;
+        }
+
+        // Reports don't populate listState (see reportCategoryOptions) —
+        // their row count comes straight off what's actually rendered.
+        // "li:not(.empty)" excludes the "Click Refresh to load..." /
+        // "Loading cached results..." placeholder row every report list
+        // starts with.
+        function reportListRowCount(listId) {
+            const el = document.getElementById(listId);
+            return el ? el.querySelectorAll("li:not(.empty)").length : 0;
         }
 
         function renderListCategoryMenu() {
@@ -3697,7 +3733,9 @@
                 if (!parts) {
                     return;
                 }
-                const total = (listState[item.value] || []).length;
+                const total = currentPanelMode() === "reports"
+                    ? reportListRowCount(item.value)
+                    : (listState[item.value] || []).length;
                 const isSelected = selected.has(item.value);
                 parts.input.checked = isSelected;
                 parts.count.textContent = String(total);
@@ -3748,11 +3786,16 @@
                 showOneListBtn.classList.add("is-active");
                 showAllListsBtn.classList.remove("is-active");
                 // Opening "One list" with nothing ticked would blank the page,
-                // so start from the first list that actually has tickets.
+                // so start from the first list that actually has rows —
+                // reports don't populate listState, so their own row count
+                // (reportListRowCount) stands in for it there.
                 const selected = currentSelectedLists();
+                const reportsMode = currentPanelMode() === "reports";
                 if (!selected.size) {
                     const firstWithTickets = currentCategoryOptions().find(function (item) {
-                        return (listState[item.value] || []).length > 0;
+                        return reportsMode
+                            ? reportListRowCount(item.value) > 0
+                            : (listState[item.value] || []).length > 0;
                     }) || currentCategoryOptions()[0];
                     if (firstWithTickets) {
                         selected.add(firstWithTickets.value);
@@ -3801,17 +3844,18 @@
             panelMode = currentPanelMode();
             const projectsMode = panelMode === "projects";
             const reportsMode = panelMode === "reports";
-            // Reports is its own page, not a filtered view of ticket/project
-            // lists — none of the ticket-list toolbar controls (search,
-            // list-view toggle, checkboxes, ERP pull, weather) apply to it.
+            // Reports is its own page with its OWN All-lists/One-list
+            // selection (see reportCategoryOptions) — the list-view toggle
+            // and Select Lists dropdown apply there too now, so they're
+            // NOT hidden for reportsMode. The ticket-specific controls
+            // (search, checkboxes, ERP pull, weather) still don't apply —
+            // report rows carry no searchable text and none of ERP
+            // pull/weather/R-W-S has any meaning for a fleet-wide check.
             if (clearCheckboxesBtn) {
                 clearCheckboxesBtn.hidden = projectsMode || reportsMode;
             }
             if (listSearchEl) {
                 listSearchEl.hidden = reportsMode;
-            }
-            if (listViewToggle) {
-                listViewToggle.hidden = reportsMode;
             }
             if (updateWeatherBtn) {
                 updateWeatherBtn.hidden = reportsMode;
@@ -3829,19 +3873,12 @@
                     ? "Refresh Open/In Progress NOC projects from ERP now"
                     : "Refresh Open/Monitoring/On Hold tickets from ERP now";
             }
-            // renderListCategoryMenu()/syncListControls() decide
-            // list_category_wrap's visibility from the All-lists/One-list
-            // toggle state, which doesn't know about reportsMode — this
-            // has final say once reports is the active panel.
-            if (reportsMode && listCategoryWrap) {
-                listCategoryWrap.hidden = true;
-            }
-            document.querySelectorAll('.list-section[data-panel="reports"]').forEach(function (section) {
-                section.hidden = !reportsMode;
-            });
             if (reportsMode) {
                 ensureReportsLoaded();
             }
+            // applyListFilters() decides each report section's visibility
+            // too (data-panel="reports" + reportListIds), respecting
+            // whatever's selected in One-list mode — see its own body.
             applyListFilters();
         }
 
@@ -3945,6 +3982,21 @@
                 if (inActivePanel && selected && query) {
                     matchCount += visibleRows;
                 }
+            });
+
+            // Same All-lists/One-list shape as above, for the seven report
+            // sections — no per-row text search (report rows carry no
+            // data-search-text), just whole-section visibility: shown only
+            // in Reports mode, and only if selected whenever One-list has
+            // a real selection.
+            reportListIds.forEach(function (listId) {
+                const listEl = document.getElementById(listId);
+                const sectionEl = listEl ? listEl.closest(".list-section") : null;
+                if (!sectionEl) {
+                    return;
+                }
+                const selected = !filtering || selectedLists.has(listId);
+                sectionEl.hidden = !(activePanelMode === "reports" && selected);
             });
 
             if (query) {
@@ -13394,7 +13446,7 @@
             {
                 selector: "#list_view_toggle",
                 title: "All lists / One list",
-                body: "All lists shows every category at once. One list narrows to just the categories ticked in the Select Lists dropdown that appears next to it — for working one category (say, Truly Down) without the rest crowding the page.",
+                body: "All lists shows every category at once. One list narrows to just the categories ticked in the Select Lists dropdown that appears next to it — for working one category (say, Truly Down) without the rest crowding the page. Nuance: this same toggle works on the Reports page too, narrowing to just the fleet-wide checks worth looking at right now.",
             },
             {
                 selector: ".ticket-row-rws",
@@ -13547,6 +13599,7 @@
         let tourActive = false;
         let tourIndex = 0;
         let tourSavedPanelMode = null;
+        let tourSavedFiltering = false;
         let tourOpenedMenu = null;
         let tourForcedVisible = [];
         const tourBackdropEl = document.createElement("div");
@@ -13795,6 +13848,13 @@
             tourActive = true;
             tourSavedPanelMode = panelModeEl ? panelModeEl.value : "issues";
             tourForcedVisible = [];
+            // One-list filtering (shared across Issues/Projects/Reports)
+            // could otherwise hide the very sections/lists a step wants to
+            // point at — force All lists for the tour, restored at endTour().
+            tourSavedFiltering = filteringEnabled();
+            if (tourSavedFiltering) {
+                setListView(false);
+            }
             // Start from a clean slate — any menu already open (from before
             // the tour started) closes now and isn't reopened at endTour();
             // a minor, acceptable side effect of taking the tour.
@@ -13829,6 +13889,12 @@
                 applyPanelMode();
             }
             tourSavedPanelMode = null;
+            // Restored after panel mode, since setListView(true) reads the
+            // (now-restored) mode's own selection Set.
+            if (tourSavedFiltering && !filteringEnabled()) {
+                setListView(true);
+            }
+            tourSavedFiltering = false;
             tourBackdropEl.removeEventListener("click", tourBackdropClick);
             document.removeEventListener("keydown", tourKeydown);
             window.removeEventListener("resize", tourReposition);
