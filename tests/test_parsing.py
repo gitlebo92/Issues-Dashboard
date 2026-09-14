@@ -352,6 +352,24 @@ class IssuesReportMiscellaneousDiscards(unittest.TestCase):
         self.assertEqual(len(discarded), 1)
         self.assertEqual(discarded[0]["issue_id"], "ISS-3")
 
+    def test_rd_head_is_loose_is_discarded_as_miscellaneous(self):
+        # Reported live: 2 "RD head is loose" tickets sitting in Up Steady
+        # instead of Miscellaneous — the old pattern only allowed "RD head
+        # loose" or "RD loose," nothing in between "head" and "loose."
+        result = self._run([("ISS-4", "PHX - RD3076 - RD head is loose")])
+        discarded = result[-1]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["issue_id"], "ISS-4")
+        self.assertIn("loose", discarded[0]["reason"])
+
+    def test_rd_head_loose_without_is_still_discarded(self):
+        # The original phrasing this rule was built for — must keep
+        # working alongside the "is" variant above.
+        result = self._run([("ISS-5", "PHX - RD3076 - RD head loose")])
+        discarded = result[-1]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["issue_id"], "ISS-5")
+
 
 if __name__ == "__main__":
     unittest.main()

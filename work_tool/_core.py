@@ -6870,7 +6870,11 @@ def validate_issues_report(issue_path=None):
                         "led_status": None,
                     })
                     continue
-                if re.search(r"\brd(?:\s+head)?\s+loose\b", subject_cell, re.IGNORECASE):
+                # Reported live: "RD head is loose" wasn't matching — the
+                # "is" between "head" and "loose" broke the old pattern,
+                # which only allowed "RD head loose" or "RD loose" with
+                # nothing in between. (?:\s+is)? covers that phrasing too.
+                if re.search(r"\brd(?:\s+head)?(?:\s+is)?\s+loose\b", subject_cell, re.IGNORECASE):
                     print(f"Discarding RD/RD head loose ticket: {subject_cell}")
                     discarded_tickets.append({
                         "issue_id": issue_id,
