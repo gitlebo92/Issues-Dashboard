@@ -7973,12 +7973,11 @@
             line.textContent = row.error ? ("Check failed: " + row.error) : (row.summary || row.unit);
             body.appendChild(line);
 
-            // VRM Disconnected rows only (row.vrm_freshness is only ever
-            // set by fleet_vrm_freshness_status) — flags a maybe-related
-            // open ticket found by findOpenTicketForUnits (see
-            // FLEET_REPORT_CONFIGS.vrmFreshness.enrichFn), which is also
-            // what pushed this row to the top of the report.
-            if (row.vrm_freshness !== undefined && row.related_ticket) {
+            // Every fleet report — flags a maybe-related open ticket found
+            // by findOpenTicketForUnits (see relatedTicketEnrichFn, which
+            // every FLEET_REPORT_CONFIGS entry uses), which is also what
+            // pushed this row to the top of its report.
+            if (row.related_ticket) {
                 const ticket = row.related_ticket;
                 const relatedLine = document.createElement("div");
                 relatedLine.className = "snapshot-task-line";
@@ -8193,6 +8192,18 @@
             return null;
         }
 
+        // Shared enrichFn/priorityFn pair — every fleet report uses the
+        // same "does this unit (or its ERP-linked head) already have an
+        // open ticket" check and the same "push it to the very top"
+        // priority, so every FLEET_REPORT_CONFIGS entry points at these
+        // instead of each re-implementing it.
+        function relatedTicketEnrichFn(row) {
+            row.related_ticket = findOpenTicketForUnits([row.unit].concat(row.head_units || []));
+        }
+        function relatedTicketPriorityFn(row) {
+            return row.related_ticket ? 0 : 1;
+        }
+
         // sortRank: lower sorts first — puts the actionable finding
         // (unplugged / shaded / dead panel / disconnected) at the top of
         // a list that can run into the hundreds, rather than alphabetical.
@@ -8213,6 +8224,8 @@
                     return { not_detected: 0, uncertain: 1, unknown: 2 }[row.ac_power_status];
                 },
                 certainty: function (row) { return row.ac_power_confidence; },
+                enrichFn: relatedTicketEnrichFn,
+                priorityFn: relatedTicketPriorityFn,
             },
             shadedUnits: {
                 listEl: document.getElementById("shaded_units_list"),
@@ -8232,6 +8245,8 @@
                 // check couldn't even reach a verdict on) just buries the
                 // ones worth a look.
                 filterFn: function (row) { return row.shading_status === "shaded"; },
+                enrichFn: relatedTicketEnrichFn,
+                priorityFn: relatedTicketPriorityFn,
             },
             deadPanel: {
                 listEl: document.getElementById("dead_panel_list"),
@@ -8250,6 +8265,8 @@
                 // healthy array (or one the check couldn't reach a
                 // verdict on) isn't a finding.
                 filterFn: function (row) { return row.dead_panel_status === "dead_panel"; },
+                enrichFn: relatedTicketEnrichFn,
+                priorityFn: relatedTicketPriorityFn,
             },
             vrmFreshness: {
                 listEl: document.getElementById("vrm_freshness_list"),
@@ -8268,12 +8285,8 @@
                 // the certainty proxy: longer silence sorts first within
                 // the same tier.
                 certainty: function (row) { return row.vrm_last_seen_seconds_ago; },
-                // A unit already has an open issue ticket — flag it and
-                // push it to the very top, ahead of freshness tier.
-                enrichFn: function (row) {
-                    row.related_ticket = findOpenTicketForUnits([row.unit].concat(row.head_units || []));
-                },
-                priorityFn: function (row) { return row.related_ticket ? 0 : 1; },
+                enrichFn: relatedTicketEnrichFn,
+                priorityFn: relatedTicketPriorityFn,
             },
         };
         const fleetReportLoadedOnce = {};
