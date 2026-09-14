@@ -1148,6 +1148,37 @@
         .command-power-vs-cell-glyph.is-cell_outage {
             border-color: var(--caution-text);
         }
+        /* Same finding as the command-menu glyph above, but on the
+           collapsed row itself — the glyph only shows once a tech opens a
+           unit's Commands menu, which meant a real finding was invisible
+           until you happened to check that exact unit (see the Up Steady
+           sweep's own "which units?" problem). Filled, not outlined, so it
+           reads at a glance in a dense list rather than blending into the
+           row text. Click opens Network Latency Graphs with the loss
+           window highlighted, plus the switch uptime reading from when the
+           sweep ran alongside an extrapolated "right now" figure — see
+           openPowerVsCellRowDetail. */
+        .power-vs-cell-row-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            margin-left: 6px;
+            border-radius: 50%;
+            font-size: 10px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .power-vs-cell-row-badge.is-power_outage {
+            background: var(--danger);
+            color: var(--danger-soft);
+        }
+        .power-vs-cell-row-badge.is-cell_outage {
+            background: var(--caution);
+            color: var(--caution-deeper);
+        }
         /* Battery Outlook's 5-day forecast — an info glyph, not an alert
            (see forecastGlyphElement): shown whenever a forecast resolved
            at all, regardless of risk, so unlike the alert-circle glyphs
@@ -6628,6 +6659,92 @@
             refreshCommandMenuStatusRowVisibility(commandMenu);
         }
 
+        // Same finding, shown on the collapsed row itself — see
+        // .power-vs-cell-row-badge's own comment for why. Every rendered
+        // row's badge carries its unit on dataset.unit so a bulk update
+        // (poll or manual sweep) can re-apply to all of them at once, the
+        // same way applyPowerVsCellGlyph re-applies to every open command
+        // menu.
+        function applyPowerVsCellRowBadge(badgeEl) {
+            const unit = String(badgeEl.dataset.unit || "").toUpperCase();
+            const info = unit ? powerVsCellAlarmedUnits[unit] : null;
+            if (!info || (info.verdict !== "power_outage" && info.verdict !== "cell_outage")) {
+                badgeEl.hidden = true;
+                badgeEl.title = "";
+                return;
+            }
+            badgeEl.hidden = false;
+            badgeEl.textContent = info.verdict === "power_outage" ? "⚡" : "📶";
+            badgeEl.className = "power-vs-cell-row-badge is-" + info.verdict;
+            badgeEl.title = (info.summary || "") + "\n(click to view graph + uptime)";
+        }
+
+        // "3d 4h 12m" — a plain compact duration, for the toast/console
+        // detail text only (not the device's own pre-formatted
+        // switch_uptime_text, which is already stale by the time anyone
+        // reads it — see openPowerVsCellRowDetail).
+        function formatUptimeDuration(seconds) {
+            if (seconds == null || seconds < 0 || !isFinite(seconds)) {
+                return "unknown";
+            }
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const parts = [];
+            if (days) {
+                parts.push(days + "d");
+            }
+            if (days || hours) {
+                parts.push(hours + "h");
+            }
+            parts.push(minutes + "m");
+            return parts.join(" ");
+        }
+
+        // The sweep's own switch_uptime_text is a snapshot from whenever
+        // the sweep last ran — possibly hours ago — so "current uptime"
+        // here is extrapolated from it (switch_uptime_seconds + elapsed
+        // since checked_at) rather than a fresh SSH round trip, same
+        // "good enough without another expensive read" tradeoff as the
+        // sweep's own cache-then-poll design.
+        function powerVsCellUptimeDetailText(info) {
+            if (info.switch_uptime_seconds == null || info.checked_at == null) {
+                return "";
+            }
+            const checkedDate = new Date(info.checked_at * 1000);
+            const elapsedSeconds = Math.max(0, (Date.now() - info.checked_at * 1000) / 1000);
+            const currentUptimeSeconds = info.switch_uptime_seconds + elapsedSeconds;
+            return "Switch uptime when checked (" + checkedDate.toLocaleString() + "): "
+                + formatUptimeDuration(info.switch_uptime_seconds)
+                + "\nCurrent uptime (est.): " + formatUptimeDuration(currentUptimeSeconds);
+        }
+
+        // Row badge click — opens Network Latency Graphs with the loss
+        // window that drove the verdict highlighted (same "View Graph"
+        // pattern as the shading/dead-panel Diagnostic Header), and surfaces
+        // the uptime detail as both a toast and a console line since the
+        // graph modal has nowhere of its own to show it.
+        function openPowerVsCellRowDetail(unit, subject) {
+            const info = powerVsCellAlarmedUnits[String(unit || "").toUpperCase()];
+            if (!info) {
+                return;
+            }
+            let highlightRange = null;
+            if (info.loss_window_start != null && info.loss_window_end != null) {
+                highlightRange = {
+                    startMs: info.loss_window_start * 1000,
+                    endMs: info.loss_window_end * 1000,
+                    label: info.verdict === "power_outage" ? "power outage window" : "cell outage window",
+                };
+            }
+            openGraphsModal(unit, "network", subject || "", highlightRange);
+            const uptimeText = powerVsCellUptimeDetailText(info);
+            const message = (info.summary || "") + (uptimeText ? "\n" + uptimeText : "");
+            consoleLines.push(message);
+            renderConsole(true);
+            notify(message, info.status === "warn" ? "error" : "info");
+        }
+
         // Lazy, on-open power-status check (🔌 glyph) — deliberately NOT a
         // fleet-wide poll like the alarm glyph above, since a real check
         // costs a VRM round trip (sometimes two, if it falls back to the
@@ -7275,6 +7392,7 @@
                     document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
                         applyPowerVsCellGlyph(commandMenu);
                     });
+                    document.querySelectorAll(".power-vs-cell-row-badge").forEach(applyPowerVsCellRowBadge);
                 })
                 .catch(function () {})
                 .finally(function () {
@@ -7322,6 +7440,7 @@
                         document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
                             applyPowerVsCellGlyph(commandMenu);
                         });
+                        document.querySelectorAll(".power-vs-cell-row-badge").forEach(applyPowerVsCellRowBadge);
                         const findings = rows.filter(function (row) {
                             return row.verdict === "power_outage" || row.verdict === "cell_outage";
                         });
@@ -12710,6 +12829,25 @@
                 newBadge.textContent = " (New!)";
                 newBadge.hidden = !entry.isNew;
                 label.appendChild(newBadge);
+
+                // Power vs Cell Outage row badge — Up Steady only, since
+                // that's the only list the sweep ever covers (see
+                // POWER_VS_CELL_OUTAGE_REFRESH_SECONDS). Scoped to this one
+                // list rather than built on every row everywhere, since
+                // powerVsCellAlarmedUnits never has an entry for any other
+                // list's units anyway.
+                if (id === "false_positives" && entry.unit) {
+                    const powerVsCellBadge = document.createElement("span");
+                    powerVsCellBadge.className = "power-vs-cell-row-badge";
+                    powerVsCellBadge.dataset.unit = entry.unit;
+                    powerVsCellBadge.hidden = true;
+                    powerVsCellBadge.addEventListener("click", function (event) {
+                        event.stopPropagation();
+                        openPowerVsCellRowDetail(entry.unit, entry.ticketSubject || entry.subject || "");
+                    });
+                    label.appendChild(powerVsCellBadge);
+                    applyPowerVsCellRowBadge(powerVsCellBadge);
+                }
 
                 const metaBits = [];
                 if (isProjectsList(id)) {
