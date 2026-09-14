@@ -1034,6 +1034,62 @@
             vertical-align: middle;
             cursor: pointer;
         }
+        /* Battery SOC — shown "when available" (see applyBatteryGlyphFromCache;
+           plenty of installations report no SOC at all), so unlike the
+           other glyphs here this one carries its own number rather than
+           relying on color alone to say how much charge is left. Same
+           4-tier scale as the 20%-low-battery reference line already drawn
+           on the SOC graph. */
+        .command-battery-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 15px;
+            height: 15px;
+            padding: 0 4px;
+            margin-left: 4px;
+            border-radius: var(--radius-pill);
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 1;
+            vertical-align: middle;
+            color: var(--text-on-accent);
+        }
+        .command-battery-glyph.is-high {
+            background: var(--ok);
+        }
+        .command-battery-glyph.is-medium {
+            background: var(--warn);
+        }
+        .command-battery-glyph.is-low-medium {
+            background: var(--caution);
+        }
+        .command-battery-glyph.is-low {
+            background: var(--danger);
+            color: var(--caution-softest);
+        }
+        /* VRM freshness — pure alert like shading/dead-panel, only ever
+           shown for "stale"/"disconnected" (see
+           applyVrmFreshnessGlyphFromCache). Click jumps to the VRM
+           Disconnected report, same "click the indicator to go see more"
+           pattern as the ⚠ alarm glyph. */
+        .command-vrm-freshness-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 9px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .command-vrm-freshness-glyph.is-disconnected {
+            border-color: var(--danger);
+        }
         .battery-graphs-dialog {
             width: min(720px, 100%);
             max-height: 85vh;
@@ -6337,6 +6393,8 @@
             const powerGlyph = row.querySelector(".command-power-glyph");
             const shadingGlyph = row.querySelector(".command-shading-glyph");
             const deadPanelGlyph = row.querySelector(".command-dead-panel-glyph");
+            const batteryGlyph = row.querySelector(".command-battery-glyph");
+            const vrmFreshnessGlyph = row.querySelector(".command-vrm-freshness-glyph");
             // The connectivity LED (see renderList) has no hidden/shown
             // toggle of its own — once it's present at all, it's always
             // showing a real status (including the neutral idle color),
@@ -6344,6 +6402,7 @@
             const led = row.querySelector(".speaker-led");
             const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
                 || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden)
+                || (batteryGlyph && !batteryGlyph.hidden) || (vrmFreshnessGlyph && !vrmFreshnessGlyph.hidden)
                 || !!led;
             row.hidden = !anyVisible;
         }
@@ -6392,13 +6451,76 @@
             unknown: true, no_charger_hardware: true,
         };
 
-        function applyPowerGlyphFromCache(commandMenu) {
-            const glyph = commandMenu.querySelector(".command-power-glyph");
+        // Same 4-tier coloring as the 20%-low-battery reference already
+        // drawn on the SOC graph (see renderGraphs) — 20% is the line
+        // between "low" and "low-medium" here too, just extended to a
+        // full green/yellow/orange/red scale instead of one cutoff.
+        function batterySocTier(percent) {
+            if (percent >= 60) {
+                return "high";
+            }
+            if (percent >= 40) {
+                return "medium";
+            }
+            if (percent >= 20) {
+                return "low-medium";
+            }
+            return "low";
+        }
+
+        function applyBatteryGlyphFromCache(commandMenu, cached) {
+            const glyph = commandMenu.querySelector(".command-battery-glyph");
             if (!glyph) {
                 return;
             }
+            // "When available" — plenty of real installations report
+            // battery voltage/current but no percentage SOC at all (a
+            // Hub-1/Cerbo GX combo, checked live this session); this stays
+            // hidden rather than showing a misleading "0%" or a dash.
+            if (!cached || cached.batterySocPercent == null) {
+                glyph.hidden = true;
+                return;
+            }
+            const percent = cached.batterySocPercent;
+            const tier = batterySocTier(percent);
+            glyph.hidden = false;
+            glyph.className = "command-battery-glyph is-" + tier;
+            glyph.textContent = Math.round(percent) + "%";
+            glyph.title = "Battery " + percent.toFixed(0) + "% (" + tier.replace("-", " ") + ")";
+        }
+
+        function applyVrmFreshnessGlyphFromCache(commandMenu, cached) {
+            const glyph = commandMenu.querySelector(".command-vrm-freshness-glyph");
+            if (!glyph) {
+                return;
+            }
+            // Alert-only, same convention as shading/dead-panel — "fresh"/
+            // "aging" is normal and shows nothing; "unknown" usually means
+            // this unit has no VRM installation at all (nothing IS
+            // disconnected, there's just nothing to read), so that stays
+            // quiet too rather than reading as a false alarm.
+            const freshness = cached && cached.vrmFreshness;
+            if (freshness !== "stale" && freshness !== "disconnected") {
+                glyph.hidden = true;
+                return;
+            }
+            glyph.hidden = false;
+            glyph.className = "command-vrm-freshness-glyph is-" + freshness;
+            glyph.title = "VRM data is " + freshness
+                + (cached.vrmLastSeenSecondsAgo != null ? " (" + formatAgeShort(cached.vrmLastSeenSecondsAgo) + " old)" : "")
+                + "\n(click to open VRM Disconnected in Reports)";
+        }
+
+        function applyPowerGlyphFromCache(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-power-glyph");
             const unit = String(commandMenu.dataset.unit || "").toUpperCase();
             const cached = powerGlyphCache[unit];
+            applyBatteryGlyphFromCache(commandMenu, cached);
+            applyVrmFreshnessGlyphFromCache(commandMenu, cached);
+            if (!glyph) {
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
             if (!cached || !POWER_GLYPH_VISIBLE_STATUSES[cached.status]) {
                 glyph.hidden = true;
                 refreshCommandMenuStatusRowVisibility(commandMenu);
@@ -6441,8 +6563,21 @@
             })
                 .then(function (response) { return response.json(); })
                 .then(function (data) {
+                    // One fetch, three glyphs — battery SOC and VRM
+                    // freshness are already part of this same response
+                    // (unit_power_status's snapshot carries them
+                    // regardless, since the AC-power check itself needs
+                    // vrm_freshness to decide "present" vs "unknown"), so
+                    // there's no separate call for either.
                     powerGlyphCache[unit] = (data && data.ok)
-                        ? { status: data.ac_power_status, summary: data.summary, fetchedAt: Date.now() }
+                        ? {
+                            status: data.ac_power_status,
+                            summary: data.summary,
+                            batterySocPercent: data.battery_soc_percent,
+                            vrmFreshness: data.vrm_freshness,
+                            vrmLastSeenSecondsAgo: data.vrm_last_seen_seconds_ago,
+                            fetchedAt: Date.now(),
+                        }
                         : { status: null, fetchedAt: Date.now() };
                 })
                 .catch(function () {
@@ -7716,6 +7851,36 @@
                 openGraphsModal(entry.unit, "battery", entry.ticketSubject || entry.subject || "");
             });
             statusRow.appendChild(deadPanelGlyph);
+            // Battery SOC — a small colored pill with the percentage as
+            // visible text rather than a bare emoji-circle like its
+            // neighbors, since "72%" said outright is faster to read at a
+            // glance than a color a tech has to decode. Filled in by
+            // applyBatteryGlyphFromCache alongside the plug glyph, off the
+            // same /issues/power-status fetch (see checkAndApplyPowerGlyph).
+            const batteryGlyph = document.createElement("span");
+            batteryGlyph.className = "command-battery-glyph";
+            batteryGlyph.hidden = true;
+            statusRow.appendChild(batteryGlyph);
+            // VRM freshness — alert-only like shading/dead-panel, shown
+            // only for "stale"/"disconnected" (see applyVrmFreshnessGlyphFromCache).
+            // Clicking it jumps to the VRM Disconnected report the same way
+            // the ⚠ glyph jumps to Power & Infra Alerts.
+            const vrmFreshnessGlyph = document.createElement("span");
+            vrmFreshnessGlyph.className = "command-vrm-freshness-glyph";
+            vrmFreshnessGlyph.textContent = "📡";
+            vrmFreshnessGlyph.hidden = true;
+            vrmFreshnessGlyph.addEventListener("click", function (event) {
+                event.stopPropagation();
+                if (panelModeEl && panelModeEl.value !== "reports") {
+                    panelModeEl.value = "reports";
+                    applyPanelMode();
+                }
+                const vrmFreshnessSectionEl = document.getElementById("vrm_freshness_section");
+                if (vrmFreshnessSectionEl && vrmFreshnessSectionEl.scrollIntoView) {
+                    vrmFreshnessSectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                }
+            });
+            statusRow.appendChild(vrmFreshnessGlyph);
             commandItems.appendChild(statusRow);
 
             commandMenuEntries.set(commandMenu, entry);
