@@ -4997,6 +4997,15 @@
         // openGraphsModal's optional 4th argument; every other caller
         // (Graphs submenu, report rows) omits it and gets a plain chart.
         let graphsHighlightRange = null;
+        // A fleet report row is keyed by its MU trailer (the actual VRM
+        // installation), not the RD/FD head a tech would recognize from a
+        // ticket subject — opening a graph straight from one of those rows
+        // used to show a bare "MU9062", or worse "MU9062 (VRM: MU9062)"
+        // once the VRM lookup echoed the same name back. Set by
+        // openGraphsModal's optional 5th argument (e.g. "RD9062(MU9062)")
+        // when the caller already knows the head; every other caller omits
+        // it and the subtitle falls back to the plain unit, unchanged.
+        let graphsDisplayLabel = null;
         // Each mode: what to fetch, how to read the response, and the fixed
         // chart order (never dual-axis, so no metric is ever combined with
         // another on one chart — see GRAPH_MODES below).
@@ -5054,7 +5063,18 @@
                 failureLabel: "Battery Graphs",
                 hoursOptions: BATTERY_HOURS_OPTIONS,
                 subtitle: function (unit, data) {
-                    let text = unit + (data.installation_name ? (" (VRM: " + data.installation_name + ")") : "");
+                    let text = unit;
+                    // Skip the "(VRM: X)" echo when X is already sitting
+                    // right there in the unit text — either because unit
+                    // IS the bare installation name (opened straight off a
+                    // fleet report row with no resolved head, e.g. "MU9062")
+                    // or because it's the RD(MU) display label
+                    // (graphsDisplayLabel) that already spells it out, e.g.
+                    // "RD9062(MU9062)" — either way, repeating it a second
+                    // time added nothing.
+                    if (data.installation_name && text.indexOf(data.installation_name) === -1) {
+                        text += " (VRM: " + data.installation_name + ")";
+                    }
                     // "fresh" is the expected case and stays quiet — only
                     // call out VRM's own last-report age when it's NOT
                     // fresh, so a stale reading can't be mistaken for a
@@ -5381,7 +5401,8 @@
                     });
                 })
                 .then(function (data) {
-                    graphsSubtitle.textContent = modeConfig.subtitle(unit, data) + " — last " + hours + " hour(s)";
+                    graphsSubtitle.textContent = modeConfig.subtitle(graphsDisplayLabel || unit, data)
+                        + " — last " + hours + " hour(s)";
                     renderGraphs(data);
                 })
                 .catch(function (error) {
@@ -5393,14 +5414,15 @@
                 });
         }
 
-        function openGraphsModal(unit, mode, subject, highlightRange) {
+        function openGraphsModal(unit, mode, subject, highlightRange, displayLabel) {
             graphsMode = GRAPH_MODES[mode] ? mode : "battery";
             const modeConfig = GRAPH_MODES[graphsMode];
             graphsUnit = unit || "";
             graphsSubject = subject || "";
             graphsHighlightRange = highlightRange || null;
+            graphsDisplayLabel = displayLabel || null;
             graphsTitle.firstChild.textContent = modeConfig.titleText + " ";
-            graphsSubtitle.textContent = unit || "";
+            graphsSubtitle.textContent = graphsDisplayLabel || unit || "";
             const previousValue = graphsHours.value;
             graphsHours.innerHTML = "";
             modeConfig.hoursOptions.forEach(function (opt) {
@@ -8767,7 +8789,7 @@
                 graphBtn.textContent = "View Solar Graph";
                 graphBtn.title = "Opens the Battery Graphs modal (voltage/SOC/current/solar power) used to check this unit";
                 graphBtn.addEventListener("click", function () {
-                    openGraphsModal(row.unit, "battery", "");
+                    openGraphsModal(row.unit, "battery", "", null, openLabel);
                 });
                 snapshotLine.appendChild(graphBtn);
                 body.appendChild(snapshotLine);
