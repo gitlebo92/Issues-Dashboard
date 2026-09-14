@@ -305,22 +305,51 @@
         .header-row h1 {
             margin-top: 0;
         }
-        .automation-paused-banner,
-        .sandbox-banner {
-            margin: 0 0 12px;
-            padding: 10px 12px;
-            border-radius: var(--radius);
-            font-size: 14px;
+        /* Compact status pills (sandbox / automation-paused / fleet-polls-
+           still-running / ERP-writes-disabled) — previously four full-
+           width paragraph banners stacked above the stats strip, pushing
+           everything else down a few hundred pixels for text most
+           sessions only need to skim once. Same "condensed status, hover
+           for the full explanation" convention as the command-menu
+           glyphs and driver-check badges elsewhere in this file — the
+           short label is enough day to day, the reasoning is still there
+           on hover, not lost. */
+        .status-pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+            margin: 4px 0 10px;
         }
-        .automation-paused-banner {
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: var(--radius-pill);
+            white-space: nowrap;
+            text-decoration: none;
+        }
+        .status-pill.is-caution {
             background: var(--caution-bg);
             border: 1px solid var(--warn-deep);
             color: var(--warn-soft);
         }
-        .sandbox-banner {
+        .status-pill.is-info {
             background: var(--bg-info);
             border: 1px solid var(--accent);
             color: var(--accent-softer);
+        }
+        .status-pill.is-ok {
+            background: var(--ok-deep);
+            border: 1px solid var(--ok);
+            color: var(--ok-softer);
+        }
+        a.status-pill.is-info:hover {
+            border-color: var(--accent-hover);
+            color: var(--accent-hover);
         }
         @media (max-width: 900px) {
             .layout { grid-template-columns: 1fr; }
@@ -2146,31 +2175,30 @@
         </div>
     </div>
     <div class="stats-strip" id="stats_strip"></div>
+    <div class="status-pill-row" id="status_pill_row">
+        {% if is_sandbox %}
+        <a class="status-pill is-info" id="sandbox_banner" href="http://127.0.0.1:5000/"
+            title="Sandbox on port {{ work_tool_port }} — same ERP credentials, separate resolved/upload data, no 4:00 AM jobs, and no automatic ERP polling. Use Pull Issues to refresh manually. Click to open the live dashboard.">
+            🧪 Sandbox (port {{ work_tool_port }}) — click for live
+        </a>
+        {% elif automation_paused %}
+        <span class="status-pill is-caution" id="automation_paused_banner"
+            title="Automated tasks are paused (PAUSE_AUTOMATED_TASKS). Daily 4:00/4:05/4:10 jobs and 30-minute ERP polling are off. Manual refresh and toolbar actions still work.">
+            ⏸ Automation paused
+        </span>
+        <span class="status-pill is-ok" id="fleet_polls_still_running_banner"
+            title="Fleet-wide report polls (Units Unplugged, Shaded Units, Dead Panels, VRM Disconnected, Battery Outlook, Up Steady Power vs Cell) are a deliberate exception — read-only, no side effects — and keep running on their own schedule regardless of the pause above.">
+            ✓ Fleet polls still running
+        </span>
+        {% endif %}
+        {% if erp_writes_disabled %}
+        <span class="status-pill is-caution" id="erp_writes_disabled_banner"
+            title="ERP write actions are disabled (DISABLE_ERP_WRITES). Buttons stay visible but inactive. Validate, Open, Ping, cameras, Resolve (R), and Recovery Email still work. Set DISABLE_ERP_WRITES=0 in .env to re-enable writes.">
+            🔒 ERP writes disabled
+        </span>
+        {% endif %}
+    </div>
     <p class="status" id="status" role="status" aria-live="polite" aria-atomic="true">Running validation... live stdout below.</p>
-    {% if is_sandbox %}
-    <p class="sandbox-banner" id="sandbox_banner">
-        Sandbox on port {{ work_tool_port }} — same ERP credentials, separate resolved/upload data,
-        no 4:00 AM jobs, and no automatic ERP polling. Use Pull Issues to refresh manually.
-        Live: <a href="http://127.0.0.1:5000/" style="color:var(--accent-softer);">http://127.0.0.1:5000/</a>
-    </p>
-    {% elif automation_paused %}
-    <p class="automation-paused-banner" id="automation_paused_banner">
-        Automated tasks are paused (PAUSE_AUTOMATED_TASKS). Daily 4:00/4:05/4:10 jobs and
-        30-minute ERP polling are off. Manual refresh and toolbar actions still work.
-    </p>
-    <p class="automation-paused-banner" id="fleet_polls_still_running_banner">
-        Fleet-wide report polls (Units Unplugged, Shaded Units, Dead Panels, VRM Disconnected,
-        Battery Outlook, Up Steady Power vs Cell) are a deliberate exception — read-only,
-        no side effects — and keep running on their own schedule regardless of the pause above.
-    </p>
-    {% endif %}
-    {% if erp_writes_disabled %}
-    <p class="automation-paused-banner" id="erp_writes_disabled_banner">
-        ERP write actions are disabled (DISABLE_ERP_WRITES). Buttons stay visible but
-        inactive. Validate, Open, Ping, cameras, Resolve (R), and Recovery Email still work.
-        Set DISABLE_ERP_WRITES=0 in .env to re-enable writes.
-    </p>
-    {% endif %}
     <div class="progress-wrap">
         <div class="progress-label" id="progress_label">Waiting to start...</div>
         <div class="progress-track">
