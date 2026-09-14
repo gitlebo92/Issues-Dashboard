@@ -1103,6 +1103,18 @@
             fill: var(--caution-text);
             font-size: 9px;
         }
+        /* The specific time window a finding (shading dip, dead-panel
+           comparison window) is about — drawn first, behind the grid and
+           line, so it reads as "this is the period in question" without
+           competing with the data itself. */
+        .battery-chart-highlight {
+            fill: var(--danger);
+            opacity: 0.12;
+        }
+        .battery-chart-highlight-label {
+            fill: var(--danger-text);
+            font-size: 9px;
+        }
         .battery-chart-crosshair {
             stroke: var(--text-muted);
             stroke-width: 1px;
@@ -1327,7 +1339,14 @@
             top: calc(100% + 4px);
             z-index: 2000;
             opacity: 1;
-            min-width: 170px;
+            /* A fixed width rather than min-width alone: this used to size
+               to whatever child happened to be widest (one longer button
+               label stretching every short one — "Snap", "Ping" — to
+               match it), which read as empty space around short labels.
+               A fixed width plus the 2-column submenu grid below actually
+               uses that room instead of just reserving it. */
+            width: 300px;
+            max-width: calc(100vw - 24px);
             display: flex;
             flex-direction: column;
             gap: 2px;
@@ -1373,6 +1392,51 @@
             padding-bottom: 6px;
             margin-bottom: 6px;
             border-bottom: 1px solid var(--border);
+        }
+        /* Diagnostic Header — the one thing above even the status row.
+           Alert-only, same convention as the shading/dead-panel glyphs:
+           empty and hidden on a clean unit, never a quiet "all OK" line. */
+        .command-diagnostic-header {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px;
+            margin-bottom: 6px;
+            background: var(--caution-bg);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-sm);
+        }
+        .diagnostic-header-row {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .diagnostic-header-row + .diagnostic-header-row {
+            padding-top: 6px;
+            border-top: 1px solid var(--caution-deep);
+        }
+        .diagnostic-header-text {
+            font-size: 12px;
+            line-height: 1.4;
+            color: var(--caution-softest);
+        }
+        .diagnostic-header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+        .diagnostic-header-actions .action-btn {
+            width: auto;
+            flex: 0 0 auto;
+        }
+        .diagnostic-header-schedule {
+            display: inline-flex;
+            align-items: center;
+        }
+        .diagnostic-header-schedule-status {
+            font-size: 11px;
+            color: var(--caution-soft);
         }
         .command-menu-status .command-alarm-glyph,
         .command-menu-status .command-power-glyph {
@@ -1464,14 +1528,33 @@
             z-index: 5;
         }
         .command-submenu-items {
+            /* Row + wrap, not a rigid column: short labels ("Snap", "Ping
+               Router") pair up two-to-a-row instead of each claiming a
+               full-width row's worth of empty space to its right; a
+               longer label ("Network Latency Graphs (Experimental)")
+               still gets its own row because flex respects its actual
+               content width — no fixed column count to fight. */
             display: flex;
-            flex-direction: column;
-            gap: 2px;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: 4px;
             margin-top: 4px;
             padding: 4px;
             background: var(--bg-deepest);
             border: 1px solid var(--border);
             border-radius: var(--radius-sm);
+        }
+        .command-submenu-items .action-btn {
+            display: block;
+            width: auto;
+            flex: 1 1 44%;
+        }
+        /* A nested submenu toggle (e.g. Graphs, inside Diagnostics) is a
+           different kind of control than a plain action button — it
+           expands further rather than running something — so it keeps
+           its own full row rather than competing for half of one. */
+        .command-submenu-items > .command-submenu {
+            flex: 1 1 100%;
         }
         .command-browser-toggle {
             display: flex;
@@ -4790,6 +4873,13 @@
         const graphsBody = document.getElementById("graphs_body");
         let graphsUnit = "";
         let graphsSubject = "";
+        // {startMs, endMs, label} or null — the specific window a finding
+        // (Diagnostic Header's View Graph action) wants drawn on every
+        // chart in the modal, so the tech sees the flagged period against
+        // the actual data instead of re-finding it by eye. Set by
+        // openGraphsModal's optional 4th argument; every other caller
+        // (Graphs submenu, report rows) omits it and gets a plain chart.
+        let graphsHighlightRange = null;
         // Each mode: what to fetch, how to read the response, and the fixed
         // chart order (never dual-axis, so no metric is ever combined with
         // another on one chart — see GRAPH_MODES below).
@@ -4907,6 +4997,37 @@
                 options.label + ": " + points.length + " readings, "
                     + ys[0].toFixed(1) + " to " + ys[ys.length - 1].toFixed(1) + " " + options.unit
             );
+
+            // The finding's own time window (see the Diagnostic Header's
+            // "View Graph" action) — drawn first so grid/line/threshold
+            // all render on top of it. Silently does nothing if the
+            // window doesn't overlap this chart's own x domain at all
+            // (e.g. a shading window from hours ago on a chart currently
+            // showing only the last hour).
+            if (
+                options.highlightRange
+                && options.highlightRange.endMs >= xMin
+                && options.highlightRange.startMs <= xMax
+            ) {
+                const hx1 = xPos(Math.max(options.highlightRange.startMs, xMin));
+                const hx2 = xPos(Math.min(options.highlightRange.endMs, xMax));
+                const highlightRect = document.createElementNS(svgNS, "rect");
+                highlightRect.setAttribute("x", hx1);
+                highlightRect.setAttribute("y", padding.top);
+                highlightRect.setAttribute("width", Math.max(1, hx2 - hx1));
+                highlightRect.setAttribute("height", plotH);
+                highlightRect.setAttribute("class", "battery-chart-highlight");
+                svg.appendChild(highlightRect);
+                if (options.highlightRange.label) {
+                    const highlightLabel = document.createElementNS(svgNS, "text");
+                    highlightLabel.textContent = options.highlightRange.label;
+                    highlightLabel.setAttribute("x", (hx1 + hx2) / 2);
+                    highlightLabel.setAttribute("y", padding.top + 9);
+                    highlightLabel.setAttribute("class", "battery-chart-highlight-label");
+                    highlightLabel.setAttribute("text-anchor", "middle");
+                    svg.appendChild(highlightLabel);
+                }
+            }
 
             [0, 0.5, 1].forEach(function (frac) {
                 const y = padding.top + frac * plotH;
@@ -5099,6 +5220,7 @@
                             // lithium, so it reads as "worth a look," not
                             // "definitely dying," on either chemistry.
                             thresholds: key === "soc" ? [{ value: 20, label: "20% low-battery reference" }] : [],
+                            highlightRange: graphsHighlightRange,
                         }
                     );
                 }
@@ -5144,11 +5266,12 @@
                 });
         }
 
-        function openGraphsModal(unit, mode, subject) {
+        function openGraphsModal(unit, mode, subject, highlightRange) {
             graphsMode = GRAPH_MODES[mode] ? mode : "battery";
             const modeConfig = GRAPH_MODES[graphsMode];
             graphsUnit = unit || "";
             graphsSubject = subject || "";
+            graphsHighlightRange = highlightRange || null;
             graphsTitle.firstChild.textContent = modeConfig.titleText + " ";
             graphsSubtitle.textContent = unit || "";
             const previousValue = graphsHours.value;
@@ -5164,6 +5287,23 @@
             // otherwise fall back to the mode's first/default option.
             if (modeConfig.hoursOptions.some(function (opt) { return String(opt.value) === previousValue; })) {
                 graphsHours.value = previousValue;
+            }
+            // A highlight from hours/days ago is useless if the default
+            // window doesn't even reach back that far — widen to the
+            // smallest option that covers it (or the widest available,
+            // if none do).
+            if (graphsHighlightRange) {
+                const neededHours = Math.ceil((Date.now() - graphsHighlightRange.startMs) / 3600000) + 2;
+                const covering = modeConfig.hoursOptions
+                    .filter(function (opt) { return Number(opt.value) >= neededHours; })
+                    .sort(function (a, b) { return Number(a.value) - Number(b.value); })[0];
+                const widest = modeConfig.hoursOptions
+                    .slice()
+                    .sort(function (a, b) { return Number(b.value) - Number(a.value); })[0];
+                const target = covering || widest;
+                if (target) {
+                    graphsHours.value = String(target.value);
+                }
             }
             graphsModal.classList.add("is-open");
             loadGraphs();
@@ -6334,11 +6474,13 @@
             if (!cached || cached.status !== "shaded") {
                 glyph.hidden = true;
                 refreshCommandMenuStatusRowVisibility(commandMenu);
+                renderDiagnosticHeader(commandMenu);
                 return;
             }
             glyph.hidden = false;
             glyph.title = (cached.summary || "Possible shading detected") + "\n(click to view solar graphs)";
             refreshCommandMenuStatusRowVisibility(commandMenu);
+            renderDiagnosticHeader(commandMenu);
         }
 
         function checkAndApplyShadingGlyph(commandMenu) {
@@ -6365,7 +6507,14 @@
                 .then(function (response) { return response.json(); })
                 .then(function (data) {
                     shadingGlyphCache[unit] = (data && data.ok)
-                        ? { status: data.shading_status, summary: data.summary, fetchedAt: Date.now() }
+                        ? {
+                            status: data.shading_status,
+                            summary: data.summary,
+                            confidence: data.shading_confidence,
+                            worstHourUtc: data.shading_worst_hour_utc,
+                            windowUtc: data.shading_window_utc,
+                            fetchedAt: Date.now(),
+                        }
                         : { status: null, fetchedAt: Date.now() };
                 })
                 .catch(function () {
@@ -6394,11 +6543,13 @@
             if (!cached || cached.status !== "dead_panel") {
                 glyph.hidden = true;
                 refreshCommandMenuStatusRowVisibility(commandMenu);
+                renderDiagnosticHeader(commandMenu);
                 return;
             }
             glyph.hidden = false;
             glyph.title = (cached.summary || "Possible dead/underperforming panel") + "\n(click to view solar graphs)";
             refreshCommandMenuStatusRowVisibility(commandMenu);
+            renderDiagnosticHeader(commandMenu);
         }
 
         function checkAndApplyDeadPanelGlyph(commandMenu) {
@@ -6425,7 +6576,13 @@
                 .then(function (response) { return response.json(); })
                 .then(function (data) {
                     deadPanelGlyphCache[unit] = (data && data.ok)
-                        ? { status: data.dead_panel_status, summary: data.summary, fetchedAt: Date.now() }
+                        ? {
+                            status: data.dead_panel_status,
+                            summary: data.summary,
+                            confidence: data.dead_panel_confidence,
+                            recentDays: (data.dead_panel_info && data.dead_panel_info.recent_days) || null,
+                            fetchedAt: Date.now(),
+                        }
                         : { status: null, fetchedAt: Date.now() };
                 })
                 .catch(function () {
@@ -6435,6 +6592,172 @@
                     delete deadPanelGlyphInFlight[unit];
                     applyDeadPanelGlyphFromCache(commandMenu);
                 });
+        }
+
+        // ---- Diagnostic Header -------------------------------------------
+        // Turns the shading/dead-panel checks that already run on open
+        // (above) into a verdict-plus-next-step instead of a bare glyph —
+        // same underlying data, just read as a decision rather than a
+        // status light. Alert-only: renders nothing on a clean unit.
+        //
+        // The highlight windows below are a deliberate approximation, not
+        // a byte-for-byte replay of the server's own window: the glyph
+        // caches only carry the WORST hour / day-count a check found, not
+        // its exact start/end timestamps, so "today at that hour" and
+        // "the last N days" are close enough to land the shaded band in
+        // the right part of the chart without a second round-trip just to
+        // fetch the exact window.
+        function buildShadingHighlightRange(cached) {
+            if (cached.worstHourUtc == null) {
+                return null;
+            }
+            const now = new Date();
+            const start = Date.UTC(
+                now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cached.worstHourUtc, 0, 0
+            );
+            return { startMs: start, endMs: start + 3600000, label: cached.worstHourUtc + ":00 UTC" };
+        }
+
+        function buildDeadPanelHighlightRange(cached) {
+            const days = cached.recentDays || 14;
+            const end = Date.now();
+            return { startMs: end - days * 86400000, endMs: end, label: "recent " + days + "d comparison" };
+        }
+
+        function diagnosticHeaderScheduleControl(unit, subject) {
+            const wrap = document.createElement("span");
+            wrap.className = "diagnostic-header-schedule";
+            const status = document.createElement("span");
+            status.className = "diagnostic-header-schedule-status";
+            status.textContent = "Checking snapshot status...";
+            wrap.appendChild(status);
+            fetch("/issues/shading-snapshot-task/" + encodeURIComponent(unit))
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    wrap.innerHTML = "";
+                    const task = data && data.ok ? data.task : null;
+                    if (task) {
+                        // Already scheduled (or done) — say so instead of
+                        // offering to schedule a duplicate.
+                        const statusText = document.createElement("span");
+                        statusText.className = "diagnostic-header-schedule-status";
+                        statusText.textContent = snapshotTaskStatusText(task);
+                        wrap.appendChild(statusText);
+                        return;
+                    }
+                    const scheduleBtn = document.createElement("button");
+                    scheduleBtn.type = "button";
+                    scheduleBtn.className = "action-btn";
+                    scheduleBtn.textContent = "Schedule Snapshot";
+                    scheduleBtn.title = "Schedule a fisheye-camera photo for the following day's peak-shading hour";
+                    scheduleBtn.addEventListener("click", function (event) {
+                        event.stopPropagation();
+                        scheduleBtn.disabled = true;
+                        scheduleBtn.textContent = "Scheduling...";
+                        scheduleShadingSnapshot(unit, subject)
+                            .then(function (result) {
+                                wrap.innerHTML = "";
+                                const statusText = document.createElement("span");
+                                statusText.className = "diagnostic-header-schedule-status";
+                                statusText.textContent = "Scheduled — next attempt "
+                                    + (result.next_attempt_at
+                                        ? new Date(result.next_attempt_at * 1000).toLocaleString()
+                                        : "soon");
+                                wrap.appendChild(statusText);
+                            })
+                            .catch(function (error) {
+                                scheduleBtn.disabled = false;
+                                scheduleBtn.textContent = "Schedule Snapshot";
+                                notifyError("Schedule Snapshot failed: " + (error.message || error));
+                            });
+                    });
+                    wrap.appendChild(scheduleBtn);
+                })
+                .catch(function () {
+                    wrap.innerHTML = "";
+                });
+            return wrap;
+        }
+
+        function renderDiagnosticHeader(commandMenu) {
+            const header = commandMenu.querySelector(".command-diagnostic-header");
+            if (!header) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const entry = commandMenuEntries.get(commandMenu);
+            const subject = (entry && (entry.ticketSubject || entry.subject)) || "";
+
+            const findings = [];
+            const shading = shadingGlyphCache[unit];
+            if (shading && shading.status === "shaded") {
+                findings.push({ type: "shading", cached: shading });
+            }
+            const deadPanel = deadPanelGlyphCache[unit];
+            if (deadPanel && deadPanel.status === "dead_panel") {
+                findings.push({ type: "dead_panel", cached: deadPanel });
+            }
+
+            header.innerHTML = "";
+            if (!findings.length) {
+                header.hidden = true;
+                return;
+            }
+            header.hidden = false;
+
+            findings.forEach(function (finding) {
+                const row = document.createElement("div");
+                row.className = "diagnostic-header-row";
+
+                const text = document.createElement("div");
+                text.className = "diagnostic-header-text";
+                const confidenceText = finding.cached.confidence != null
+                    ? finding.cached.confidence + "% confidence" : "";
+                const hourText = finding.type === "shading" && finding.cached.worstHourUtc != null
+                    ? ", worst hour " + finding.cached.worstHourUtc + ":00 UTC" : "";
+                text.textContent = (finding.type === "shading" ? "⚠ Possible shading" : "⚠ Possible dead panel")
+                    + (confidenceText ? " — " + confidenceText : "") + hourText;
+                row.appendChild(text);
+
+                const actions = document.createElement("div");
+                actions.className = "diagnostic-header-actions";
+
+                const viewGraphBtn = document.createElement("button");
+                viewGraphBtn.type = "button";
+                viewGraphBtn.className = "action-btn";
+                viewGraphBtn.textContent = "View Graph";
+                viewGraphBtn.title = "Opens Battery Graphs with the window this finding is based on highlighted";
+                viewGraphBtn.addEventListener("click", function (event) {
+                    event.stopPropagation();
+                    const range = finding.type === "shading"
+                        ? buildShadingHighlightRange(finding.cached)
+                        : buildDeadPanelHighlightRange(finding.cached);
+                    openGraphsModal(unit, "battery", subject, range);
+                });
+                actions.appendChild(viewGraphBtn);
+
+                if (finding.type === "shading") {
+                    actions.appendChild(diagnosticHeaderScheduleControl(unit, subject));
+                }
+
+                row.appendChild(actions);
+                header.appendChild(row);
+            });
+        }
+
+        // Forces the two VRM-backed checks to re-fetch (bypassing their
+        // 5-minute cache) instead of waiting for it to expire naturally —
+        // used after Run All Diagnostics, a deliberate "check again right
+        // now" action.
+        function refreshDiagnosticHeader(commandMenu) {
+            if (!commandMenu) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            delete shadingGlyphCache[unit];
+            delete deadPanelGlyphCache[unit];
+            checkAndApplyShadingGlyph(commandMenu);
+            checkAndApplyDeadPanelGlyph(commandMenu);
         }
 
         function pollPowerInfraAlertsCache() {
@@ -6556,6 +6879,9 @@
                         } else if (data.status === "warn") {
                             notify(summary, "warning");
                         }
+                        if (options.afterSuccess) {
+                            options.afterSuccess(data);
+                        }
                     })
                     .catch(function (error) {
                         const message = options.label + " failed: " + (error.message || error);
@@ -6593,6 +6919,16 @@
                         });
                     }
                     return lines;
+                },
+                // run_unit_diagnostics is SSH-based checks only (connectivity,
+                // cameras, services, PVE/NUC resources) — it doesn't touch
+                // VRM, so it can't hand the Diagnostic Header a shading/
+                // dead-panel verdict directly. What it CAN do is prompt a
+                // fresh look: force the two VRM-backed checks to re-fetch
+                // (bypassing their 5-minute cache) rather than silently
+                // waiting for the next natural refresh.
+                afterSuccess: function () {
+                    refreshDiagnosticHeader(diagMenu.closest(".command-menu"));
                 },
             });
 
@@ -7283,6 +7619,19 @@
             const commandItems = document.createElement("div");
             commandItems.className = "command-menu-items";
             commandMenu.appendChild(commandItems);
+
+            // The Diagnostic Header — above even the status row, so a real
+            // finding is the first thing read, before the unit name even
+            // settles in. Built here (empty, hidden) and filled in by
+            // renderDiagnosticHeader once the shading/dead-panel checks
+            // that already run on open (see checkAndApplyShadingGlyph /
+            // checkAndApplyDeadPanelGlyph below) land — a clean unit shows
+            // nothing here, same alert-only convention as those checks'
+            // own glyphs.
+            const diagnosticHeader = document.createElement("div");
+            diagnosticHeader.className = "command-diagnostic-header";
+            diagnosticHeader.hidden = true;
+            commandItems.appendChild(diagnosticHeader);
 
             // Plug/alarm status lives INSIDE the expanded menu, not on the
             // collapsed summary button — the button is just a label; these
