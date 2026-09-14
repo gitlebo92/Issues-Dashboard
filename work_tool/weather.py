@@ -438,6 +438,21 @@ def _vrm_freshness_tier(age_seconds):
     if age_seconds <= _VRM_STALE_SEC:
         return "stale"
     return "disconnected"
+# "disconnected" (_vrm_freshness_tier, above) has no upper bound — a unit
+# silent for 3 days and one silent for 8 months both just read
+# "disconnected" forever, which is what let a long tail of long-gone
+# trailers pile up in these reports (caught live: dozens of "no AC
+# charger... battery unavailable" rows on Units Unplugged that were
+# really just old, no-longer-relevant silence, not an actionable power
+# problem). These two thresholds cut that tail off per report, since
+# each has a different point past which the data stops being useful:
+# Units Unplugged still wants a hand-checkable "yes/no, plugged in"
+# verdict, which stops being trustworthy long before VRM has fully
+# forgotten a site; VRM Disconnected exists specifically to flag
+# "disconnected," so it only needs a longer runway before calling a unit
+# inactive rather than still worth a look.
+_VRM_UNPLUGGED_STALE_DAYS = 60
+_VRM_INACTIVE_DAYS = 90
 def _format_age(age_seconds):
     """12 minutes / 3.4 hours / 5.2 days / 6.1 months — whatever unit reads most naturally."""
     if age_seconds is None:
@@ -1885,10 +1900,20 @@ def fleet_power_status(max_workers=10):
     "head_units" (its ERP-linked RD/FD head(s), if any), and every key
     _vrm_power_snapshot_for_site returns (or "error" if that one site's
     check itself failed — the rest of the fleet still comes back).
+
+    Skips any installation VRM hasn't heard from in
+    _VRM_UNPLUGGED_STALE_DAYS — a power-status verdict built on data that
+    old isn't a trustworthy "plugged in or not" answer, just noise from a
+    trailer that's likely long gone.
     """
     installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
     if error:
         return None, error
+    stale_cutoff = _VRM_UNPLUGGED_STALE_DAYS * 86400
+    installations = [
+        i for i in installations
+        if i["vrm_last_seen_seconds_ago"] is None or i["vrm_last_seen_seconds_ago"] <= stale_cutoff
+    ]
     _, victron_token, cred_error = _vrm_credentials()
     if cred_error:
         return None, cred_error
@@ -2393,11 +2418,22 @@ def fleet_vrm_freshness_status():
     fleet reports by a wide margin — safe to refresh far more often, and
     the one report here that could reasonably run live on a button click
     instead of waiting on a scheduled poll.
+
+    Skips any installation silent for _VRM_INACTIVE_DAYS or longer — past
+    that point it's not a "disconnected, go look" lead any more, it's a
+    trailer that's effectively inactive (retired, swapped, never fully
+    decommissioned in ERP), and flagging it forever just buries the ones
+    that recently actually went dark.
     Returns (rows, error).
     """
     installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
     if error:
         return None, error
+    inactive_cutoff = _VRM_INACTIVE_DAYS * 86400
+    installations = [
+        i for i in installations
+        if i["vrm_last_seen_seconds_ago"] is None or i["vrm_last_seen_seconds_ago"] <= inactive_cutoff
+    ]
     rows = []
     for installation in installations:
         freshness = _vrm_freshness_tier(installation["vrm_last_seen_seconds_ago"])

@@ -881,5 +881,64 @@ class FleetVrmInstallationsSiteFilter(unittest.TestCase):
         self.assertEqual(names, ["MU1001", "MU1002", "MU1003"])
 
 
+class FleetPowerStatusStaleFilter(unittest.TestCase):
+    # A power-status verdict built on VRM data VRM_UNPLUGGED_STALE_DAYS old
+    # or older isn't a trustworthy "plugged in or not" answer any more —
+    # just noise from a trailer that's likely long gone (caught live: dozens
+    # of "no AC charger... battery unavailable" rows on Units Unplugged that
+    # were really just old silence). See fleet_power_status.
+    def test_stale_installation_excluded_fresh_and_unknown_kept(self):
+        installations = [
+            {"site_id": 1, "installation_name": "MU1001", "vrm_last_seen_seconds_ago": 10 * 86400, "timezone_name": None},
+            {"site_id": 2, "installation_name": "MU1002", "vrm_last_seen_seconds_ago": 61 * 86400, "timezone_name": None},
+            {"site_id": 3, "installation_name": "MU1003", "vrm_last_seen_seconds_ago": None, "timezone_name": None},
+        ]
+        with (
+            mock.patch.object(
+                work_tool.weather, "_fleet_vrm_installations_with_heads",
+                return_value=(installations, {}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_credentials", return_value=("user1", "tok", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_power_snapshot_for_site",
+                return_value=({"status": "present"}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_power_status_dict_from_snapshot",
+                return_value=({"status": "present"}, None),
+            ),
+        ):
+            rows, error = work_tool.weather.fleet_power_status()
+        self.assertIsNone(error)
+        # MU1002 (61 days silent) is excluded; MU1001 (10 days) and MU1003
+        # (never reported — a genuinely new/stuck install, not old silence)
+        # both still show.
+        units = sorted(r["unit"] for r in rows)
+        self.assertEqual(units, ["MU1001", "MU1003"])
+
+
+class FleetVrmFreshnessInactiveFilter(unittest.TestCase):
+    # Same idea as the Units Unplugged filter above, longer runway — VRM
+    # Disconnected exists specifically to flag "disconnected," so it should
+    # only stop showing a unit once it's been silent long enough to call it
+    # inactive rather than still worth a look. See fleet_vrm_freshness_status.
+    def test_inactive_installation_excluded_recent_and_unknown_kept(self):
+        installations = [
+            {"site_id": 1, "installation_name": "MU1001", "vrm_last_seen_seconds_ago": 10 * 86400, "timezone_name": None},
+            {"site_id": 2, "installation_name": "MU1002", "vrm_last_seen_seconds_ago": 91 * 86400, "timezone_name": None},
+            {"site_id": 3, "installation_name": "MU1003", "vrm_last_seen_seconds_ago": None, "timezone_name": None},
+        ]
+        with mock.patch.object(
+            work_tool.weather, "_fleet_vrm_installations_with_heads",
+            return_value=(installations, {}, None),
+        ):
+            rows, error = work_tool.weather.fleet_vrm_freshness_status()
+        self.assertIsNone(error)
+        units = sorted(r["unit"] for r in rows)
+        self.assertEqual(units, ["MU1001", "MU1003"])
+
+
 if __name__ == "__main__":
     unittest.main()
