@@ -799,6 +799,17 @@
             vertical-align: middle;
             margin-left: 2px;
         }
+        .related-ticket-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--caution-text);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-pill);
+            padding: 1px 6px;
+            flex-shrink: 0;
+        }
         .power-infra-row-stats {
             color: var(--text-muted);
             font-size: 13px;
@@ -1782,9 +1793,10 @@
 
         <div class="panel">
             <div class="list-toolbar">
-                <select id="panel_mode" class="panel-mode-select" aria-label="Issues or Projects">
+                <select id="panel_mode" class="panel-mode-select" aria-label="Issues, Projects, or Reports">
                     <option value="issues" selected>Issues</option>
                     <option value="projects">Projects</option>
+                    <option value="reports">Reports</option>
                 </select>
                 <input type="search" id="list_search" placeholder="Filter tickets or search any unit..." autocomplete="off" spellcheck="false">
                 <div class="list-view-toggle" id="list_view_toggle" aria-label="Filtered list layout">
@@ -1801,23 +1813,11 @@
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
                 <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
                 <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
-                <div class="list-category-wrap" id="reports_menu_wrap">
-                    <button type="button" class="list-category-toggle toolbar-btn" id="reports_menu_toggle" aria-haspopup="true" aria-expanded="false">
-                        <span class="list-category-toggle-text">Reports</span>
-                    </button>
-                    <div class="list-category-options" id="reports_menu_options" role="menu" aria-label="Reports">
-                        <button type="button" class="list-category-option" id="reports_menu_flap" role="menuitem" title="Fleet-wide: which units keep bouncing between healthy and unhealthy, not just which are down right now">Flap Report</button>
-                        <button type="button" class="list-category-option" id="reports_menu_unplugged" role="menuitem" title="Every VRM installation fleet-wide, checked for AC/shore power">Units Unplugged</button>
-                        <button type="button" class="list-category-option" id="reports_menu_shaded" role="menuitem" title="Every VRM installation fleet-wide, checked for a solar-power dip consistent with shading">Shaded Units</button>
-                        <button type="button" class="list-category-option" id="reports_menu_dead_panel" role="menuitem" title="Every VRM installation fleet-wide, checked for a solar ceiling shortfall consistent with a dead panel">Dead Panels</button>
-                        <button type="button" class="list-category-option" id="reports_menu_vrm_freshness" role="menuitem" title="Every VRM installation fleet-wide, by how recently it last reported">VRM Disconnected</button>
-                    </div>
-                </div>
                 <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
                 <button type="button" id="alarm_frequency_toggle" class="toolbar-btn" title="Repeat offenders: units whose Zabbix/VRM alarms keep clearing and coming back, not just what's active right now">Alarm Frequency</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
-            <div class="list-section" id="flap_report_section" data-panel="issues" hidden>
+            <div class="list-section" id="flap_report_section" data-panel="reports" hidden>
             <h2>
                 Flap Report
                 <span class="count" id="flap_report_count"></span>
@@ -1830,7 +1830,7 @@
             </div>
             <ul id="flap_report_list"><li class="empty">Click Refresh to load the flap report...</li></ul>
             </div>
-            <div class="list-section" id="units_unplugged_section" data-panel="issues" hidden>
+            <div class="list-section" id="units_unplugged_section" data-panel="reports" hidden>
             <h2>
                 Units Unplugged <span class="experimental-badge">Experimental</span>
                 <span class="count" id="units_unplugged_count"></span>
@@ -1841,7 +1841,7 @@
             </div>
             <ul id="units_unplugged_list"><li class="empty">Loading cached results...</li></ul>
             </div>
-            <div class="list-section" id="shaded_units_section" data-panel="issues" hidden>
+            <div class="list-section" id="shaded_units_section" data-panel="reports" hidden>
             <h2>
                 Shaded Units <span class="experimental-badge">Experimental</span>
                 <span class="count" id="shaded_units_count"></span>
@@ -1856,7 +1856,7 @@
             </div>
             <ul id="shaded_units_list"><li class="empty">Loading cached results...</li></ul>
             </div>
-            <div class="list-section" id="dead_panel_section" data-panel="issues" hidden>
+            <div class="list-section" id="dead_panel_section" data-panel="reports" hidden>
             <h2>
                 Dead Panels <span class="experimental-badge">Experimental</span>
                 <span class="count" id="dead_panel_count"></span>
@@ -1867,7 +1867,7 @@
             </div>
             <ul id="dead_panel_list"><li class="empty">Loading cached results...</li></ul>
             </div>
-            <div class="list-section" id="vrm_freshness_section" data-panel="issues" hidden>
+            <div class="list-section" id="vrm_freshness_section" data-panel="reports" hidden>
             <h2>
                 VRM Disconnected <span class="experimental-badge">Experimental</span>
                 <span class="count" id="vrm_freshness_count"></span>
@@ -3415,7 +3415,8 @@
         });
 
         function currentPanelMode() {
-            return panelModeEl && panelModeEl.value === "projects" ? "projects" : "issues";
+            const value = panelModeEl && panelModeEl.value;
+            return value === "projects" || value === "reports" ? value : "issues";
         }
 
 
@@ -3721,8 +3722,27 @@
         function applyPanelMode() {
             panelMode = currentPanelMode();
             const projectsMode = panelMode === "projects";
+            const reportsMode = panelMode === "reports";
+            // Reports is its own page, not a filtered view of ticket/project
+            // lists — none of the ticket-list toolbar controls (search,
+            // list-view toggle, checkboxes, ERP pull, weather) apply to it.
             if (clearCheckboxesBtn) {
-                clearCheckboxesBtn.hidden = projectsMode;
+                clearCheckboxesBtn.hidden = projectsMode || reportsMode;
+            }
+            if (listSearchEl) {
+                listSearchEl.hidden = reportsMode;
+            }
+            if (listViewToggle) {
+                listViewToggle.hidden = reportsMode;
+            }
+            if (updateWeatherBtn) {
+                updateWeatherBtn.hidden = reportsMode;
+            }
+            if (resolveSelectedBtn) {
+                resolveSelectedBtn.hidden = reportsMode;
+            }
+            if (pullErpBtn) {
+                pullErpBtn.hidden = reportsMode;
             }
             renderListCategoryMenu();
             if (pullErpBtn && initialValidationComplete && !issuePollInFlight) {
@@ -3730,6 +3750,19 @@
                 pullErpBtn.title = projectsMode
                     ? "Refresh Open/In Progress NOC projects from ERP now"
                     : "Refresh Open/Monitoring/On Hold tickets from ERP now";
+            }
+            // renderListCategoryMenu()/syncListControls() decide
+            // list_category_wrap's visibility from the All-lists/One-list
+            // toggle state, which doesn't know about reportsMode — this
+            // has final say once reports is the active panel.
+            if (reportsMode && listCategoryWrap) {
+                listCategoryWrap.hidden = true;
+            }
+            document.querySelectorAll('.list-section[data-panel="reports"]').forEach(function (section) {
+                section.hidden = !reportsMode;
+            });
+            if (reportsMode) {
+                ensureReportsLoaded();
             }
             applyListFilters();
         }
@@ -3793,7 +3826,8 @@
         function applyListFilters() {
             const query = listSearchEl.value.trim().toLowerCase();
             const rawQuery = listSearchEl.value.trim();
-            const projectsMode = currentPanelMode() === "projects";
+            const activePanelMode = currentPanelMode();
+            const projectsMode = activePanelMode === "projects";
             // "All lists" shows everything; "One list" narrows to whatever is
             // ticked in the dropdown (one list or several).
             const selectedLists = currentSelectedLists();
@@ -3809,9 +3843,11 @@
                 const sectionPanel = sectionEl
                     ? (sectionEl.getAttribute("data-panel") || "issues")
                     : "issues";
-                const inActivePanel = projectsMode
-                    ? sectionPanel === "projects"
-                    : sectionPanel === "issues";
+                // filterableListIds never includes a "reports" section, but
+                // spelling this out as a real three-way match (not just
+                // "if not projects, must be issues") keeps that true by
+                // construction rather than by omission.
+                const inActivePanel = sectionPanel === activePanelMode;
                 const rows = Array.from(listEl.querySelectorAll("[data-search-text]"));
                 let visibleRows = 0;
 
@@ -7825,20 +7861,6 @@
                 .catch(function () {});
         }
 
-        function toggleFlapReportSection() {
-            if (!flapReportSection) {
-                return;
-            }
-            flapReportSection.hidden = !flapReportSection.hidden;
-            if (!flapReportSection.hidden) {
-                if (!flapReportLoaded) {
-                    loadFlapReport();
-                }
-                if (flapReportSection.scrollIntoView) {
-                    flapReportSection.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-            }
-        }
         if (flapReportRefreshBtn) {
             flapReportRefreshBtn.addEventListener("click", loadFlapReport);
         }
@@ -7950,6 +7972,34 @@
             // unit" line needed, that would just repeat it.
             line.textContent = row.error ? ("Check failed: " + row.error) : (row.summary || row.unit);
             body.appendChild(line);
+
+            // VRM Disconnected rows only (row.vrm_freshness is only ever
+            // set by fleet_vrm_freshness_status) — flags a maybe-related
+            // open ticket found by findOpenTicketForUnits (see
+            // FLEET_REPORT_CONFIGS.vrmFreshness.enrichFn), which is also
+            // what pushed this row to the top of the report.
+            if (row.vrm_freshness !== undefined && row.related_ticket) {
+                const ticket = row.related_ticket;
+                const relatedLine = document.createElement("div");
+                relatedLine.className = "snapshot-task-line";
+                const badge = document.createElement("span");
+                badge.className = "related-ticket-badge";
+                badge.textContent = "⚠ possibly related ticket";
+                relatedLine.appendChild(badge);
+                const ticketLabel = document.createElement("span");
+                ticketLabel.textContent = ticket.ticketSubject || ticket.issueId || ticket.unit;
+                if (ticket.url) {
+                    const ticketLink = document.createElement("a");
+                    ticketLink.href = ticket.url;
+                    ticketLink.target = "_blank";
+                    ticketLink.rel = "noopener noreferrer";
+                    ticketLink.textContent = ticketLabel.textContent;
+                    relatedLine.appendChild(ticketLink);
+                } else {
+                    relatedLine.appendChild(ticketLabel);
+                }
+                body.appendChild(relatedLine);
+            }
 
             // Shaded Units AND Dead Panels rows — both are read off the
             // same underlying solar-power history (row.shading_status is
@@ -8117,6 +8167,32 @@
             });
         }
 
+        // A VRM-disconnected site with an ALREADY-open issue ticket against
+        // it (or its ERP-linked RD/FD head) is worth flagging distinctly —
+        // someone's likely already on it, or it explains the silence (unit
+        // pulled, relocation, etc.) rather than being a fresh, unseen
+        // problem. Checks every currently-loaded issue list (not projects,
+        // not discarded), matching either the trailer's own code or any of
+        // its resolved head units. Returns the matching ticket entry, or
+        // null.
+        function findOpenTicketForUnits(units) {
+            const wanted = new Set(
+                (units || []).filter(Boolean).map(function (u) { return String(u).toUpperCase(); })
+            );
+            if (!wanted.size) {
+                return null;
+            }
+            for (const id of issueListIds) {
+                const entries = listState[id] || [];
+                for (const entry of entries) {
+                    if (entry.unit && wanted.has(String(entry.unit).toUpperCase())) {
+                        return entry;
+                    }
+                }
+            }
+            return null;
+        }
+
         // sortRank: lower sorts first — puts the actionable finding
         // (unplugged / shaded / dead panel / disconnected) at the top of
         // a list that can run into the hundreds, rather than alphabetical.
@@ -8192,13 +8268,31 @@
                 // the certainty proxy: longer silence sorts first within
                 // the same tier.
                 certainty: function (row) { return row.vrm_last_seen_seconds_ago; },
+                // A unit already has an open issue ticket — flag it and
+                // push it to the very top, ahead of freshness tier.
+                enrichFn: function (row) {
+                    row.related_ticket = findOpenTicketForUnits([row.unit].concat(row.head_units || []));
+                },
+                priorityFn: function (row) { return row.related_ticket ? 0 : 1; },
             },
         };
         const fleetReportLoadedOnce = {};
 
         function renderFleetReportRows(config, data) {
             const rows = (config.filterFn ? (data.rows || []).filter(config.filterFn) : (data.rows || []).slice());
+            if (config.enrichFn) {
+                rows.forEach(config.enrichFn);
+            }
             rows.sort(function (a, b) {
+                // Ahead of everything else, including the finding's own
+                // sortRank — a unit that's already got an open ticket
+                // someone's working is worth seeing before ones that
+                // aren't, regardless of which finding tier either is in.
+                const pa = config.priorityFn ? config.priorityFn(a) : 0;
+                const pb = config.priorityFn ? config.priorityFn(b) : 0;
+                if (pa !== pb) {
+                    return pa - pb;
+                }
                 const ra = config.sortRank(a);
                 const rb = config.sortRank(b);
                 const aRanked = ra !== undefined;
@@ -8300,23 +8394,6 @@
                 });
         }
 
-        function toggleFleetReportSection(key) {
-            const config = FLEET_REPORT_CONFIGS[key];
-            if (!config || !config.sectionEl) {
-                return;
-            }
-            config.sectionEl.hidden = !config.sectionEl.hidden;
-            if (!config.sectionEl.hidden) {
-                if (!fleetReportLoadedOnce[key]) {
-                    fleetReportLoadedOnce[key] = true;
-                    loadFleetReportCached(config);
-                }
-                if (config.sectionEl.scrollIntoView) {
-                    config.sectionEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                }
-            }
-        }
-
         Object.keys(FLEET_REPORT_CONFIGS).forEach(function (key) {
             const config = FLEET_REPORT_CONFIGS[key];
             if (config.refreshBtn) {
@@ -8326,65 +8403,21 @@
             }
         });
 
-        // ---- Reports menu (Flap Report / Units Unplugged / Shaded Units) -----
-        const reportsMenuWrap = document.getElementById("reports_menu_wrap");
-        const reportsMenuToggle = document.getElementById("reports_menu_toggle");
-        const reportsMenuOptions = document.getElementById("reports_menu_options");
-
-        function openReportsMenu() {
-            if (reportsMenuWrap) {
-                reportsMenuWrap.classList.add("is-open");
-                reportsMenuToggle.setAttribute("aria-expanded", "true");
+        // ---- Reports panel (panel_mode === "reports") -------------------------
+        // Reports is a page alongside Issues/Projects, not a separate toolbar
+        // dropdown — applyPanelMode shows every [data-panel="reports"] section
+        // at once (Flap Report + the four fleet-wide VRM checks) and this
+        // lazy-loads each exactly once, the same "don't refetch on every
+        // visit" cache-then-load pattern loadFleetReportCached already uses
+        // per report.
+        function ensureReportsLoaded() {
+            if (!flapReportLoaded) {
+                loadFlapReport();
             }
-        }
-        function closeReportsMenu() {
-            if (reportsMenuWrap) {
-                reportsMenuWrap.classList.remove("is-open");
-                reportsMenuToggle.setAttribute("aria-expanded", "false");
-            }
-        }
-        if (reportsMenuToggle && reportsMenuWrap) {
-            reportsMenuToggle.addEventListener("click", function (event) {
-                event.stopPropagation();
-                if (reportsMenuWrap.classList.contains("is-open")) {
-                    closeReportsMenu();
-                } else {
-                    openReportsMenu();
-                }
-            });
-            document.getElementById("reports_menu_flap").addEventListener("click", function (event) {
-                event.stopPropagation();
-                toggleFlapReportSection();
-                closeReportsMenu();
-            });
-            document.getElementById("reports_menu_unplugged").addEventListener("click", function (event) {
-                event.stopPropagation();
-                toggleFleetReportSection("unitsUnplugged");
-                closeReportsMenu();
-            });
-            document.getElementById("reports_menu_shaded").addEventListener("click", function (event) {
-                event.stopPropagation();
-                toggleFleetReportSection("shadedUnits");
-                closeReportsMenu();
-            });
-            document.getElementById("reports_menu_dead_panel").addEventListener("click", function (event) {
-                event.stopPropagation();
-                toggleFleetReportSection("deadPanel");
-                closeReportsMenu();
-            });
-            document.getElementById("reports_menu_vrm_freshness").addEventListener("click", function (event) {
-                event.stopPropagation();
-                toggleFleetReportSection("vrmFreshness");
-                closeReportsMenu();
-            });
-            document.addEventListener("click", function (event) {
-                if (reportsMenuWrap && !reportsMenuWrap.contains(event.target)) {
-                    closeReportsMenu();
-                }
-            });
-            document.addEventListener("keydown", function (event) {
-                if (event.key === "Escape") {
-                    closeReportsMenu();
+            Object.keys(FLEET_REPORT_CONFIGS).forEach(function (key) {
+                if (!fleetReportLoadedOnce[key]) {
+                    fleetReportLoadedOnce[key] = true;
+                    loadFleetReportCached(FLEET_REPORT_CONFIGS[key]);
                 }
             });
         }
@@ -10265,7 +10298,7 @@
             if (!statsStripEl) {
                 return;
             }
-            const interactive = currentPanelMode() !== "projects";
+            const interactive = currentPanelMode() === "issues";
             const selected = currentSelectedLists();
             const filtering = filteringEnabled();
             statsStripEl.innerHTML = "";
