@@ -811,6 +811,35 @@
             padding: 1px 6px;
             flex-shrink: 0;
         }
+        /* Security Update Fix, Verify step: the grepped VGA/i915 counts
+           used to only exist as two plain lines buried in the scrolling
+           log (see security_update_web_verify) — easy to miss a short
+           count on. Filled pills, same "state at a glance" convention as
+           .command-battery-glyph, so a short count reads as wrong without
+           having to read the numbers. */
+        .driver-check-row {
+            display: flex;
+            gap: 6px;
+            margin: 0 0 8px;
+            flex-wrap: wrap;
+        }
+        .driver-check-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: var(--radius-pill);
+            padding: 2px 8px;
+            color: var(--text-on-accent);
+        }
+        .driver-check-badge.is-ok {
+            background: var(--ok);
+        }
+        .driver-check-badge.is-fail {
+            background: var(--danger);
+            color: var(--caution-softest);
+        }
         /* ---- Guided tour --------------------------------------------------
            Read-only by construction: the backdrop swallows every click on
            the real page (pointer-events: auto) so nothing underneath can be
@@ -2316,6 +2345,7 @@
             <h2 id="security_fix_title">Security Update Fix</h2>
             <p id="security_fix_message">This will SSH to PVE and Scrypted and run the security update fix.</p>
             <div id="security_fix_log" style="max-height:220px; overflow-y:auto; background:rgba(0,0,0,0.25); padding:8px; border-radius:4px; font-family:monospace; font-size:12px; white-space:pre-wrap; margin:8px 0;"></div>
+            <div id="security_fix_driver_check" class="driver-check-row" hidden></div>
             <button type="button" id="security_fix_force_clear" class="toolbar-btn" hidden style="margin-bottom:8px;">Force Clear Lock (stuck job?)</button>
             <div class="confirm-actions">
                 <button type="button" class="confirm-cancel" id="security_fix_cancel">Cancel</button>
@@ -2532,6 +2562,7 @@
         const securityFixModal = document.getElementById("security_fix_modal");
         const securityFixMessage = document.getElementById("security_fix_message");
         const securityFixLog = document.getElementById("security_fix_log");
+        const securityFixDriverCheck = document.getElementById("security_fix_driver_check");
         const securityFixCancel = document.getElementById("security_fix_cancel");
         const securityFixAction = document.getElementById("security_fix_action");
         const securityFixForceClear = document.getElementById("security_fix_force_clear");
@@ -3431,6 +3462,36 @@
             }
         });
         document.addEventListener("click", function (event) {
+            // The guided tour opens a menu itself to point at (see
+            // tourOpenFirstRowMenu) and its own Next/Back/Skip controls live
+            // outside that menu by design — without this check, every click
+            // on those controls read as "clicked outside the menu, close
+            // it," so the tour's own highlight ring would end up circling a
+            // menu that had just silently closed underneath it (caught live:
+            // "guided tour is bugged, doesn't open cmd window like it thinks
+            // it does" — the Status row/Validate/Weather/... steps all rely
+            // on the menu this closed).
+            //
+            // Gated on tourActive alone, NOT on where the click landed —
+            // tourRenderCallout rebuilds the callout (innerHTML = "") to
+            // build the NEXT step synchronously inside this same click's
+            // own handler, which runs before this document-level listener
+            // sees the event (it's still the same click, still bubbling).
+            // That detaches the just-clicked Next/Back button from the
+            // document before it gets here, so event.target.closest(...)
+            // can no longer find its way back up to .tour-callout — traced
+            // live with a temporary HTMLDetailsElement.prototype.open probe
+            // (an earlier version of this fix checked
+            // event.target.closest(".tour-callout, .tour-backdrop") and
+            // still failed for exactly this reason). tourActive alone is
+            // safe: the full-page backdrop (pointer-events:auto) blocks
+            // every other click during the tour, so nothing legitimate
+            // needs this listener while it's running, and endTour() closes
+            // the tour-opened menu explicitly on its way out regardless of
+            // how the tour ends.
+            if (tourActive) {
+                return;
+            }
             document.querySelectorAll("details.command-menu").forEach(function (menu) {
                 if (!menu.contains(event.target)) {
                     menu.open = false;
@@ -9462,6 +9523,36 @@
             consoleLines.push(text);
         }
 
+        function securityFixDriverBadge(label, count, expected) {
+            const ok = count === expected;
+            const badge = document.createElement("span");
+            badge.className = "driver-check-badge is-" + (ok ? "ok" : "fail");
+            badge.textContent = (ok ? "✓ " : "✗ ") + label + " " + count + "/" + expected;
+            badge.title = ok
+                ? label + " grepped the expected " + expected + " — looks right."
+                : label + " grepped " + count + ", expected " + expected + " — some drivers did not load.";
+            return badge;
+        }
+
+        // Verify step visual: the VGA/i915 counts security_update_web_verify
+        // greps for used to only exist as two plain lines buried in the
+        // scrolling log — easy to miss a short count on. Two colored pills
+        // instead, so a short count reads as wrong at a glance.
+        function renderSecurityFixDriverCheck(data) {
+            securityFixDriverCheck.innerHTML = "";
+            if (!data || data.vga_counter == null || data.i915_counter == null) {
+                securityFixDriverCheck.hidden = true;
+                return;
+            }
+            securityFixDriverCheck.appendChild(
+                securityFixDriverBadge("VGA controllers", data.vga_counter, data.vga_expected)
+            );
+            securityFixDriverCheck.appendChild(
+                securityFixDriverBadge("i915 entries", data.i915_counter, data.i915_expected)
+            );
+            securityFixDriverCheck.hidden = false;
+        }
+
         function securityFixStorageKey(unit) {
             return "security_fix_token_" + unit;
         }
@@ -9562,6 +9653,8 @@
             securityFixToken = null;
             securityFixLockedByOther = false;
             securityFixLog.textContent = "";
+            securityFixDriverCheck.hidden = true;
+            securityFixDriverCheck.innerHTML = "";
             securityFixForceClear.hidden = true;
             securityFixAction.hidden = false;
         }
@@ -9571,6 +9664,8 @@
             securityFixButton = button || null;
             securityFixVersion = null;
             securityFixLog.textContent = "";
+            securityFixDriverCheck.hidden = true;
+            securityFixDriverCheck.innerHTML = "";
             securityFixForceClear.hidden = true;
             securityFixAction.hidden = false;
             securityFixLockedByOther = false;
@@ -9687,6 +9782,7 @@
                 securityFixCall("/issues/security-update-fix/verify/")
                     .then(function (data) {
                         securityFixLogLine(data.message || "Verification complete.");
+                        renderSecurityFixDriverCheck(data);
                         applySecurityFixPhaseUI("restart", unit);
                         if (!data.drivers_loaded) {
                             securityFixMessage.textContent =

@@ -2739,12 +2739,15 @@ def issues_security_fix_verify(unit):
     token, err = _require_unit_token(unit)
     if err:
         return err
-    ok, message, drivers_loaded = work_tool.security_update_web_verify(unit)
+    ok, message, drivers_loaded, counts = work_tool.security_update_web_verify(unit)
     phase = "verify_done" if (ok and drivers_loaded) else ("verify_warning" if ok else "verify_failed")
     work_tool.unit_busy_touch(unit, token, phase=phase, log_line=message)
     if not ok:
         return jsonify({"ok": False, "error": message}), 400
-    return jsonify({"ok": True, "unit": unit, "message": message, "drivers_loaded": drivers_loaded, "token": token})
+    return jsonify({
+        "ok": True, "unit": unit, "message": message, "drivers_loaded": drivers_loaded,
+        "token": token, **counts,
+    })
 
 @app.route("/issues/restart-services/<unit>", methods=["POST"])
 def issues_restart_services(unit):

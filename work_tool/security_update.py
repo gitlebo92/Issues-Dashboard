@@ -567,21 +567,33 @@ def security_update_web_finish(unit, version):
         return False, f"Finish step failed: {exc}"
     finally:
         client.close()
+_VGA_CONTROLLERS_EXPECTED = 2
+_I915_ENTRIES_EXPECTED = 7
 def security_update_web_verify(unit):
     """
     Security update fix, verify: confirm the VGA/i915 passthrough drivers
     loaded after VM 101 is back up. Web-safe counterpart of
     security_update_step4 (returns a message instead of printing).
+
+    Returns (ok, message, drivers_loaded, counts). counts is
+    {"vga_counter", "vga_expected", "i915_counter", "i915_expected"} — the
+    web wizard's Verify step visually flags each grepped count against its
+    expected total (2 VGA controllers, 7 i915 entries) rather than making
+    someone read the raw log to notice one came up short.
     """
+    empty_counts = {
+        "vga_counter": 0, "vga_expected": _VGA_CONTROLLERS_EXPECTED,
+        "i915_counter": 0, "i915_expected": _I915_ENTRIES_EXPECTED,
+    }
     unit = str(unit or "").strip()
     if not unit:
-        return False, "Missing unit", False
+        return False, "Missing unit", False, empty_counts
     _pve_ip, scrypted_ip, err = _security_fix_ip_pair(unit)
     if err:
-        return False, err, False
+        return False, err, False, empty_counts
     username, password = _scrypted_ssh_credentials()
     if not username or not password:
-        return False, "Set scryptuserssh and scryptpass in .env", False
+        return False, "Set scryptuserssh and scryptpass in .env", False, empty_counts
 
     commands = [
         f"echo '{password}' | sudo -S lspci -nn | grep -i VGA",
@@ -617,12 +629,16 @@ def security_update_web_verify(unit):
         log_lines.extend(secondary_output.splitlines())
         log_lines.append(f"VGA controllers: {vga_counter}")
         log_lines.append(f"i915 entries: {i915_counter}")
-        drivers_loaded = vga_counter == 2 and i915_counter == 7
+        drivers_loaded = vga_counter == _VGA_CONTROLLERS_EXPECTED and i915_counter == _I915_ENTRIES_EXPECTED
         if not drivers_loaded:
             log_lines.append("Some drivers did not load")
-        return True, "\n".join(log_lines), drivers_loaded
+        counts = {
+            "vga_counter": vga_counter, "vga_expected": _VGA_CONTROLLERS_EXPECTED,
+            "i915_counter": i915_counter, "i915_expected": _I915_ENTRIES_EXPECTED,
+        }
+        return True, "\n".join(log_lines), drivers_loaded, counts
     except Exception as exc:
-        return False, f"Verify step failed: {exc}", False
+        return False, f"Verify step failed: {exc}", False, empty_counts
     finally:
         client.close()
 def restart_platform_services(unit):

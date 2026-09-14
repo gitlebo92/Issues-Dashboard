@@ -2916,6 +2916,20 @@ _PVE_HOP_HEADERS = {
     "host",
     "content-length",
     "cookie",
+    # Never forward the browser's own Accept-Encoding upstream. This
+    # environment has neither brotli nor zstandard installed (checked
+    # live), and requests/urllib3 only auto-decompresses gzip/deflate — if
+    # PVE's web server honors a modern browser's "br, zstd" advertisement
+    # and compresses a response with either, resp.content below comes back
+    # as the still-compressed bytes, and _PVE_SKIP_RESP_HEADERS drops
+    # Content-Encoding on the way out, so the browser is told it's plain
+    # text/html/json and tries to parse garbage — silently, no console
+    # error, just a blank pane. Matches exactly what was reported: PVE
+    # opens and logs in (small/early responses happened to not compress
+    # that way) but selecting a VM shows nothing (its bigger JSON/JS
+    # payloads did). Stripping this lets requests send its own default
+    # Accept-Encoding, which it can always decode.
+    "accept-encoding",
 }
 _PVE_SKIP_RESP_HEADERS = {
     "connection",
