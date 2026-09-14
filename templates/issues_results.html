@@ -1892,8 +1892,6 @@
                 <button type="button" id="pull_erp" class="toolbar-btn">Pull Issues</button>
                 <button type="button" id="update_weather" class="toolbar-btn" title="Refresh weather icons for all visible tickets">Update Weather</button>
                 <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
-                <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
-                <button type="button" id="alarm_frequency_toggle" class="toolbar-btn" title="Repeat offenders: units whose Zabbix/VRM alarms keep clearing and coming back, not just what's active right now">Alarm Frequency</button>
                 <button type="button" id="take_tour_btn" class="toolbar-btn" title="A guided walkthrough of the dashboard's features — purely visual, never runs or changes anything">Take a Tour</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
@@ -1958,7 +1956,7 @@
             </div>
             <ul id="vrm_freshness_list"><li class="empty">Loading cached results...</li></ul>
             </div>
-            <div class="list-section" id="power_infra_section" data-panel="issues" hidden>
+            <div class="list-section" id="power_infra_section" data-panel="reports" hidden>
             <h2>
                 Power &amp; Infra Alerts <span class="experimental-badge">Experimental</span>
                 <span class="count" id="power_infra_count"></span>
@@ -1969,7 +1967,7 @@
             </div>
             <ul id="power_infra_list"><li class="empty">Click Refresh to load current Zabbix problems and VRM battery alarms...</li></ul>
             </div>
-            <div class="list-section" id="alarm_frequency_section" data-panel="issues" hidden>
+            <div class="list-section" id="alarm_frequency_section" data-panel="reports" hidden>
             <h2>
                 Alarm Frequency <span class="experimental-badge">Experimental</span>
                 <span class="count" id="alarm_frequency_count"></span>
@@ -7261,8 +7259,13 @@
                     {
                         actionLabel: "Open Power & Infra Alerts",
                         onAction: function () {
-                            if (powerInfraSection) {
-                                powerInfraSection.hidden = false;
+                            // Power & Infra Alerts lives on the Reports page
+                            // now — switch there so it isn't shown mixed in
+                            // alongside whatever Issues/Projects lists are
+                            // also on screen.
+                            if (panelModeEl && panelModeEl.value !== "reports") {
+                                panelModeEl.value = "reports";
+                                applyPanelMode();
                             }
                             if (!powerInfraLoaded) {
                                 loadPowerInfraAlerts();
@@ -8513,6 +8516,12 @@
                     loadFleetReportCached(FLEET_REPORT_CONFIGS[key]);
                 }
             });
+            if (!powerInfraLoaded) {
+                loadPowerInfraAlerts();
+            }
+            if (!alarmFrequencyLoaded) {
+                loadAlarmFrequency();
+            }
         }
 
         // ---- Power & Infra Alerts (experimental) -----------------------------
@@ -8520,7 +8529,6 @@
         // unit — see combined_power_infra_alerts() for what "corroborated"
         // means and how an MU trailer row also picks up its RD/FD head's own
         // Zabbix problems via a server-side ERP crosswalk.
-        const powerInfraToggleBtn = document.getElementById("power_infra_toggle");
         const powerInfraSection = document.getElementById("power_infra_section");
         const powerInfraListEl = document.getElementById("power_infra_list");
         const powerInfraCountEl = document.getElementById("power_infra_count");
@@ -8672,14 +8680,6 @@
                 });
         }
 
-        if (powerInfraToggleBtn && powerInfraSection) {
-            powerInfraToggleBtn.addEventListener("click", function () {
-                powerInfraSection.hidden = !powerInfraSection.hidden;
-                if (!powerInfraSection.hidden && !powerInfraLoaded) {
-                    loadPowerInfraAlerts();
-                }
-            });
-        }
         if (powerInfraRefreshBtn) {
             powerInfraRefreshBtn.addEventListener("click", loadPowerInfraAlerts);
         }
@@ -8693,7 +8693,6 @@
         // quietly recording episodes into since alarm_history.py shipped.
         // Same fleet-wide "repeat offenders" shape as Flap Report, for
         // alarms instead of validation-check health.
-        const alarmFrequencyToggleBtn = document.getElementById("alarm_frequency_toggle");
         const alarmFrequencySection = document.getElementById("alarm_frequency_section");
         const alarmFrequencyListEl = document.getElementById("alarm_frequency_list");
         const alarmFrequencyCountEl = document.getElementById("alarm_frequency_count");
@@ -8790,14 +8789,6 @@
                 .catch(function () {});
         }
 
-        if (alarmFrequencyToggleBtn && alarmFrequencySection) {
-            alarmFrequencyToggleBtn.addEventListener("click", function () {
-                alarmFrequencySection.hidden = !alarmFrequencySection.hidden;
-                if (!alarmFrequencySection.hidden && !alarmFrequencyLoaded) {
-                    loadAlarmFrequency();
-                }
-            });
-        }
         if (alarmFrequencyRefreshBtn) {
             alarmFrequencyRefreshBtn.addEventListener("click", loadAlarmFrequency);
         }
@@ -13490,27 +13481,9 @@
                 body: "Filters the console pane itself, separately from the ticket-list search above it — for finding one unit's output in a long session.",
             },
             {
-                selector: "#power_infra_section",
-                title: "Power & Infra Alerts",
-                body: "Experimental: merges Zabbix's currently-open problems with VRM's own battery alarms, by unit. \"Corroborated\" means both systems agree something's wrong on that unit right now — a stronger signal than either alone.",
-                before: function () {
-                    tourSetPanelMode("issues");
-                    tourShow(document.getElementById("power_infra_section"));
-                },
-            },
-            {
-                selector: "#alarm_frequency_section",
-                title: "Alarm Frequency",
-                body: "Repeat offenders — units whose alarms keep clearing and coming back, not just what's active right now. A unit that flaps 15 times a day is a different problem than one that's been steadily down since this morning, even if neither looks \"currently alarmed\" at any single instant.",
-                before: function () {
-                    tourSetPanelMode("issues");
-                    tourShow(document.getElementById("alarm_frequency_section"));
-                },
-            },
-            {
                 selector: "#flap_report_section",
                 title: "Reports — Flap Report",
-                body: "Switching to Reports mode (top-left) brings up five fleet-wide checks as their own page. Flap Report counts healthy ↔ unhealthy TRANSITIONS, not just failures — what separates a unit that's simply down from one that keeps bouncing.",
+                body: "Switching to Reports mode (top-left) brings up seven fleet-wide checks as their own page. Flap Report counts healthy ↔ unhealthy TRANSITIONS, not just failures — what separates a unit that's simply down from one that keeps bouncing.",
                 before: function () { tourSetPanelMode("reports"); },
             },
             {
@@ -13534,7 +13507,19 @@
             {
                 selector: "#vrm_freshness_section",
                 title: "VRM Disconnected",
-                body: "How recently every installation last reported to VRM at all — the cheapest of the five checks (no per-site call needed). Nuance: a unit here that ALSO has an open issue ticket is pushed to the very top with a \"possibly related ticket\" badge — likely means someone's already on it, or it explains the silence.",
+                body: "How recently every installation last reported to VRM at all — the cheapest of the fleet-wide checks (no per-site call needed). Nuance: a unit here that ALSO has an open issue ticket is pushed to the very top with a \"possibly related ticket\" badge — likely means someone's already on it, or it explains the silence.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#power_infra_section",
+                title: "Power & Infra Alerts",
+                body: "Experimental: merges Zabbix's currently-open problems with VRM's own battery alarms, by unit. \"Corroborated\" means both systems agree something's wrong on that unit right now — a stronger signal than either alone.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#alarm_frequency_section",
+                title: "Alarm Frequency",
+                body: "Repeat offenders — units whose alarms keep clearing and coming back, not just what's active right now. A unit that flaps 15 times a day is a different problem than one that's been steadily down since this morning, even if neither looks \"currently alarmed\" at any single instant.",
                 before: function () { tourSetPanelMode("reports"); },
             },
             {
