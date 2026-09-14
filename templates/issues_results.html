@@ -6031,8 +6031,14 @@
             const powerGlyph = row.querySelector(".command-power-glyph");
             const shadingGlyph = row.querySelector(".command-shading-glyph");
             const deadPanelGlyph = row.querySelector(".command-dead-panel-glyph");
+            // The connectivity LED (see renderList) has no hidden/shown
+            // toggle of its own — once it's present at all, it's always
+            // showing a real status (including the neutral idle color),
+            // so it alone is enough to keep the row visible.
+            const led = row.querySelector(".speaker-led");
             const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
-                || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden);
+                || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden)
+                || !!led;
             row.hidden = !anyVisible;
         }
 
@@ -11304,7 +11310,12 @@
                             ? "Scrypted is offline or needs verification"
                             : entry.computeLabel + " is offline or needs verification";
                     }
-                    rowBody.appendChild(computeLed);
+                    // Not appended here — moved into the expanded command
+                    // menu's status row below, alongside the alarm/power/
+                    // shading/dead-panel glyphs (see "leds.forEach" further
+                    // down), so every per-unit status indicator lives in
+                    // one place once the menu is open, not scattered
+                    // across the row and the button.
                 }
 
                 let speakerLed = null;
@@ -11320,7 +11331,6 @@
                             : (entry.speakerUp === false ? "Speaker is down" : "Speaker status unknown");
                     }
                     updateSpeakerLed();
-                    rowBody.appendChild(speakerLed);
                 }
 
                 let cameraLed = null;
@@ -11334,11 +11344,11 @@
                         : (entry.cameraUp === false
                             ? entry.cameraLabel + " is down"
                             : entry.cameraLabel + " status unknown");
-                    rowBody.appendChild(cameraLed);
                 }
 
+                let panelLed = null;
                 if (entry.isPanelIssue) {
-                    const panelLed = document.createElement("span");
+                    panelLed = document.createElement("span");
                     panelLed.className = "speaker-led";
                     panelLed.classList.toggle("is-up", entry.panelFisheyeUp === true);
                     panelLed.classList.toggle("is-down", entry.panelFisheyeUp === false);
@@ -11347,7 +11357,6 @@
                         : (entry.panelFisheyeUp === false
                             ? "Fisheye is down"
                             : "Fisheye status unknown");
-                    rowBody.appendChild(panelLed);
                 }
 
                 appendWeatherIcon(rowBody, entry);
@@ -11416,6 +11425,19 @@
 
                 const menuParts = createCommandMenuElement(entry, li);
                 const commandItems = menuParts.commandItems;
+                // Whichever connectivity LED this row built above (at most
+                // one applies per row — list type and entry flags are
+                // mutually exclusive in practice) lives in the expanded
+                // menu's status row now, alongside the alarm/power/shading/
+                // dead-panel glyphs, instead of out on the row itself.
+                const rowLed = computeLed || speakerLed || cameraLed || panelLed;
+                if (rowLed) {
+                    const statusRow = commandItems.querySelector(".command-menu-status");
+                    if (statusRow) {
+                        statusRow.insertBefore(rowLed, statusRow.firstChild);
+                        statusRow.hidden = false;
+                    }
+                }
                 const actions = document.createElement("div");
                 actions.className = "ticket-row-actions";
                 actions.appendChild(menuParts.commandMenu);
