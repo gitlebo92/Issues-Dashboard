@@ -2345,6 +2345,25 @@ def issues_shading_status(unit):
     return jsonify({"ok": True, **info})
 
 
+@app.route("/issues/dead-panel-status/<unit>", methods=["POST"])
+def issues_dead_panel_status(unit):
+    """
+    Experimental: is this trailer likely down a solar panel — built from
+    a peak-output-over-time comparison (see work_tool.detect_dead_panel).
+    Read-only against VRM.
+    """
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.unit_dead_panel_status(unit, subject)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
 @app.route("/issues/schedule-shading-snapshot/<unit>", methods=["POST"])
 def issues_schedule_shading_snapshot(unit):
     """

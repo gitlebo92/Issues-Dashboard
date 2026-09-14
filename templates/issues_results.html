@@ -926,6 +926,24 @@
             vertical-align: middle;
             cursor: pointer;
         }
+        /* Same alert-only treatment as .command-shading-glyph, just its
+           own color (danger, not caution) — a dead panel is a hardware
+           finding, not a "worth a look" — same as the report's own
+           report-status-fail coloring for this status. */
+        .command-dead-panel-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--danger);
+            font-size: 9px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
         .battery-graphs-dialog {
             width: min(720px, 100%);
             max-height: 85vh;
@@ -6012,8 +6030,9 @@
             const alarmGlyph = row.querySelector(".command-alarm-glyph");
             const powerGlyph = row.querySelector(".command-power-glyph");
             const shadingGlyph = row.querySelector(".command-shading-glyph");
+            const deadPanelGlyph = row.querySelector(".command-dead-panel-glyph");
             const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
-                || (shadingGlyph && !shadingGlyph.hidden);
+                || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden);
             row.hidden = !anyVisible;
         }
 
@@ -6183,6 +6202,66 @@
                 .finally(function () {
                     delete shadingGlyphInFlight[unit];
                     applyShadingGlyphFromCache(commandMenu);
+                });
+        }
+
+        // Same lazy on-open, cached-per-unit, alert-only pattern as the
+        // shading glyph above — a real check is a /stats call over
+        // history_days plus one over recent_days (see detect_dead_panel).
+        const deadPanelGlyphCache = {};
+        const deadPanelGlyphInFlight = {};
+        const DEAD_PANEL_GLYPH_CACHE_MS = 5 * 60 * 1000;
+
+        function applyDeadPanelGlyphFromCache(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-dead-panel-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const cached = deadPanelGlyphCache[unit];
+            if (!cached || cached.status !== "dead_panel") {
+                glyph.hidden = true;
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
+            glyph.hidden = false;
+            glyph.title = (cached.summary || "Possible dead/underperforming panel") + "\n(click to view solar graphs)";
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        function checkAndApplyDeadPanelGlyph(commandMenu) {
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            if (!unit || unit === "MENU") {
+                return;
+            }
+            const cached = deadPanelGlyphCache[unit];
+            if (cached && (Date.now() - cached.fetchedAt) < DEAD_PANEL_GLYPH_CACHE_MS) {
+                applyDeadPanelGlyphFromCache(commandMenu);
+                return;
+            }
+            if (deadPanelGlyphInFlight[unit]) {
+                return;
+            }
+            deadPanelGlyphInFlight[unit] = true;
+            const entry = commandMenuEntries.get(commandMenu);
+            const subject = (entry && (entry.ticketSubject || entry.subject)) || "";
+            fetch("/issues/dead-panel-status/" + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ subject: subject }),
+            })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    deadPanelGlyphCache[unit] = (data && data.ok)
+                        ? { status: data.dead_panel_status, summary: data.summary, fetchedAt: Date.now() }
+                        : { status: null, fetchedAt: Date.now() };
+                })
+                .catch(function () {
+                    deadPanelGlyphCache[unit] = { status: null, fetchedAt: Date.now() };
+                })
+                .finally(function () {
+                    delete deadPanelGlyphInFlight[unit];
+                    applyDeadPanelGlyphFromCache(commandMenu);
                 });
         }
 
@@ -7096,6 +7175,21 @@
                 openGraphsModal(entry.unit, "battery", entry.ticketSubject || entry.subject || "");
             });
             statusRow.appendChild(shadingGlyph);
+            // Same pure-alert treatment as the shading glyph, for
+            // detect_dead_panel's own finding (see checkAndApplyDeadPanelGlyph).
+            const deadPanelGlyph = document.createElement("span");
+            deadPanelGlyph.className = "command-dead-panel-glyph";
+            deadPanelGlyph.textContent = "🔧";
+            deadPanelGlyph.hidden = true;
+            deadPanelGlyph.addEventListener("click", function (event) {
+                event.stopPropagation();
+                const entry = commandMenuEntries.get(commandMenu);
+                if (!entry || !entry.unit) {
+                    return;
+                }
+                openGraphsModal(entry.unit, "battery", entry.ticketSubject || entry.subject || "");
+            });
+            statusRow.appendChild(deadPanelGlyph);
             commandItems.appendChild(statusRow);
 
             commandMenuEntries.set(commandMenu, entry);
@@ -7125,6 +7219,7 @@
                     renderRecentCommands(commandMenu.querySelector(".command-menu-items"));
                     checkAndApplyPowerGlyph(commandMenu);
                     checkAndApplyShadingGlyph(commandMenu);
+                    checkAndApplyDeadPanelGlyph(commandMenu);
                 } else {
                     clearCommandMenuPosition(commandMenu);
                 }
