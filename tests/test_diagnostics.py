@@ -6,6 +6,7 @@ exercised through their input guards, and unit_history runs against a
 temporary database rather than the real data dir.
 """
 
+import datetime as dt
 import os
 import sys
 import tempfile
@@ -341,6 +342,163 @@ class CombinedPowerInfraAlertsSiteFilter(unittest.TestCase):
             info, error = work_tool.diagnostics.combined_power_infra_alerts()
         self.assertIsNone(error)
         self.assertEqual([r["unit"] for r in info["rows"]], ["MU1001"])
+
+
+class ParseSwitchUptimeSeconds(unittest.TestCase):
+    def test_real_robofiber_text_with_singular_hour(self):
+        # Checked live (RD3343): "1 Hour", not "1 Hours" — the parser has
+        # to handle both, since Netonix's own text is always plural (see
+        # _format_switch_uptime_seconds).
+        seconds = work_tool.diagnostics._parse_switch_uptime_seconds(
+            "Running Time            : 151 Days 1 Hour 31 Mins 3 Secs"
+        )
+        self.assertEqual(seconds, 151 * 86400 + 3600 + 31 * 60 + 3)
+
+    def test_netonix_style_always_plural(self):
+        seconds = work_tool.diagnostics._parse_switch_uptime_seconds(
+            "Uptime: 18 Days 0 Hours 0 Mins 0 Secs"
+        )
+        self.assertEqual(seconds, 18 * 86400)
+
+    def test_unparseable_text_returns_none(self):
+        self.assertIsNone(work_tool.diagnostics._parse_switch_uptime_seconds(""))
+        self.assertIsNone(work_tool.diagnostics._parse_switch_uptime_seconds(None))
+        self.assertIsNone(work_tool.diagnostics._parse_switch_uptime_seconds("System Name: SC-RD3343-Switch"))
+
+
+class LatestHighLossWindow(unittest.TestCase):
+    def test_finds_the_most_recent_run_not_the_first(self):
+        points = [
+            {"t": 1000, "v": 100.0},
+            {"t": 2000, "v": 100.0},
+            {"t": 3000, "v": 5.0},
+            {"t": 4000, "v": 95.0},
+            {"t": 5000, "v": 95.0},
+            {"t": 6000, "v": 3.0},
+        ]
+        window = work_tool.diagnostics._latest_high_loss_window(points)
+        self.assertEqual(window, (4000, 5000, 2))
+
+    def test_no_qualifying_point_returns_none(self):
+        points = [{"t": 1000, "v": 10.0}, {"t": 2000, "v": 50.0}]
+        self.assertIsNone(work_tool.diagnostics._latest_high_loss_window(points))
+
+    def test_empty_points_returns_none(self):
+        self.assertIsNone(work_tool.diagnostics._latest_high_loss_window([]))
+        self.assertIsNone(work_tool.diagnostics._latest_high_loss_window(None))
+
+    def test_unordered_input_is_sorted_first(self):
+        points = [
+            {"t": 3000, "v": 5.0},
+            {"t": 2000, "v": 100.0},
+            {"t": 1000, "v": 100.0},
+        ]
+        window = work_tool.diagnostics._latest_high_loss_window(points)
+        self.assertEqual(window, (1000, 2000, 2))
+
+
+class PowerVsCellOutageVerdict(unittest.TestCase):
+    # The exact real-world example Andrew described: a unit whose switch
+    # has been up 18 days, with a ~100% router-loss window from
+    # 2026-09-09 15:31 UTC to 2026-09-10 18:50 UTC — confirmed by hand as
+    # a cell outage (the switch never lost power; the outage predates it
+    # by weeks). Mocks only the network-backed pieces
+    # (get_robofiber_uptime / unit_network_latency_history); the
+    # comparison logic itself runs for real.
+    def _loss_points(self, start_dt, end_dt):
+        points = [{"t": int((start_dt - dt.timedelta(minutes=30)).timestamp() * 1000), "v": 5.0}]
+        t = start_dt
+        while t <= end_dt:
+            points.append({"t": int(t.timestamp() * 1000), "v": 100.0})
+            t += dt.timedelta(minutes=3)
+        points.append({"t": int((end_dt + dt.timedelta(minutes=30)).timestamp() * 1000), "v": 3.0})
+        return points
+
+    def test_cell_outage_when_switch_predates_the_whole_window(self):
+        start = dt.datetime(2026, 9, 9, 15, 31, tzinfo=dt.timezone.utc)
+        end = dt.datetime(2026, 9, 10, 18, 50, tzinfo=dt.timezone.utc)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 18 Days 0 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": self._loss_points(start, end)}}}, None,
+                ),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "cell_outage")
+
+    def test_power_outage_when_switch_came_up_at_window_end(self):
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)
+        start = end - dt.timedelta(minutes=40)
+        uptime_seconds = int((dt.datetime.now(dt.timezone.utc) - end).total_seconds())
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": f"Uptime: 0 Days 0 Hours 0 Mins {uptime_seconds} Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": self._loss_points(start, end)}}}, None,
+                ),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "power_outage")
+
+    def test_inconclusive_when_neither_edge_matches(self):
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        start = end - dt.timedelta(minutes=30)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                # Rebooted 2 hours ago — well inside the window, matching
+                # neither its start nor its end.
+                return_value=({"uptime": "Uptime: 0 Days 2 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": self._loss_points(start, end)}}}, None,
+                ),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "inconclusive")
+
+    def test_no_recent_outage_when_no_high_loss_window(self):
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 5 Days 0 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": [{"t": 1000, "v": 5.0}]}}}, None,
+                ),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "no_recent_outage")
+
+    def test_unparseable_uptime_is_an_error_not_a_wrong_guess(self):
+        with mock.patch.object(
+            work_tool.diagnostics, "get_robofiber_uptime",
+            return_value=({"uptime": ""}, None),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(info)
+        self.assertIn("Could not parse", error)
 
 
 if __name__ == "__main__":

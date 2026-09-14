@@ -36,6 +36,7 @@ import urllib3
 from ._core import (  # noqa: F401  (re-exported dependencies)
     _erp_heads_for_mu_trailers,
     _fetch_erp_component_site_map,
+    _format_switch_uptime_seconds,
     _host_only,
     _net_row_for_unit,
     _ping_host,
@@ -46,6 +47,7 @@ from ._core import (  # noqa: F401  (re-exported dependencies)
     _scrypted_ssh_target,
     ensure_unit_net_info,
     env_path,
+    get_robofiber_uptime,
     is_hikvision_unit,
     list_unit_cameras,
     username,
@@ -1324,4 +1326,183 @@ def unit_network_latency_history(unit, hours=24):
         "hours": hours,
         "resolution": "hourly average" if use_trends else "native (~3min)",
         "charts": charts,
+    }, None
+_SWITCH_UPTIME_UNIT_SECONDS = {"day": 86400, "hour": 3600, "min": 60, "sec": 1}
+def _parse_switch_uptime_seconds(text):
+    """
+    Parse a switch's own uptime text into whole seconds. One parser
+    covers both switch types get_robofiber_uptime returns text for —
+    Robofiber HGW's raw "N Day(s) N Hour(s) N Min(s) N Sec(s)" (checked
+    live: "151 Days 1 Hour 31 Mins 3 Secs" — singular when the count is 1)
+    and Netonix's, which is pre-formatted through the identical
+    Days/Hours/Mins/Secs shape before this ever sees it (see
+    _format_switch_uptime_seconds). Returns None if nothing parseable.
+    """
+    if not text:
+        return None
+    total = 0
+    found = False
+    for match in re.finditer(r"(\d+)\s*(day|hour|hr|min|sec)s?\b", text, re.IGNORECASE):
+        value = int(match.group(1))
+        unit_word = match.group(2).lower()
+        if unit_word == "hr":
+            unit_word = "hour"
+        seconds_per = _SWITCH_UPTIME_UNIT_SECONDS.get(unit_word)
+        if seconds_per is None:
+            continue
+        total += value * seconds_per
+        found = True
+    return total if found else None
+# How close "the switch came back up" has to land to the loss window's
+# start/end to count as a match rather than coincidence — wide enough to
+# cover the switch's own boot time after power returns plus Zabbix's own
+# ~3-minute native poll granularity, narrow enough that two genuinely
+# distinct events don't get conflated.
+_POWER_VS_CELL_TOLERANCE_SECONDS = 15 * 60
+# How much loss counts as "fully down" for a window, not just flaky —
+# matches the "100%" a tech reads straight off the graph as a flat
+# plateau, with a little headroom so one missed/late poll doesn't split a
+# real full outage into two separate windows.
+_POWER_VS_CELL_LOSS_THRESHOLD = 90.0
+def _latest_high_loss_window(points, threshold=_POWER_VS_CELL_LOSS_THRESHOLD):
+    """
+    The most recent contiguous run of points at/above `threshold`% loss,
+    by timestamp — the flat plateau a tech reads a router-loss graph for
+    (see the "cell outage" example this was built from: a solid 100%
+    stretch from 9/9 3:31 PM to 9/10 6:50 PM). Returns
+    (start_ms, end_ms, point_count), or None if no point in the whole
+    series ever reached the threshold.
+    """
+    ordered = sorted(
+        (p for p in (points or []) if p.get("t") is not None), key=lambda p: p["t"]
+    )
+    best = None
+    run_start = None
+    run_count = 0
+    for point in ordered:
+        value = point.get("v")
+        if value is not None and value >= threshold:
+            if run_start is None:
+                run_start = point["t"]
+                run_count = 0
+            run_count += 1
+            best = (run_start, point["t"], run_count)
+        else:
+            run_start = None
+            run_count = 0
+    return best
+def unit_power_vs_cell_outage(unit, subject="", hours=72):
+    """
+    Power outage vs. cell/carrier outage for a down unit — automates the
+    comparison a tech makes by hand: pull the switch's own uptime (when
+    it last came back up) and the router's most recent stretch of ~100%
+    ICMP ping loss from Zabbix history, then compare the two.
+
+    - Switch came up right around when the loss window ENDED (pings
+      resumed) -> the switch itself lost and regained power -> POWER
+      OUTAGE.
+    - Switch has been running continuously since before the loss window
+      even STARTED -> it never lost power at all, so whatever broke
+      connectivity has to be upstream of it -> CELL (carrier/backhaul)
+      OUTAGE.
+    - Anything else (switch rebooted mid-window for some unrelated
+      reason, no clear full-loss window in range, uptime text didn't
+      parse) comes back inconclusive rather than guessed at — a lead,
+      same "confidence, not certainty" spirit as the shading/dead-panel
+      checks, not a verdict to act on blind.
+
+    Returns (info, error).
+    """
+    unit = str(unit or "").strip().upper()
+    if not unit:
+        return None, "Missing unit"
+    try:
+        # Capped at 7 days (not unit_network_latency_history's own 90d
+        # max) — past that it switches to hourly-trend data, which loses
+        # the per-poll timestamp precision this comparison's tolerance
+        # window depends on.
+        hours = max(1, min(int(hours), 24 * 7))
+    except (TypeError, ValueError):
+        hours = 72
+
+    uptime_info, uptime_error = get_robofiber_uptime(unit)
+    if uptime_error:
+        return None, uptime_error
+    uptime_text = (uptime_info or {}).get("uptime") or ""
+    switch_uptime_seconds = _parse_switch_uptime_seconds(uptime_text)
+    if switch_uptime_seconds is None:
+        return None, f"Could not parse switch uptime from: {uptime_text or '(empty)'}"
+
+    latency_info, latency_error = unit_network_latency_history(unit, hours)
+    if latency_error:
+        return None, latency_error
+    loss_points = (
+        ((latency_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
+    )
+    window = _latest_high_loss_window(loss_points)
+
+    now = time.time()
+    switch_up_since = now - switch_uptime_seconds
+    switch_uptime_label = _format_switch_uptime_seconds(switch_uptime_seconds)
+    switch_up_since_label = datetime.fromtimestamp(switch_up_since, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if window is None:
+        return {
+            "unit": unit,
+            "verdict": "no_recent_outage",
+            "status": "ok",
+            "reason": f"no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ router loss window in the last {hours}h",
+            "switch_uptime_text": uptime_text,
+            "switch_uptime_seconds": switch_uptime_seconds,
+            "switch_up_since": switch_up_since,
+            "loss_window_start": None,
+            "loss_window_end": None,
+            "loss_window_points": 0,
+            "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
+            "summary": (
+                f"{unit} — no recent outage window: switch up {switch_uptime_label} "
+                f"(since {switch_up_since_label}), no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ "
+                f"router loss in the last {hours}h to compare it against."
+            ),
+        }, None
+
+    window_start_ms, window_end_ms, window_points = window
+    window_start = window_start_ms / 1000
+    window_end = window_end_ms / 1000
+    window_start_label = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    window_end_label = datetime.fromtimestamp(window_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if abs(switch_up_since - window_end) <= _POWER_VS_CELL_TOLERANCE_SECONDS:
+        verdict = "power_outage"
+        reason = "switch came back up right when pings resumed"
+    elif switch_up_since <= window_start - _POWER_VS_CELL_TOLERANCE_SECONDS:
+        verdict = "cell_outage"
+        reason = "switch has been up continuously since before the outage began"
+    else:
+        verdict = "inconclusive"
+        reason = "switch's own uptime doesn't line up with either edge of the loss window"
+
+    summary = (
+        f"{unit} — {verdict.replace('_', ' ')}: {reason}. "
+        f"Switch up {switch_uptime_label} (since {switch_up_since_label}); "
+        f"router loss {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ from {window_start_label} to {window_end_label}."
+    )
+    # A definite verdict is worth a toast (warn — a finding, not a
+    # failure); inconclusive stays quiet, same as an outage report
+    # skipping units it can't reach a verdict on.
+    status = "warn" if verdict in ("power_outage", "cell_outage") else "ok"
+
+    return {
+        "unit": unit,
+        "verdict": verdict,
+        "status": status,
+        "reason": reason,
+        "switch_uptime_text": uptime_text,
+        "switch_uptime_seconds": switch_uptime_seconds,
+        "switch_up_since": switch_up_since,
+        "loss_window_start": window_start,
+        "loss_window_end": window_end,
+        "loss_window_points": window_points,
+        "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
+        "summary": summary,
     }, None

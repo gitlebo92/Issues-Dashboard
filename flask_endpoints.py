@@ -2241,6 +2241,22 @@ def issues_network_latency_history(unit):
     return jsonify({"ok": True, **info})
 
 
+@app.route("/issues/power-vs-cell-outage/<unit>", methods=["POST"])
+def issues_power_vs_cell_outage(unit):
+    """
+    Experimental: power outage vs. cell/carrier outage — compares the
+    switch's own uptime against the router's most recent ~100% ICMP
+    ping-loss window from Zabbix. Read-only (see
+    work_tool.unit_power_vs_cell_outage).
+    """
+    payload = request.get_json(silent=True) or {}
+    hours = payload.get("hours") or request.args.get("hours") or 72
+    info, error = work_tool.unit_power_vs_cell_outage(unit, hours=hours)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    return jsonify({"ok": True, **info})
+
+
 @app.route("/issues/zabbix-alerts/<unit>", methods=["POST"])
 def issues_zabbix_alerts(unit):
     """Active Zabbix problems for one unit's Router/Switch/NUC/Speaker/SNUC hosts."""

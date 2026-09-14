@@ -7219,6 +7219,26 @@
         // One helper for the "POST, log the result, report status" pattern so
         // each new diagnostic is a few lines of configuration rather than
         // another forty lines of copied fetch boilerplate.
+        // Shared by both command-menu builders' "Power vs Cell Outage"
+        // button (see appendDiagnosticButton's detailLines) — the extra
+        // console lines spelling out exactly what was compared, since the
+        // one-line summary alone doesn't show the actual switch-uptime
+        // text or the loss window's start/end.
+        function powerVsCellOutageDetailLines(data) {
+            const lines = [];
+            if (data.switch_uptime_text) {
+                lines.push("Switch: " + String(data.switch_uptime_text).trim());
+            }
+            if (data.loss_window_start && data.loss_window_end) {
+                lines.push(
+                    "Router loss " + data.loss_threshold + "%+ from "
+                    + new Date(data.loss_window_start * 1000).toLocaleString()
+                    + " to " + new Date(data.loss_window_end * 1000).toLocaleString()
+                );
+            }
+            return lines;
+        }
+
         function appendDiagnosticButton(parent, entry, options) {
             const btn = document.createElement("button");
             btn.type = "button";
@@ -8543,6 +8563,13 @@
                     });
             });
             switchMenu.appendChild(uptimeBtn);
+
+            appendDiagnosticButton(switchMenu, entry, {
+                label: "Power vs Cell Outage",
+                title: "Compares switch uptime against the router's most recent ~100% ping-loss window to distinguish a power outage from a cell/carrier outage",
+                endpoint: "/issues/power-vs-cell-outage/",
+                detailLines: powerVsCellOutageDetailLines,
+            });
 
             function appendRobofiberLogButton(label, endpoint, statusPrefix) {
                 const logBtn = document.createElement("button");
@@ -13246,6 +13273,13 @@
                             });
                     });
                     switchMenu.appendChild(uptimeBtn);
+
+                    appendDiagnosticButton(switchMenu, entry, {
+                        label: "Power vs Cell Outage",
+                        title: "Compares switch uptime against the router's most recent ~100% ping-loss window to distinguish a power outage from a cell/carrier outage",
+                        endpoint: "/issues/power-vs-cell-outage/",
+                        detailLines: powerVsCellOutageDetailLines,
+                    });
 
                     function appendRobofiberLogButton(label, endpoint, statusPrefix) {
                         const logBtn = document.createElement("button");
