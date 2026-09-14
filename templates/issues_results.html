@@ -438,6 +438,13 @@
         .list-toolbar input[type="search"] {
             flex: 1 1 220px;
             min-width: 160px;
+            /* Reports mode hides several of this toolbar's other buttons
+               (Clear checkboxes/Pull/Update Weather/Resolve Selected —
+               see applyPanelMode), leaving fewer flex siblings to share
+               the row with — flex-grow:1 then stretched this across
+               most of the toolbar's width instead of just staying a
+               reasonably-sized search box (reported live). */
+            max-width: 320px;
         }
         .unit-tools-label {
             font-weight: 600;
