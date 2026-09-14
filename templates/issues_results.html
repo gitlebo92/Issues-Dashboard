@@ -9565,12 +9565,22 @@
                     return { disconnected: 0, stale: 1, unknown: 2, aging: 3 }[row.vrm_freshness];
                 },
                 // No confidence score here (freshness is elapsed time, not
-                // a probabilistic read) — use how overdue the site is as
-                // the certainty proxy: longer silence sorts first within
-                // the same tier.
+                // a probabilistic read) — how overdue the site is IS the
+                // certainty proxy: longer silence sorts first within the
+                // same tier, and since the tiers themselves are strictly
+                // ordered by elapsed-time range (disconnected always
+                // longer than stale, stale always longer than aging, aging
+                // always longer than fresh), sortRank-then-certainty adds
+                // up to one continuous "longest silence at the top" order
+                // across the whole list, tier boundaries or not.
                 certainty: function (row) { return row.vrm_last_seen_seconds_ago; },
                 enrichFn: relatedTicketEnrichFn,
-                priorityFn: relatedTicketPriorityFn,
+                // Deliberately NO priorityFn here, unlike every other fleet
+                // report — this report's whole point is "how overdue is
+                // this trailer," so a fresh, ticketed unit pulling ahead of
+                // a 3-months-silent one would defeat the report (reported
+                // live: exactly that ordering, screenshot showed a page of
+                // "fresh" rows before any "disconnected" one).
             },
             batteryOutlook: {
                 listEl: document.getElementById("battery_outlook_list"),
