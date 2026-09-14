@@ -9534,6 +9534,67 @@
             return badge;
         }
 
+        // After Restart All Services, the fix is done and the two things
+        // worth checking by eye are the unit's platform (Scrypted's own
+        // "system" page) and Scrypted's management console — pull their
+        // URLs the same way Unit Tools/the Open submenu do
+        // (/issues/unit-context, which already resolves has_platform/
+        // platform_url/has_scrypted/scrypted_url from the net sheet) and
+        // open both automatically instead of making someone dig into the
+        // command menu right after just finishing the wizard.
+        function openSecurityFixPlatformAndScrypted(unit) {
+            fetch("/issues/unit-context/" + encodeURIComponent(unit))
+                .then(function (resp) { return resp.json(); })
+                .then(function (data) {
+                    if (!data || data.ok === false) {
+                        securityFixLogLine(
+                            "Could not resolve Platform/Scrypted links for " + unit + ": "
+                            + ((data && data.error) || "unknown error")
+                        );
+                        return;
+                    }
+                    [
+                        { has: data.has_platform, url: data.platform_url, label: "Platform" },
+                        { has: data.has_scrypted, url: data.scrypted_url, label: "Scrypted" },
+                    ].forEach(function (item) {
+                        if (!item.has || !item.url) {
+                            securityFixLogLine("No " + item.label + " URL available for " + unit + " — skipped.");
+                            return;
+                        }
+                        // A pop-up blocker can still refuse this — it's not
+                        // a direct click, just an async fetch's .then() a
+                        // few seconds after the last real one (Restart
+                        // Services). window.open returning null/undefined
+                        // is exactly how a browser signals "blocked," so
+                        // fall back to a dismissable action the user can
+                        // click instead of silently doing nothing.
+                        const opened = window.open(item.url, "_blank", "noopener,noreferrer");
+                        if (opened) {
+                            securityFixLogLine("Opened " + item.label + " for " + unit + ".");
+                        } else {
+                            securityFixLogLine(
+                                item.label + " tab for " + unit + " was blocked by the browser's pop-up blocker."
+                            );
+                            notify(
+                                item.label + " for " + unit + " was blocked by the browser's pop-up blocker.",
+                                "error",
+                                {
+                                    actionLabel: "Open " + item.label,
+                                    onAction: function () {
+                                        window.open(item.url, "_blank", "noopener,noreferrer");
+                                    },
+                                }
+                            );
+                        }
+                    });
+                })
+                .catch(function (error) {
+                    securityFixLogLine(
+                        "Could not resolve Platform/Scrypted links for " + unit + ": " + (error.message || error)
+                    );
+                });
+        }
+
         // Verify step visual: the VGA/i915 counts security_update_web_verify
         // greps for used to only exist as two plain lines buried in the
         // scrolling log — easy to miss a short count on. Two colored pills
@@ -9803,6 +9864,7 @@
                         applySecurityFixPhaseUI("done", unit);
                         renderConsole(true);
                         statusEl.textContent = "Security update fix complete for " + unit + ".";
+                        openSecurityFixPlatformAndScrypted(unit);
                     })
                     .catch(function (error) {
                         securityFixLogLine("Restart step failed: " + (error.message || error));
