@@ -12459,8 +12459,21 @@
                                 ? ("/issues/ping-compute/"
                                     + encodeURIComponent(entry.unit))
                                 : (endpoint + encodeURIComponent(entry.unit));
+                            // issue_id/source_list_id let the backend keep
+                            // the SHARED job's own copy of this ticket in
+                            // sync with whatever Validate just found —
+                            // without them, this result only ever updates
+                            // this browser's view, and the next shared-state
+                            // poll (every ~1s, whenever results change)
+                            // silently reverts it back to server truth (see
+                            // _sync_shared_validate_result).
                             fetch(requestUrl, {
                                 method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    issue_id: entry.issueId || "",
+                                    source_list_id: id,
+                                }),
                             })
                                 .then(function (response) {
                                     return response.json().then(function (data) {

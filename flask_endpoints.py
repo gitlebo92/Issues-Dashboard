@@ -612,6 +612,54 @@ def _move_shared_issue_to_list(results, issue_id, unit, from_key, to_key, extra_
     results.setdefault(to_key, []).append(moved)
     return True
 
+def _sync_shared_validate_result(unit, issue_id, source_list_id, to_list_id, extra_fields):
+    """
+    Keep the shared job's own copy of a ticket in sync with a Validate
+    (Quick/Full) result. Without this, Validate only ever updated the
+    calling browser's own view — the next shared-state snapshot
+    (pollSharedReportState -> fillList on the frontend, which fully
+    replaces each list from server truth whenever results change) would
+    silently revert the row back to whatever category/LED the server
+    still had, since the server was never told what Validate just found.
+    Caught live: "ran validate on RD3059 and it returned down full but
+    stayed in up steady list, with LED light green" — RD3059 really was
+    down; the server's own copy just never learned that.
+
+    Requires both issue_id and source_list_id (the caller's own current
+    list) to do anything — Unit Tools' ad-hoc validates send neither (no
+    shared job entry to sync for those), and skipping there is
+    deliberate: patching by unit alone risks touching a different,
+    unrelated open ticket for the same unit.
+    """
+    issue_id = str(issue_id or "").strip()
+    source_list_id = str(source_list_id or "").strip()
+    if not issue_id or not source_list_id:
+        return
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if job is None or job.get("results") is None:
+        return
+    with job["state_lock"]:
+        results = job["results"]
+        if source_list_id not in results:
+            return
+        moved = False
+        if to_list_id and to_list_id != source_list_id and to_list_id in results:
+            moved = _move_shared_issue_to_list(
+                results, issue_id, unit, source_list_id, to_list_id, extra_fields
+            )
+        if not moved and extra_fields:
+            unit_norm = str(unit or "").strip()
+            for item in results.get(source_list_id) or []:
+                if (
+                    _item_issue_id(item) == issue_id
+                    and str((item or {}).get("unit") or "").strip() == unit_norm
+                ):
+                    item.update(extra_fields)
+                    moved = True
+                    break
+        if moved:
+            job["version"] += 1
+
 def _publish_job_event(job_id, event):
     job = stream_jobs.get(job_id)
     if job is None:
@@ -3004,6 +3052,16 @@ def issues_validate_unit(unit):
     category, output, error = work_tool.validate_unit_status(unit)
     if error:
         return jsonify({"ok": False, "error": error}), 404
+    payload = request.get_json(silent=True) or {}
+    to_list_id = "truly_down" if category == "stale_vpn" else (category or "")
+    led_status = {
+        "false_positives": "green", "nuc_down": "yellow",
+        "scrypted_outage": "yellow", "truly_down": "red",
+    }.get(to_list_id)
+    _sync_shared_validate_result(
+        unit, payload.get("issue_id"), payload.get("source_list_id"),
+        to_list_id, {"led_status": led_status} if led_status else None,
+    )
     return jsonify({
         "ok": True,
         "unit": unit,
@@ -3016,6 +3074,12 @@ def issues_validate_unit_full(unit):
     result, error = work_tool.validate_unit_full(unit)
     if error:
         return jsonify({"ok": False, "error": error}), 404
+    payload = request.get_json(silent=True) or {}
+    extra_fields = {"led_status": result["led_status"]} if result.get("led_status") else None
+    _sync_shared_validate_result(
+        unit, payload.get("issue_id"), payload.get("source_list_id"),
+        result.get("move_to") or "", extra_fields,
+    )
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/revalidate-list/<list_id>", methods=["POST"])
