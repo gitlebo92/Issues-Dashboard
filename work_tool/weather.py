@@ -2118,14 +2118,26 @@ _DEAD_PANEL_MIN_TRAILING_DAYS_OBSERVED = 5
 # 4. _DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD — the new signal that actually
 #    distinguishes hardware from shading: a dead panel/pair caps output
 #    roughly EQUALLY across every productive hour (low stdev in the
-#    recent/historical ratio hour-to-hour); shading is hour-specific (high
-#    stdev). Checked against a real case (RD3439/MU8024, 2026-09-13): a
-#    genuine dead-panel unit held 68.3% +/- 3.1% of typical across all six
-#    productive UTC hours (16-21) — comfortably under this threshold.
-#    Caveat, stated plainly: validated against that ONE real case so far;
-#    treat this specific cutoff as provisional until a second confirmed
-#    example is checked.
-_DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD = 0.10
+#    recent/historical ratio hour-to-hour); true single-hour shading is
+#    sharply hour-specific (much higher stdev — one hour craters while the
+#    rest hold near normal). Checked against a real case (RD3439/MU8024):
+#    held 68.3% +/- 3.1% of typical when first confirmed dead (2026-09-13);
+#    the ORIGINAL 0.10 cutoff here rejected this same still-confirmed-bad
+#    unit less than 24h later once its stdev drifted to 0.113-0.117 (loss
+#    now 52% of typical — worse, not better) and the report's dead-panel
+#    count silently dropped from 3 to 0 (caught live, 2026-09-14, ground-
+#    truthed against the unit's own graph: still bad, still ~268W against
+#    a ~600W expected capacity). Raised to keep that confirmed case on the
+#    right side of the line while still catching an actual single-hour
+#    crater, which reads far more extreme (~0.21 stdev in a reconstructed
+#    synthetic case — see test_hour_specific_loss_routes_to_shading_not_
+#    dead_panel) — there's real daylight between "hardware, somewhat
+#    uneven" and "one hour genuinely craters, the rest are fine." Now
+#    validated against two confirmed data points on the same real unit
+#    (0.031 pass, 0.113-0.117 pass) plus the synthetic single-hour case
+#    (0.21, still correctly rejected) — still worth revisiting with a
+#    third independent unit if this keeps drifting.
+_DEAD_PANEL_HOUR_RATIO_STDEV_THRESHOLD = 0.16
 _DEAD_PANEL_MIN_PRODUCTIVE_HOURS_FOR_STDEV = 4
 
 

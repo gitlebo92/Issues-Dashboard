@@ -533,6 +533,51 @@ class DeadPanelV2Guards(unittest.TestCase):
         self.assertLess(info["hour_ratio_stdev"], 0.10)
         self.assertIn("proportional", detail)
 
+    def test_moderately_uneven_loss_across_hours_still_confirms_hardware(self):
+        # Regression for the real second data point this guard was raised
+        # over (RD3439/MU8024, 2026-09-14): the SAME unit confirmed dead
+        # the day before, now worse (~52% of typical, not ~68%) and with
+        # more hour-to-hour spread (~0.113-0.117 stdev) than its first
+        # reading (~0.031) — but ground-truthed live as still genuinely
+        # bad, not shading. The original 0.10 cutoff wrongly rejected this;
+        # it must still confirm hardware, just without the "proportional"
+        # confidence boost the cleaner case above gets. Shape (8 hours,
+        # ratios spread 0.30-0.66, mean ~0.52) reconstructs that stdev
+        # without looking anything like the single-hour-crater shading
+        # case above (~0.21 stdev there).
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        hours = [12, 13, 14, 15, 16, 17, 18, 19]
+        # Uniform hourly wattage (unlike the wattage curve above) keeps the
+        # day's-peak shortfall calculation clean regardless of which hour
+        # the best ratio lands on — this test is specifically about the
+        # hour_ratio_stdev signal, not the primary shortfall math.
+        historical_by_hour = dict(zip(hours, [500] * len(hours)))
+        ratio_by_hour = dict(zip(hours, [0.30, 0.40, 0.50, 0.55, 0.60, 0.65, 0.50, 0.66]))
+        historical = []
+        for d in (45, 40, 35):
+            day_start = base_day - d * 86400
+            for hour, watts in historical_by_hour.items():
+                historical.append((int((day_start + hour * 3600) * 1000), watts))
+        recent = []
+        for d in (1, 2, 3, 4, 5):
+            day_start = base_day - d * 86400
+            for hour, watts in historical_by_hour.items():
+                recent.append((int((day_start + hour * 3600) * 1000), watts * ratio_by_hour[hour]))
+        with mock.patch.object(
+            work_tool.weather, "_vrm_pv_history_points",
+            return_value=historical + recent,
+        ):
+            found, detail, confidence, info = work_tool.detect_dead_panel(
+                "site123", "tok", recent_days=14, hour_tolerance=0,
+            )
+        self.assertTrue(found)
+        self.assertGreaterEqual(info["hour_ratio_stdev"], 0.10)
+        self.assertLess(info["hour_ratio_stdev"], 0.16)
+        self.assertIsNotNone(confidence)
+        self.assertIn("proportional", detail)
+        self.assertNotIn("more consistent with sun-angle-specific shading", detail)
+
 
 class ShadedV2PersistentExclusion(unittest.TestCase):
     # SHADED_V2: detect_solar_shading declines to call a chronically-low
