@@ -919,6 +919,122 @@ class FleetPowerStatusStaleFilter(unittest.TestCase):
         self.assertEqual(units, ["MU1001", "MU1003"])
 
 
+class FleetPowerStatusCurrentDataFilter(unittest.TestCase):
+    # Passing the 60-day "is this trailer still around" cutoff above isn't
+    # enough on its own — a row also needs a genuinely current reading and
+    # an actual charger sub-device behind it, or it's not an actionable
+    # "unplugged" finding (caught live: most of the list was exactly these
+    # two cases — "power state unknown — no current VRM data" and "no AC
+    # charger on this trailer" rows padding the count). See
+    # fleet_power_status's second filtering pass.
+    def _rows_for(self, per_installation_snapshots):
+        installations = [
+            {
+                "site_id": i, "installation_name": name,
+                "vrm_last_seen_seconds_ago": 60, "timezone_name": None,
+            }
+            for i, name in enumerate(per_installation_snapshots, start=1)
+        ]
+        snapshots_by_name = per_installation_snapshots
+
+        def fake_snapshot_for_site(site_id, installation_name, *_args, **_kwargs):
+            return snapshots_by_name[installation_name], None
+
+        with (
+            mock.patch.object(
+                work_tool.weather, "_fleet_vrm_installations_with_heads",
+                return_value=(installations, {}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_credentials", return_value=("user1", "tok", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_power_snapshot_for_site",
+                side_effect=fake_snapshot_for_site,
+            ),
+        ):
+            rows, error = work_tool.weather.fleet_power_status()
+        self.assertIsNone(error)
+        return rows
+
+    def test_no_charger_hardware_excluded(self):
+        rows = self._rows_for({
+            "MU2001": {
+                "ac_power_status": "no_charger_hardware", "vrm_freshness": "fresh",
+                "ac_power_label": "no AC charger on this trailer", "ac_power_detail": "",
+                "ac_power_confidence": 35, "battery_soc_percent": None, "soc_error": None,
+                "vrm_last_seen_seconds_ago": 60, "installation_name": "MU2001",
+            },
+        })
+        self.assertEqual(rows, [])
+
+    def test_unknown_status_excluded(self):
+        rows = self._rows_for({
+            "MU2002": {
+                "ac_power_status": "unknown", "vrm_freshness": "stale",
+                "ac_power_label": "power state unknown — no current VRM data", "ac_power_detail": "",
+                "ac_power_confidence": None, "battery_soc_percent": 50, "soc_error": None,
+                "vrm_last_seen_seconds_ago": 3 * 3600, "installation_name": "MU2002",
+            },
+        })
+        self.assertEqual(rows, [])
+
+    def test_disconnected_freshness_excluded_even_with_a_real_verdict(self):
+        # A charger reading can still come back "present"/confident on
+        # data that's individually fresher than the OVERALL installation
+        # freshness suggests — but a verdict built on a day-plus-silent
+        # site still isn't a "right now" answer, so freshness wins.
+        rows = self._rows_for({
+            "MU2003": {
+                "ac_power_status": "present", "vrm_freshness": "disconnected",
+                "ac_power_label": "plugged in", "ac_power_detail": "",
+                "ac_power_confidence": 90, "battery_soc_percent": 80, "soc_error": None,
+                "vrm_last_seen_seconds_ago": 30 * 3600, "installation_name": "MU2003",
+            },
+        })
+        self.assertEqual(rows, [])
+
+    def test_present_and_not_detected_with_fresh_data_kept(self):
+        rows = self._rows_for({
+            "MU2004": {
+                "ac_power_status": "present", "vrm_freshness": "fresh",
+                "ac_power_label": "plugged in", "ac_power_detail": "",
+                "ac_power_confidence": 96, "battery_soc_percent": 99, "soc_error": None,
+                "vrm_last_seen_seconds_ago": 60, "installation_name": "MU2004",
+            },
+            "MU2005": {
+                "ac_power_status": "not_detected", "vrm_freshness": "aging",
+                "ac_power_label": "not plugged in", "ac_power_detail": "",
+                "ac_power_confidence": 8, "battery_soc_percent": 99, "soc_error": None,
+                "vrm_last_seen_seconds_ago": 3000, "installation_name": "MU2005",
+            },
+        })
+        units = sorted(r["unit"] for r in rows)
+        self.assertEqual(units, ["MU2004", "MU2005"])
+
+    def test_site_lookup_error_row_still_kept(self):
+        installations = [
+            {"site_id": 1, "installation_name": "MU2006", "vrm_last_seen_seconds_ago": 60, "timezone_name": None},
+        ]
+        with (
+            mock.patch.object(
+                work_tool.weather, "_fleet_vrm_installations_with_heads",
+                return_value=(installations, {}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_credentials", return_value=("user1", "tok", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_power_snapshot_for_site",
+                return_value=(None, "VRM request failed"),
+            ),
+        ):
+            rows, error = work_tool.weather.fleet_power_status()
+        self.assertIsNone(error)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["error"], "VRM request failed")
+
+
 class FleetVrmFreshnessInactiveFilter(unittest.TestCase):
     # Same idea as the Units Unplugged filter above, longer runway — VRM
     # Disconnected exists specifically to flag "disconnected," so it should

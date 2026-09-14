@@ -1930,7 +1930,31 @@ def fleet_power_status(max_workers=10):
     Skips any installation VRM hasn't heard from in
     _VRM_UNPLUGGED_STALE_DAYS — a power-status verdict built on data that
     old isn't a trustworthy "plugged in or not" answer, just noise from a
-    trailer that's likely long gone.
+    trailer that's likely long gone. That's a coarse "is this trailer
+    still around at all" cutoff (60 days), shared with fleet_battery_outlook_
+    status; below, every row is filtered a second time against a much
+    tighter, report-specific bar before it's returned:
+
+    - vrm_freshness "disconnected" (VRM hasn't reported *anything* for
+      this installation in over _VRM_STALE_SEC/24h) or "unknown" (never
+      reported) — a plugged-in verdict is only as current as the data
+      behind it, and a day-plus-old reading isn't a "right now" answer.
+    - ac_power_status "unknown" — _vrm_power_snapshot_for_site's own way
+      of saying "no current data to base a verdict on at all" (its label
+      text is literally "power state unknown — no current VRM data"),
+      already covered by the freshness check above in the common case but
+      possible even on an otherwise-fresh installation if specifically
+      the charger AND the solar-ceiling fallback both lack current data.
+    - ac_power_status "no_charger_hardware" — every trailer has a
+      physical AC charger; this status means the site's VRM installation
+      has no charger *sub-device* wired in to read from, not that the
+      trailer lacks one. Not an "unplugged" finding, just nothing to
+      report either way, so it doesn't belong in this list.
+
+    Checked live (2026-09-13): all three together cut ~250 installations
+    to a much shorter, every-row-actionable list — before this, most of
+    it was exactly these three cases padding the count with nothing a
+    tech could act on.
     """
     installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
     if error:
@@ -1969,6 +1993,16 @@ def fleet_power_status(max_workers=10):
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         rows = list(pool.map(check_one, installations))
+    # See the docstring's second cutoff above — a site-lookup error stays
+    # in either way (still worth surfacing), everything else needs both a
+    # current reading and an actual charger sub-device behind it.
+    rows = [
+        row for row in rows
+        if row.get("error") or (
+            row.get("ac_power_status") not in ("no_charger_hardware", "unknown")
+            and row.get("vrm_freshness") not in ("disconnected", "unknown")
+        )
+    ]
     return rows, None
 
 
