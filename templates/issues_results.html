@@ -1152,7 +1152,7 @@
            color as the dead-panel glyph (a hardware finding), cell gets the
            same caution color as shading/VRM freshness (worth a look, not a
            truck roll). Click re-runs the single-unit diagnostic for detail,
-           same as the Switch submenu's own button. */
+           same as the Diagnostics submenu's own button. */
         .command-power-vs-cell-glyph {
             display: inline-flex;
             align-items: center;
@@ -2282,7 +2282,7 @@
                 <span class="count" id="false_positives_count"></span>
                 <span class="complete-badge">Complete</span>
                 <button type="button" id="power_vs_cell_sweep_btn" class="list-revalidate-btn"
-                    title="SSH every Up Steady unit's switch to tell power outage from cell outage (see the Switch submenu's own Power vs Cell Outage check)">Diagnose Up Steady (Cell/Power)</button>
+                    title="SSH every Up Steady unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Up Steady (Cell/Power)</button>
             </h2>
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
             </div>
@@ -8052,6 +8052,19 @@
             // + items) that needs to move, not just its contents.
             diagMenu.insertBefore(graphsMenu.parentElement, diagMenu.firstChild);
 
+            // Moved here from the Switch submenu (both copies — Unit
+            // Tools' and renderList's each had their own) per request: it
+            // reads as a diagnostic verdict ("is this power or cell"), not
+            // a device-specific Switch action, so it belongs with the
+            // rest of the diagnostics rather than buried under a specific
+            // piece of hardware.
+            appendDiagnosticButton(diagMenu, entry, {
+                label: "Power vs Cell Outage",
+                title: "Compares switch uptime against the router's most recent ~100% ping-loss window to distinguish a power outage from a cell/carrier outage",
+                endpoint: "/issues/power-vs-cell-outage/",
+                detailLines: powerVsCellOutageDetailLines,
+            });
+
             const batteryGraphsBtn = document.createElement("button");
             batteryGraphsBtn.type = "button";
             batteryGraphsBtn.className = "action-btn";
@@ -8946,13 +8959,6 @@
                     });
             });
             switchMenu.appendChild(uptimeBtn);
-
-            appendDiagnosticButton(switchMenu, entry, {
-                label: "Power vs Cell Outage",
-                title: "Compares switch uptime against the router's most recent ~100% ping-loss window to distinguish a power outage from a cell/carrier outage",
-                endpoint: "/issues/power-vs-cell-outage/",
-                detailLines: powerVsCellOutageDetailLines,
-            });
 
             function appendRobofiberLogButton(label, endpoint, statusPrefix) {
                 const logBtn = document.createElement("button");
@@ -13699,13 +13705,6 @@
                             });
                     });
                     switchMenu.appendChild(uptimeBtn);
-
-                    appendDiagnosticButton(switchMenu, entry, {
-                        label: "Power vs Cell Outage",
-                        title: "Compares switch uptime against the router's most recent ~100% ping-loss window to distinguish a power outage from a cell/carrier outage",
-                        endpoint: "/issues/power-vs-cell-outage/",
-                        detailLines: powerVsCellOutageDetailLines,
-                    });
 
                     function appendRobofiberLogButton(label, endpoint, statusPrefix) {
                         const logBtn = document.createElement("button");
