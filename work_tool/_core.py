@@ -6614,6 +6614,24 @@ def validate_issues_report(issue_path=None):
                         "reason": "Statement of Services ticket",
                     })
                     continue
+                if "site arm change" in subject_lower:
+                    print(f"Discarding Site Arm Change ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Site Arm Change ticket",
+                    })
+                    continue
+                if "welcome packet" in subject_lower:
+                    print(f"Discarding Welcome Packet ticket: {subject_cell}")
+                    discarded_tickets.append({
+                        "issue_id": issue_id,
+                        "url": _issue_ticket_url(issue_id),
+                        "subject": subject_cell,
+                        "reason": "Welcome Packet ticket",
+                    })
+                    continue
                 if "additional features" in issue_subtype.lower():
                     print(f"Discarding Additional Features ticket: {subject_cell}")
                     discarded_tickets.append({

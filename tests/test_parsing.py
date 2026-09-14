@@ -12,8 +12,10 @@ Importing work_tool loads .env and tries to read net_sheet.csv; both are
 optional and fail soft, so these pass on a clean checkout.
 """
 
+import csv
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -262,6 +264,45 @@ class NetArrayBootstrap(unittest.TestCase):
     def test_net_row_for_unit_handles_empty_input(self):
         self.assertIsNone(work_tool._net_row_for_unit(""))
         self.assertIsNone(work_tool._net_row_for_unit(None))
+
+
+class IssuesReportMiscellaneousDiscards(unittest.TestCase):
+    # "Site Arm Change" and "Welcome Packet" subjects aren't real outages —
+    # they belong in Miscellaneous (discarded_tickets) the same way Suspend/
+    # RainDance/Site Note/etc. already do. See validate_issues_report.
+    def _run(self, rows):
+        with tempfile.NamedTemporaryFile(
+            mode="w", newline="", encoding="utf-8-sig", suffix=".csv", delete=False,
+        ) as f:
+            path = f.name
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Subject", "Issue Type", "Issue Subtype", "Status"])
+            for row_id, subject in rows:
+                writer.writerow([row_id, subject, "", "", "Open"])
+        try:
+            return work_tool.validate_issues_report(path)
+        finally:
+            os.remove(path)
+
+    def test_site_arm_change_is_discarded_as_miscellaneous(self):
+        result = self._run([("ISS-1", "PHX - RD3076 - Site Arm Change")])
+        discarded = result[-1]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["issue_id"], "ISS-1")
+        self.assertIn("Site Arm Change", discarded[0]["reason"])
+
+    def test_welcome_packet_is_discarded_as_miscellaneous(self):
+        result = self._run([("ISS-2", "PHX - RD3076 - Welcome Packet")])
+        discarded = result[-1]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["issue_id"], "ISS-2")
+        self.assertIn("Welcome Packet", discarded[0]["reason"])
+
+    def test_match_is_case_insensitive(self):
+        result = self._run([("ISS-3", "PHX - RD3076 - site arm change request")])
+        discarded = result[-1]
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["issue_id"], "ISS-3")
 
 
 if __name__ == "__main__":
