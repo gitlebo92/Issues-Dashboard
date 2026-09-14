@@ -757,6 +757,30 @@
             color: var(--text-muted);
             font-size: 13px;
         }
+        /* Fleet report rows (renderFleetReportRow) reuse .ticket-row-body's
+           class for the layout it shares with ticket rows, but a report
+           row's content — the summary line, an optional related-ticket
+           line, an optional graph/forecast line — reads as a short stack
+           of distinct facts, not a run of same-level items that should
+           flow and wrap together the way a ticket row's inline badges do.
+           .ticket-row-body's default flex-wrap put those lines wherever
+           they'd fit given the panel's current width, so the same report
+           read differently line-to-line depending on how long each
+           summary happened to be (reported live: "rows arent as neat as
+           they could be"). This forces one line per fact, always. */
+        .fleet-report-body {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+        }
+        /* The parent's own gap already spaces stacked lines evenly —
+           .snapshot-task-line's margin-top exists for ticket rows, where
+           it can sit inline alongside other wrapped items with no gap of
+           its own; here it would just double up on top of that gap. */
+        .fleet-report-body .snapshot-task-line {
+            margin-top: 0;
+        }
         /* Units Unplugged / Shaded Units report rows — the live check
            result line, colored the same as the corresponding command-menu
            glyph's status (ok/warn/fail from unit_power_status /
@@ -774,6 +798,7 @@
         .snapshot-task-line {
             display: flex;
             align-items: center;
+            flex-wrap: wrap;
             gap: 8px;
             margin-top: 4px;
             font-size: 12px;
@@ -3870,6 +3895,18 @@
             { value: "alarm_frequency_list", label: "Alarm Frequency" },
         ];
         const reportListIds = reportCategoryOptions.map(function (item) { return item.value; });
+        // The five fleet-wide VRM checks (renderFleetReportRow) tag every
+        // row with data-search-text; Flap Report/Power & Infra Alerts/
+        // Alarm Frequency render their own row shapes and don't. Listed
+        // explicitly rather than inferred from "0 rows currently have
+        // data-search-text" — that would also be true of a searchable
+        // report that's simply empty right now, which should still show
+        // its own "no cached results"/"none" placeholder regardless of
+        // the search box, not disappear along with it. See applyListFilters.
+        const reportSearchableListIds = new Set([
+            "units_unplugged_list", "shaded_units_list", "dead_panel_list",
+            "vrm_freshness_list", "battery_outlook_list",
+        ]);
 
         // Which lists are currently selected. An empty set means "no filter"
         // — every list shows. The stats strip at the top of the page is the
@@ -4146,15 +4183,14 @@
             // Reports is its own page with its OWN All-lists/One-list
             // selection (see reportCategoryOptions) — the list-view toggle
             // and Select Lists dropdown apply there too now, so they're
-            // NOT hidden for reportsMode. The ticket-specific controls
-            // (search, checkboxes, ERP pull, weather) still don't apply —
-            // report rows carry no searchable text and none of ERP
-            // pull/weather/R-W-S has any meaning for a fleet-wide check.
+            // NOT hidden for reportsMode. Search stays up too — every
+            // fleet report row now carries a unit in data-search-text (see
+            // renderFleetReportRow), the same applyListFilters() pass that
+            // already filters ticket rows. The rest (checkboxes, ERP pull,
+            // weather) still don't apply — R/W/S and ERP pull/weather have
+            // no meaning for a fleet-wide check.
             if (clearCheckboxesBtn) {
                 clearCheckboxesBtn.hidden = projectsMode || reportsMode;
-            }
-            if (listSearchEl) {
-                listSearchEl.hidden = reportsMode;
             }
             if (updateWeatherBtn) {
                 updateWeatherBtn.hidden = reportsMode;
@@ -4284,10 +4320,12 @@
             });
 
             // Same All-lists/One-list shape as above, for the seven report
-            // sections — no per-row text search (report rows carry no
-            // data-search-text), just whole-section visibility: shown only
-            // in Reports mode, and only if selected whenever One-list has
-            // a real selection.
+            // sections, PLUS the same per-row text search the ticket lists
+            // get above — every fleet report row now carries a unit in
+            // data-search-text (see renderFleetReportRow), so a query
+            // narrows Reports down to matching units too, not just a
+            // whole-section toggle.
+            const inReportsMode = activePanelMode === "reports";
             reportListIds.forEach(function (listId) {
                 const listEl = document.getElementById(listId);
                 const sectionEl = listEl ? listEl.closest(".list-section") : null;
@@ -4295,7 +4333,23 @@
                     return;
                 }
                 const selected = !filtering || selectedLists.has(listId);
-                sectionEl.hidden = !(activePanelMode === "reports" && selected);
+                const searchable = reportSearchableListIds.has(listId);
+                let visibleRows = 0;
+                if (searchable && listEl) {
+                    const rows = Array.from(listEl.querySelectorAll("[data-search-text]"));
+                    rows.forEach(function (row) {
+                        const matches = !query || row.dataset.searchText.indexOf(query) !== -1;
+                        row.hidden = !matches;
+                        if (matches) {
+                            visibleRows += 1;
+                        }
+                    });
+                }
+                const sectionVisible = inReportsMode && selected && (!searchable || !query || visibleRows > 0);
+                sectionEl.hidden = !sectionVisible;
+                if (inReportsMode && selected && searchable && query) {
+                    matchCount += visibleRows;
+                }
             });
 
             if (query) {
@@ -7173,6 +7227,18 @@
         // "the last N days" are close enough to land the shaded band in
         // the right part of the chart without a second round-trip just to
         // fetch the exact window.
+
+        // Arizona (Phoenix) never observes DST, so a UTC hour-of-day
+        // converts to it with a plain fixed -7 offset — no per-date lookup
+        // needed, unlike a general "this installation's own local time"
+        // conversion would (see _shading_status_for_site's own comment on
+        // the server side, which this mirrors for the one other place a
+        // UTC hour reaches a tech: the Diagnostic Header below).
+        function arizonaHourLabel(utcHour) {
+            const azHour = ((utcHour - 7) % 24 + 24) % 24;
+            return String(azHour).padStart(2, "0") + ":00 MST";
+        }
+
         function buildShadingHighlightRange(cached) {
             if (cached.worstHourUtc == null) {
                 return null;
@@ -7181,7 +7247,7 @@
             const start = Date.UTC(
                 now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cached.worstHourUtc, 0, 0
             );
-            return { startMs: start, endMs: start + 3600000, label: cached.worstHourUtc + ":00 UTC" };
+            return { startMs: start, endMs: start + 3600000, label: arizonaHourLabel(cached.worstHourUtc) };
         }
 
         function buildDeadPanelHighlightRange(cached) {
@@ -7280,7 +7346,7 @@
                 const confidenceText = finding.cached.confidence != null
                     ? finding.cached.confidence + "% confidence" : "";
                 const hourText = finding.type === "shading" && finding.cached.worstHourUtc != null
-                    ? ", worst hour " + finding.cached.worstHourUtc + ":00 UTC" : "";
+                    ? ", worst hour " + arizonaHourLabel(finding.cached.worstHourUtc) : "";
                 text.textContent = (finding.type === "shading" ? "⚠ Possible shading" : "⚠ Possible dead panel")
                     + (confidenceText ? " — " + confidenceText : "") + hourText;
                 row.appendChild(text);
@@ -9241,8 +9307,18 @@
             attachFleetRowCommandMenu(actions, li, openTarget, openLabel, row.unit);
             li.appendChild(actions);
 
+            // Searchable by unit (either side of an MU/RD pair) and by
+            // whatever related ticket got matched in — the list_search box
+            // now covers Reports the same way it already covers Issues/
+            // Projects (see applyListFilters).
+            li.dataset.searchText = [row.unit, openLabel]
+                .concat(headUnits)
+                .filter(Boolean)
+                .join(" ")
+                .toLowerCase();
+
             const body = document.createElement("div");
-            body.className = "ticket-row-body";
+            body.className = "ticket-row-body fleet-report-body";
             const line = document.createElement("span");
             line.className = "flap-row-stats report-status-" + (row.error ? "fail" : (row.status || "warn"));
             // row.summary already leads with RD####(MU####) when a head is
@@ -9669,6 +9745,10 @@
             } else {
                 config.statusEl.textContent = data.error ? ("Last poll failed: " + data.error) : "";
             }
+            // Newly-built rows default to visible — re-apply whatever
+            // search query is currently active (a manual refresh or the
+            // background poll can both land here with one already typed).
+            applyListFilters();
         }
 
         function loadFleetReportCached(config) {

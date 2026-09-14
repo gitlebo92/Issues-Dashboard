@@ -439,6 +439,12 @@ def _vrm_credentials():
     if not id_user or not victron_token:
         return None, None, "Set idUser/victron_token in .env — VRM lookups need API access"
     return id_user, victron_token, None
+# Arizona (Phoenix) never observes DST, so this fixed -7 offset is correct
+# year-round — the one timezone this file can convert a UTC timestamp into
+# without an IANA tz database (see _shading_status_for_site). Named so
+# %Z/strftime read "MST" rather than the unlabeled "UTC-07:00" a bare
+# timezone(timedelta(...)) would produce.
+_ARIZONA_TZ = timezone(timedelta(hours=-7), "MST")
 # How stale a VRM reading has to be before it stops counting as "current
 # evidence" — derived from a live fleet-wide check (2026-09-13), not
 # guessed: 249 installations' last-report ages formed two clean clusters —
@@ -1759,19 +1765,20 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
     found, detail, confidence, window = detect_solar_shading(site_id, victron_token)
     window_label = None
     if window:
-        # UTC only, deliberately — this box has no IANA tz database
-        # installed (checked: zoneinfo needs the `tzdata` package, which
-        # isn't present, and adding a hand-rolled fixed-offset table would
-        # get DST wrong for half the year on every zone except Phoenix's).
-        # timezone_name is still surfaced separately as a label, not used
-        # for conversion, so the window is never silently off by an hour.
-        # utcfromtimestamp specifically, not fromtimestamp — this box's own
-        # local clock is US Mountain (checked live), not UTC; it only
-        # LOOKS right against Pacific installations because -7 happens to
-        # match Pacific Daylight Time this month.
-        start_label = datetime.utcfromtimestamp(window["start_ts_ms"] / 1000).strftime("%Y-%m-%d %H:%M")
-        end_label = datetime.utcfromtimestamp(window["end_ts_ms"] / 1000).strftime("%H:%M")
-        window_label = f"{start_label}–{end_label} UTC"
+        # Arizona (MST), not each installation's own local time or plain
+        # UTC — a per-installation conversion needs a real IANA tz database
+        # (checked: zoneinfo needs the `tzdata` package, not present here),
+        # and a hand-rolled fixed-offset table would get DST wrong for half
+        # the year on every zone except Phoenix's. Arizona itself sidesteps
+        # that: it never observes DST, so -7 is correct year-round with no
+        # lookup needed — the one zone this box's techs actually read
+        # times in, ambient UTC labels only added confusion (reported
+        # live: "timestamps should be MST Arizona time not UTC").
+        # timezone_name is still surfaced separately as its own label, not
+        # used for this conversion.
+        start_label = datetime.fromtimestamp(window["start_ts_ms"] / 1000, tz=_ARIZONA_TZ).strftime("%Y-%m-%d %H:%M")
+        end_label = datetime.fromtimestamp(window["end_ts_ms"] / 1000, tz=_ARIZONA_TZ).strftime("%H:%M")
+        window_label = f"{start_label}–{end_label} MST"
 
     if found is None:
         status = "unknown"
