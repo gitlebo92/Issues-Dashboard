@@ -1087,6 +1087,38 @@ def _vrm_pv_ceiling_and_recent_spike(
     from the unit number, so instead of assuming a wattage, this uses
     what the trailer's own solar has actually produced.
 
+    Primary signal: the SAME-INSTANT PVP (solar power) reading, pulled in
+    the same stats call as battery current/voltage — if the panel was
+    demonstrably producing at least as much as the battery took in at
+    that exact point, solar alone explains it, full stop, regardless of
+    what this trailer has or hasn't produced on other days. Falls back to
+    an hour-of-day historical ceiling (max PVP ever seen in that hour
+    +/-hour_tolerance across ceiling_days) only for the rare point where
+    PVP itself is missing at that timestamp — a genuine data gap, not the
+    common case (checked live: VRM returns bc/bv/PVP at identical
+    timestamps for every point in the ordinary case).
+    (Found live, 2026-09-14 — RD3247/MU7013: ceiling-only flagged 803W as
+    "above the 616W ever seen in that hour, likely AC-fed" and called it
+    92% likely plugged in, while the very same instant's PVP read 820W —
+    solar alone, comfortably above the battery's own draw, on a trailer
+    with no AC charger or Grid/Generator input at all per its own VRM
+    dashboard. A day just having its best solar yet isn't evidence of
+    anything electrical — the ceiling is only ever a 21-day SAMPLE, and
+    weather varies. The direct same-instant reading doesn't have that
+    failure mode; margin is still applied to it too, for the ordinary
+    conversion-loss gap between panel and battery.
+
+    A same-instant-covered-but-record-breaking PVP reading was also tried
+    as a softer "uncertain, worth a look" flag rather than a clean pass —
+    dropped after checking live: it fired on 5 of 7 spot-checked units at
+    once, because the ceiling_days history here is built from VRM's
+    HOURLY-interval PVP while this check's own recent window is 15-MIN
+    interval, and those two don't reconcile cleanly (checked: an hourly
+    bucket's own value didn't match either the average or the max of its
+    15-min sub-readings). That made "new high" fire on ordinary sunny
+    afternoons, not genuine records — noise, not a real signal. Revisit
+    only after that resolution mismatch has an actual fix, not before.)
+
     The ceiling is bucketed by hour-of-day, not one flat all-day number —
     solar at 7am/7pm can't reach anywhere near a midday peak even on a
     perfect day, so comparing an evening reading to the all-day max makes
@@ -1100,9 +1132,9 @@ def _vrm_pv_ceiling_and_recent_spike(
     long as both sides use the same one.
 
     Checks recent_hours of battery charge power (voltage x current)
-    against each point's own hour-of-day ceiling. No caching — both
-    windows are pulled fresh every call. Returns (status, detail,
-    confidence, has_recent_data):
+    against same-instant PVP (or, failing that, the point's own
+    hour-of-day ceiling). No caching — both windows are pulled fresh every
+    call. Returns (status, detail, confidence, has_recent_data):
       - ("present", detail, confidence, True) if a qualifying reading was found
       - (None, detail, None, True) if the window had data but nothing
         exceeded its ceiling — real (if soft) evidence, since it means
@@ -1129,6 +1161,7 @@ def _vrm_pv_ceiling_and_recent_spike(
             params=[
                 ("type", "custom"), ("start", end - recent_hours * 3600), ("end", end),
                 ("interval", "15mins"), ("attributeCodes[]", "bc"), ("attributeCodes[]", "bv"),
+                ("attributeCodes[]", "PVP"),
             ],
             timeout=30,
         )
@@ -1141,6 +1174,10 @@ def _vrm_pv_ceiling_and_recent_spike(
     bc_series = recent_records.get("bc") or []
     bv_by_t = {
         p[0]: p[1] for p in (recent_records.get("bv") or [])
+        if isinstance(p, list) and p[1] is not None
+    }
+    pvp_by_t = {
+        p[0]: p[1] for p in (recent_records.get("PVP") or [])
         if isinstance(p, list) and p[1] is not None
     }
     bc_points = [p for p in bc_series if isinstance(p, list) and p[1] is not None]
@@ -1158,16 +1195,24 @@ def _vrm_pv_ceiling_and_recent_spike(
     peak_power = None
     peak_time = None
     peak_ceiling = None
+    peak_is_same_instant = False
     for point in bc_points:
         t, current = point
         voltage = bv_by_t.get(t)
         if voltage is None:
             continue
         power = current * voltage
-        hour = datetime.utcfromtimestamp(t / 1000).hour
-        local_ceiling = ceiling_by_hour.get(hour, flat_ceiling)
+        same_instant_pv = pvp_by_t.get(t)
+        if same_instant_pv is not None:
+            local_ceiling = same_instant_pv
+            is_same_instant = True
+        else:
+            hour = datetime.utcfromtimestamp(t / 1000).hour
+            local_ceiling = ceiling_by_hour.get(hour, flat_ceiling)
+            is_same_instant = False
         if power > local_ceiling * margin and (peak_power is None or power > peak_power):
             peak_power, peak_time, peak_ceiling = power, t, local_ceiling
+            peak_is_same_instant = is_same_instant
 
     if peak_power is None:
         if not has_recent_data:
@@ -1177,24 +1222,29 @@ def _vrm_pv_ceiling_and_recent_spike(
                 f"(newest point is {age_label} old) — cannot check for a solar-ceiling spike"
             ), None, False
         return None, (
-            f"No charge power above this trailer's own hour-of-day solar ceiling "
-            f"(observed over {ceiling_days}d, {round(flat_ceiling)}W at peak) in the last {recent_hours}h"
+            f"No charge power above this trailer's own solar output (same-instant PVP where "
+            f"available, else its hour-of-day ceiling observed over {ceiling_days}d, "
+            f"{round(flat_ceiling)}W at peak) in the last {recent_hours}h"
         ), None, True
     # utcfromtimestamp — see detect_solar_shading's identical note; this
     # box's local clock is US Mountain, not UTC, despite sharing today's
     # Pacific-Daylight offset by coincidence.
     when = datetime.utcfromtimestamp(peak_time / 1000).strftime("%Y-%m-%d %H:%M")
-    # Confidence scales with how far the reading cleared its own hour's
-    # ceiling — a reading right at the margin is weaker evidence than one
-    # 40% over it. This is inference, not a direct reading, so it's capped
-    # below what a direct charger-state match earns, and floored above
-    # pure guessing.
+    # Confidence scales with how far the reading cleared its own basis —
+    # a reading right at the margin is weaker evidence than one 40% over
+    # it. This is inference, not a direct reading, so it's capped below
+    # what a direct charger-state match earns, and floored above pure
+    # guessing.
     excess_ratio = peak_power / peak_ceiling if peak_ceiling else 1.0
     confidence = max(60, min(92, round(50 + (excess_ratio - 1) * 100)))
+    basis = (
+        f"the {round(peak_ceiling)}W its solar was actually producing at that same moment"
+        if peak_is_same_instant else
+        f"the {round(peak_ceiling)}W this trailer's solar has ever produced around that hour "
+        f"(observed over {ceiling_days}d)"
+    )
     return "present", (
-        f"Charge power reached {round(peak_power)}W at {when} (UTC), above the "
-        f"{round(peak_ceiling)}W this trailer's solar has ever produced around that hour "
-        f"(observed over {ceiling_days}d) — likely AC-fed"
+        f"Charge power reached {round(peak_power)}W at {when} (UTC), above {basis} — likely AC-fed"
     ), confidence, True
 # cSt (charger "Charge state") values that mean the AC charger is actively
 # receiving usable input power, vs. ones that mean it isn't. Not every
