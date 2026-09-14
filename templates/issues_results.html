@@ -5012,6 +5012,16 @@
             { value: 720, label: "Last 30 days" },
         ];
         const NETWORK_HOURS_OPTIONS = [
+            // A short window matters more here than on the battery graphs —
+            // packet loss/response time can spike and clear in well under an
+            // hour, and a real ~30-minute outage all but disappears at the
+            // default 7-day width (caught live: a coworker's Zabbix graph,
+            // zoomed to ~6 hours, showed an obvious flat 100%-loss plateau
+            // that the same unit's 7-day view here only showed as a
+            // hairline spike — same underlying data, just too compressed to
+            // read as "blatant" the way theirs was).
+            { value: 6, label: "Last 6 hours" },
+            { value: 12, label: "Last 12 hours" },
             { value: 24, label: "Last 24 hours" },
             { value: 72, label: "Last 3 days" },
             { value: 168, label: "Last 7 days" },
