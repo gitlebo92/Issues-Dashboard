@@ -7677,6 +7677,16 @@
             diagMenu.appendChild(scheduleSnapshotBtn);
 
             const graphsMenu = appendCommandSubmenu(diagMenu, "Graphs");
+            // Graphs is the button someone reaches for most in here — a
+            // straight-to-the-data look, not a diagnostic to run and wait
+            // on — so it goes first, ahead of the checks appended above
+            // (appendCommandSubmenu always appends at the end, which is
+            // why this needs an explicit move rather than just being
+            // declared first). graphsMenu is the .command-submenu-items
+            // div appendCommandSubmenu returns; its parentElement is the
+            // actual <details> — that's the whole nested submenu (summary
+            // + items) that needs to move, not just its contents.
+            diagMenu.insertBefore(graphsMenu.parentElement, diagMenu.firstChild);
 
             const batteryGraphsBtn = document.createElement("button");
             batteryGraphsBtn.type = "button";
