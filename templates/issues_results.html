@@ -2158,6 +2158,11 @@
         Automated tasks are paused (PAUSE_AUTOMATED_TASKS). Daily 4:00/4:05/4:10 jobs and
         30-minute ERP polling are off. Manual refresh and toolbar actions still work.
     </p>
+    <p class="automation-paused-banner" id="fleet_polls_still_running_banner">
+        Fleet-wide report polls (Units Unplugged, Shaded Units, Dead Panels, VRM Disconnected,
+        Battery Outlook, Up Steady Power vs Cell) are a deliberate exception — read-only,
+        no side effects — and keep running on their own schedule regardless of the pause above.
+    </p>
     {% endif %}
     {% if erp_writes_disabled %}
     <p class="automation-paused-banner" id="erp_writes_disabled_banner">
