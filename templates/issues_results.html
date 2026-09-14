@@ -14971,8 +14971,14 @@
             {
                 selector: ".command-menu[open] .command-menu-status",
                 title: "Status row",
-                body: "Nuance: the alert glyphs here only appear when there's something to say — a clean unit with no alarms shows nothing beyond the LED, not a quiet \"OK\". The connectivity LED is the same one on the row itself, repeated here for convenience. The 🔌/🌳/🔧 glyphs are live checks (power / shading / dead panel) run the moment the menu opens and cached 5 minutes, so reopening the same menu right after doesn't refetch.",
+                body: "Up to eight glyphs can appear here, left to right. Alert-only — appear ONLY when there's something to flag, nothing on a clean unit: ⚠ Power & Infra (Zabbix + VRM both flagging this unit — click for detail), 🌳 possible shading, 🔧 possible dead/underperforming panel, 📡 VRM gone stale or disconnected, ⚡/📶 Power vs Cell Outage's own verdict (⚡ power, 📶 cell) for Up Steady units. Shown whenever a reading resolved either way, clean or not: 🔌 AC/shore power status, the colored pill is battery SOC%, ☁ is the 5-day cloud forecast Battery Outlook reads against. The connectivity LED (same one as the row itself) rounds it out. Nuance: most fetch lazily the moment the menu opens and cache 5 minutes; ⚠ and ⚡/📶 instead poll a shared background sweep, so those two can already be lit before you've opened anything.",
                 before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                selector: "#false_positives",
+                title: "Up Steady",
+                body: "Nuance: a unit here can carry its own ⚡ (power) or 📶 (cell) badge right on the row — the same Power vs Cell Outage verdict as the Diagnostics submenu's own check, surfaced without opening anything, from a background sweep over every unit in this list. Click the badge to open the graph the verdict was based on, plus the switch's uptime at the time it was checked. \"Diagnose Up Steady (Cell/Power)\" above the list forces a fresh sweep on demand instead of waiting for the next scheduled one.",
+                before: function () { tourSetPanelMode("issues"); },
             },
             {
                 submenuLabel: "Validate",
