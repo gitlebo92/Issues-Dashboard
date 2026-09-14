@@ -212,16 +212,24 @@ def _fetch_open_meteo_current(lat, lon):
         "timezone": payload.get("timezone") or "",
         "observed_at": current.get("time") or "",
     }, None
-def get_unit_weather(unit, subject=""):
+def _resolve_unit_weather_coords(unit_key, subject_text=""):
     """
-    Resolve site/trailer GPS and fetch current weather from Open-Meteo.
-    Returns (payload_dict, error_message).
-    """
-    unit_key = _normalize_netsheet_unit(unit)
-    if not unit_key:
-        return None, f"Invalid unit: {unit}"
+    Site address GPS first, trailer (MU) Component GPS fallback — the exact
+    coordinate resolution get_unit_weather (live weather icons),
+    unit_battery_weather_outlook (single-unit Battery Outlook), and
+    fleet_battery_outlook_status (fleet-wide Battery Outlook report) all
+    need identically. Used to live duplicated across just the first two
+    (deliberately — see their old docstrings); a third caller needing the
+    same handful of ERP/Component calls is what finally justified sharing
+    it instead of a third near-copy.
 
-    subject_text = str(subject or "").strip()
+    Returns (lat, lon, coord_source, site_id, site_name, trailer, error_detail).
+    lat/lon are None when nothing resolved anywhere; error_detail is a
+    human-readable "why not" (site id, trailer code, any resolve error),
+    only meaningful in that case — callers that want their own message
+    shape build it themselves from the individual pieces.
+    """
+    subject_text = str(subject_text or "").strip()
     site_id = ""
     site_name = ""
     site_error = ""
@@ -252,6 +260,7 @@ def get_unit_weather(unit, subject=""):
             lat, lon = trailer_coords
             coord_source = "trailer"
 
+    error_detail = ""
     if lat is None:
         bits = ["No GPS on site address or trailer"]
         if site_id:
@@ -260,7 +269,24 @@ def get_unit_weather(unit, subject=""):
             bits.append(f"trailer {trailer}")
         if site_error:
             bits.append(site_error)
-        return None, " — ".join(bits)
+        error_detail = " — ".join(bits)
+
+    return lat, lon, coord_source, site_id, site_name, trailer, error_detail
+def get_unit_weather(unit, subject=""):
+    """
+    Resolve site/trailer GPS and fetch current weather from Open-Meteo.
+    Returns (payload_dict, error_message).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+
+    subject_text = str(subject or "").strip()
+    lat, lon, coord_source, site_id, site_name, trailer, error_detail = (
+        _resolve_unit_weather_coords(unit_key, subject_text)
+    )
+    if lat is None:
+        return None, error_detail
 
     weather, weather_error = _fetch_open_meteo_current(lat, lon)
     if weather_error:
@@ -2493,32 +2519,25 @@ def unit_battery_weather_outlook(unit, subject=""):
     ac_power_confidence = snapshot["ac_power_confidence"]
     vrm_freshness = snapshot["vrm_freshness"]
 
-    # Same coordinate resolution as get_unit_weather() (site address, else
-    # trailer), duplicated rather than shared — this is an experimental
-    # feature and get_unit_weather() backs the live weather icons, so it
-    # stays untouched rather than refactored to serve a second caller.
-    lat = lon = None
-    location_label = unit_key
-    resolved_site_id, resolve_error = resolve_dashboard_site_id(unit_key, subject_text)
-    if resolved_site_id:
-        raw_site, raw_error = _fetch_erp_site_doc_raw(str(resolved_site_id).strip())
-        if not raw_error and raw_site:
-            coords = _coords_from_site_addresses(raw_site)
-            if coords:
-                lat, lon = coords
-                location_label = str(raw_site.get("site_name") or "").strip() or location_label
-    if lat is None:
-        trailer_coords, trailer = _coords_from_trailer_component(unit_key, subject_text)
-        if trailer_coords:
-            lat, lon = trailer_coords
-            location_label = trailer or location_label
+    # Same coordinate resolution get_unit_weather() (live weather icons)
+    # and fleet_battery_outlook_status() (fleet-wide report) both need —
+    # see _resolve_unit_weather_coords.
+    lat, lon, coord_source, _site_id, site_name, trailer, coord_error = (
+        _resolve_unit_weather_coords(unit_key, subject_text)
+    )
+    if coord_source == "site":
+        location_label = site_name or unit_key
+    elif coord_source == "trailer":
+        location_label = trailer or unit_key
+    else:
+        location_label = unit_key
 
     forecast = None
     weather_error = None
     if lat is not None:
         forecast, weather_error = _fetch_open_meteo_daily_outlook(lat, lon)
     else:
-        weather_error = "No GPS on site address or trailer"
+        weather_error = coord_error or "No GPS on site address or trailer"
 
     cloudy_days = sum(1 for day in (forecast or []) if day.get("cloudy"))
     total_days = len(forecast or [])
@@ -2584,6 +2603,150 @@ def unit_battery_weather_outlook(unit, subject=""):
         "status": status,
         "summary": summary,
     }, None
+# Weather forecasts, for the fleet-wide pass below, are shared across
+# units whose GPS rounds to the same ~0.1° (~7 mile) point rather than
+# fetched once per unit — a fleet check runs ~250 installations, and
+# most cluster within a few miles of each other in the same metro area,
+# so asking Open-Meteo the same forecast ~10 times over would be pure
+# waste. 0.1° is coarse enough to collapse a metro area's units onto a
+# small handful of points without blurring together units in genuinely
+# different weather (a whole degree of latitude is ~69 miles; 0.1° is
+# close enough to "this unit's own forecast" for a 5-day cloud-cover
+# outlook, which isn't hyper-local data to begin with).
+_FORECAST_ROUND_DEGREES = 0.1
+def fleet_battery_outlook_status(max_workers=10):
+    """
+    Fleet-wide Battery Outlook — VRM battery SOC vs. the multi-day cloud
+    forecast for each installation's own GPS — backs the "Battery Outlook"
+    report. Same reuse principle as fleet_power_status/fleet_shading_status/
+    etc.: one bulk installations call + one ERP head crosswalk, shared
+    setup, then one VRM diagnostics read + one GPS resolution + one
+    (cache-shared) forecast fetch per site, run concurrently.
+
+    Skips any installation VRM hasn't heard from in
+    _VRM_UNPLUGGED_STALE_DAYS, same as fleet_power_status — a risk verdict
+    built on stale SOC is meaningless, and the per-site risk logic below
+    already refuses to compute one without at least "aging" freshness
+    anyway, so this just avoids spending a GPS/forecast lookup on a site
+    that was never going to produce a verdict.
+
+    Returns (rows, error). Each row has "unit" (the installation/MU name),
+    "head_units", "risk" (low/elevated/high, or None if not computable),
+    "forecast" (the next 5 days — see _fetch_open_meteo_daily_outlook for
+    shape), and every other key unit_battery_weather_outlook's single-unit
+    version returns.
+    """
+    installations, mu_to_heads, error = _fleet_vrm_installations_with_heads()
+    if error:
+        return None, error
+    stale_cutoff = _VRM_UNPLUGGED_STALE_DAYS * 86400
+    installations = [
+        i for i in installations
+        if i["vrm_last_seen_seconds_ago"] is None or i["vrm_last_seen_seconds_ago"] <= stale_cutoff
+    ]
+    _, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error
+
+    forecast_cache = {}
+    forecast_cache_lock = threading.Lock()
+
+    def cached_forecast(lat, lon):
+        key = (
+            round(lat / _FORECAST_ROUND_DEGREES) * _FORECAST_ROUND_DEGREES,
+            round(lon / _FORECAST_ROUND_DEGREES) * _FORECAST_ROUND_DEGREES,
+        )
+        with forecast_cache_lock:
+            cached = forecast_cache.get(key)
+        if cached is not None:
+            return cached
+        result = _fetch_open_meteo_daily_outlook(lat, lon)
+        with forecast_cache_lock:
+            result = forecast_cache.setdefault(key, result)
+        return result
+
+    def check_one(installation):
+        unit = installation["installation_name"]
+        head_units = mu_to_heads.get(unit.upper(), [])
+        # RD3315(MU8083), not MU8083 — see fleet_power_status's check_one
+        # for why: this trailer's ERP-linked head is the identifier a
+        # ticket would actually use, when one is known.
+        display_unit = f"{head_units[0]}({unit})" if head_units else unit
+        row = {"unit": unit, "head_units": head_units}
+        snapshot, snap_error = _vrm_power_snapshot_for_site(
+            installation["site_id"], unit,
+            installation["vrm_last_seen_seconds_ago"], victron_token,
+        )
+        if snap_error:
+            row["error"] = snap_error
+            return row
+        enriched, _err = _power_status_dict_from_snapshot(display_unit, snapshot)
+        battery_soc_percent = enriched.get("battery_soc_percent")
+        vrm_freshness = enriched.get("vrm_freshness")
+        vrm_last_seen_seconds_ago = enriched.get("vrm_last_seen_seconds_ago")
+        ac_power_label = enriched.get("ac_power_label") or ""
+        ac_power_confidence = enriched.get("ac_power_confidence")
+
+        lat, lon, coord_source, _site_id, site_name, trailer, coord_error = (
+            _resolve_unit_weather_coords(unit, "")
+        )
+        if coord_source == "site":
+            location_label = site_name or unit
+        elif coord_source == "trailer":
+            location_label = trailer or unit
+        else:
+            location_label = unit
+
+        forecast = None
+        weather_error = None
+        if lat is not None:
+            forecast, weather_error = cached_forecast(lat, lon)
+        else:
+            weather_error = coord_error or "No GPS on site address or trailer"
+
+        cloudy_days = sum(1 for day in (forecast or []) if day.get("cloudy"))
+        total_days = len(forecast or [])
+        risk = None
+        if battery_soc_percent is not None and forecast and vrm_freshness in ("fresh", "aging"):
+            if battery_soc_percent < 40 and cloudy_days >= 3:
+                risk = "high"
+            elif battery_soc_percent < 60 and cloudy_days >= 2:
+                risk = "elevated"
+            else:
+                risk = "low"
+
+        summary_parts = (
+            [f"Battery SOC {battery_soc_percent:g}%"] if battery_soc_percent is not None
+            else ["Battery SOC unavailable"]
+        )
+        if forecast:
+            summary_parts.append(f"{cloudy_days}/{total_days} cloudy day(s) ahead at {location_label}")
+        if risk:
+            summary_parts.append(f"risk: {risk}")
+        elif battery_soc_percent is not None and vrm_freshness not in ("fresh", "aging"):
+            summary_parts.append(f"risk: unknown — VRM data {_format_age(vrm_last_seen_seconds_ago)} old")
+        confidence_text = f" ({ac_power_confidence}% likely)" if ac_power_confidence is not None else ""
+        summary_parts.append(ac_power_label + confidence_text)
+        summary = f"{display_unit} — " + ", ".join(summary_parts)
+
+        row.update({
+            "battery_soc_percent": battery_soc_percent,
+            "vrm_freshness": vrm_freshness,
+            "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
+            "location": location_label,
+            "forecast": forecast,
+            "cloudy_days": cloudy_days,
+            "forecast_days": total_days,
+            "risk": risk,
+            "weather_error": weather_error,
+            "status": {"high": "fail", "elevated": "warn", "low": "ok"}.get(risk, "warn"),
+            "summary": summary,
+        })
+        return row
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        rows = list(pool.map(check_one, installations))
+    return rows, None
 # One VRM attribute code per chart the UI offers. VRM's own single-letter/
 # short codes (bv, bs, ...) aren't something a NOC tech should have to know,
 # so the UI only ever sees these keys and labels.

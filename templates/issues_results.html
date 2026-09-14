@@ -1119,6 +1119,31 @@
         .command-vrm-freshness-glyph.is-disconnected {
             border-color: var(--danger);
         }
+        /* Battery Outlook's 5-day forecast — an info glyph, not an alert
+           (see forecastGlyphElement): shown whenever a forecast resolved
+           at all, regardless of risk, so unlike the alert-circle glyphs
+           above this is a plain outlined pill with its own text ("☁ 2/5"),
+           same shape as .command-battery-glyph but neutral-colored since
+           there's no single risk level to color it by — the report row
+           and command-menu status row both use the exact same element via
+           forecastGlyphElement. */
+        .forecast-glyph,
+        .command-forecast-glyph {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1;
+            border-radius: var(--radius-pill);
+            padding: 2px 8px;
+            border: 1px solid var(--border-strong);
+            color: var(--text);
+            cursor: default;
+        }
+        .command-forecast-glyph {
+            margin-left: 4px;
+        }
         .battery-graphs-dialog {
             width: min(720px, 100%);
             max-height: 85vh;
@@ -2123,6 +2148,17 @@
                 <span class="flap-report-db-stats" id="vrm_freshness_status"></span>
             </div>
             <ul id="vrm_freshness_list"><li class="empty">Loading cached results...</li></ul>
+            </div>
+            <div class="list-section" id="battery_outlook_section" data-panel="reports" hidden>
+            <h2>
+                Battery Outlook <span class="experimental-badge">Experimental</span>
+                <span class="count" id="battery_outlook_count"></span>
+            </h2>
+            <div class="flap-report-controls">
+                <button type="button" id="battery_outlook_refresh" class="toolbar-btn">Check whole fleet now</button>
+                <span class="flap-report-db-stats" id="battery_outlook_status"></span>
+            </div>
+            <ul id="battery_outlook_list"><li class="empty">Loading cached results...</li></ul>
             </div>
             <div class="list-section" id="power_infra_section" data-panel="reports" hidden>
             <h2>
@@ -3767,6 +3803,7 @@
             { value: "shaded_units_list", label: "Shaded Units" },
             { value: "dead_panel_list", label: "Dead Panels" },
             { value: "vrm_freshness_list", label: "VRM Disconnected" },
+            { value: "battery_outlook_list", label: "Battery Outlook" },
             { value: "power_infra_list", label: "Power & Infra Alerts" },
             { value: "alarm_frequency_list", label: "Alarm Frequency" },
         ];
@@ -6488,6 +6525,7 @@
             const deadPanelGlyph = row.querySelector(".command-dead-panel-glyph");
             const batteryGlyph = row.querySelector(".command-battery-glyph");
             const vrmFreshnessGlyph = row.querySelector(".command-vrm-freshness-glyph");
+            const forecastGlyph = row.querySelector(".command-forecast-glyph");
             // The connectivity LED (see renderList) has no hidden/shown
             // toggle of its own — once it's present at all, it's always
             // showing a real status (including the neutral idle color),
@@ -6496,7 +6534,7 @@
             const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
                 || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden)
                 || (batteryGlyph && !batteryGlyph.hidden) || (vrmFreshnessGlyph && !vrmFreshnessGlyph.hidden)
-                || !!led;
+                || (forecastGlyph && !forecastGlyph.hidden) || !!led;
             row.hidden = !anyVisible;
         }
 
@@ -6819,6 +6857,118 @@
                 .finally(function () {
                     delete deadPanelGlyphInFlight[unit];
                     applyDeadPanelGlyphFromCache(commandMenu);
+                });
+        }
+
+        // A 5-day cloud-cover date range for a hover tooltip — shared
+        // between the command menu's forecast glyph and the Battery
+        // Outlook report's own rows, since both read the exact same
+        // forecast shape (_fetch_open_meteo_daily_outlook's day list).
+        function forecastTooltipText(forecast) {
+            if (!forecast || !forecast.length) {
+                return "No forecast available";
+            }
+            return forecast.map(function (day) {
+                let dateLabel = day.date || "?";
+                if (day.date) {
+                    const parsed = new Date(day.date + "T00:00:00");
+                    if (!isNaN(parsed.getTime())) {
+                        dateLabel = parsed.toLocaleDateString(undefined, {
+                            weekday: "short", month: "short", day: "numeric",
+                        });
+                    }
+                }
+                const cover = (day.cloud_cover_mean != null)
+                    ? Math.round(day.cloud_cover_mean) + "% cloud cover"
+                    : "";
+                return dateLabel + ": " + (day.conditions || "?")
+                    + (cover ? " (" + cover + ")" : "")
+                    + (day.cloudy ? " — cloudy" : "");
+            }).join("\n");
+        }
+
+        // Info glyph, not alert-only like shading/dead-panel/VRM-freshness
+        // above — the forecast itself is worth seeing any time it's
+        // available, not just when it implies a problem (the risk verdict,
+        // separately, is what actually flags something worth a look).
+        // Shared by both the command menu's own .command-forecast-glyph
+        // (styled directly, like .command-battery-glyph) and the Battery
+        // Outlook report row's freestanding .forecast-glyph element.
+        function applyForecastGlyphText(glyph, forecast, cloudyDays, forecastDays) {
+            glyph.textContent = "☁ " + (
+                cloudyDays != null && forecastDays != null
+                    ? (cloudyDays + "/" + forecastDays)
+                    : "5-day"
+            );
+            glyph.title = "Next " + (forecastDays || 5) + " day(s):\n" + forecastTooltipText(forecast);
+        }
+
+        function forecastGlyphElement(forecast, cloudyDays, forecastDays) {
+            const glyph = document.createElement("span");
+            glyph.className = "forecast-glyph";
+            applyForecastGlyphText(glyph, forecast, cloudyDays, forecastDays);
+            return glyph;
+        }
+
+        const forecastGlyphCache = {};
+        const forecastGlyphInFlight = {};
+        const FORECAST_GLYPH_CACHE_MS = 5 * 60 * 1000;
+
+        function applyForecastGlyphFromCache(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-forecast-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const cached = forecastGlyphCache[unit];
+            if (!cached || !cached.forecast || !cached.forecast.length) {
+                glyph.hidden = true;
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
+            glyph.hidden = false;
+            applyForecastGlyphText(glyph, cached.forecast, cached.cloudyDays, cached.forecastDays);
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        function checkAndApplyForecastGlyph(commandMenu) {
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            if (!unit || unit === "MENU") {
+                return;
+            }
+            const cached = forecastGlyphCache[unit];
+            if (cached && (Date.now() - cached.fetchedAt) < FORECAST_GLYPH_CACHE_MS) {
+                applyForecastGlyphFromCache(commandMenu);
+                return;
+            }
+            if (forecastGlyphInFlight[unit]) {
+                return;
+            }
+            forecastGlyphInFlight[unit] = true;
+            const entry = commandMenuEntries.get(commandMenu);
+            const subject = (entry && (entry.ticketSubject || entry.subject)) || "";
+            fetch("/issues/battery-outlook/" + encodeURIComponent(unit), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ subject: subject }),
+            })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    forecastGlyphCache[unit] = (data && data.ok)
+                        ? {
+                            forecast: data.forecast,
+                            cloudyDays: data.cloudy_days,
+                            forecastDays: data.forecast_days,
+                            fetchedAt: Date.now(),
+                        }
+                        : { forecast: null, fetchedAt: Date.now() };
+                })
+                .catch(function () {
+                    forecastGlyphCache[unit] = { forecast: null, fetchedAt: Date.now() };
+                })
+                .finally(function () {
+                    delete forecastGlyphInFlight[unit];
+                    applyForecastGlyphFromCache(commandMenu);
                 });
         }
 
@@ -7974,6 +8124,16 @@
                 }
             });
             statusRow.appendChild(vrmFreshnessGlyph);
+            // Battery Outlook's 5-day cloud forecast — info glyph, shown
+            // whenever a forecast resolved at all, not gated on risk (see
+            // forecastGlyphElement). Filled in by checkAndApplyForecastGlyph
+            // on open, off /issues/battery-outlook — a separate fetch from
+            // the power-status one above, since it needs a GPS resolution
+            // and an Open-Meteo call the others don't.
+            const forecastGlyph = document.createElement("span");
+            forecastGlyph.className = "command-forecast-glyph";
+            forecastGlyph.hidden = true;
+            statusRow.appendChild(forecastGlyph);
             commandItems.appendChild(statusRow);
 
             commandMenuEntries.set(commandMenu, entry);
@@ -8004,6 +8164,7 @@
                     checkAndApplyPowerGlyph(commandMenu);
                     checkAndApplyShadingGlyph(commandMenu);
                     checkAndApplyDeadPanelGlyph(commandMenu);
+                    checkAndApplyForecastGlyph(commandMenu);
                 } else {
                     clearCommandMenuPosition(commandMenu);
                 }
@@ -8763,14 +8924,15 @@
                 body.appendChild(relatedLine);
             }
 
-            // Shaded Units AND Dead Panels rows — both are read off the
-            // same underlying solar-power history (row.shading_status is
-            // only ever set by _shading_status_for_site, row.dead_panel_status
-            // only by _dead_panel_status_for_site), so both get a direct
-            // link to the graph the verdict was actually based on rather
-            // than requiring the command menu or the per-unit check's own
-            // toast first.
-            if (row.shading_status !== undefined || row.dead_panel_status !== undefined) {
+            // Shaded Units, Dead Panels, AND Battery Outlook rows — all
+            // three are read off the same underlying solar-power/battery
+            // history (row.shading_status only from _shading_status_for_site,
+            // row.dead_panel_status only from _dead_panel_status_for_site,
+            // row.risk only from fleet_battery_outlook_status's check_one),
+            // so all three get a direct link to the graph the verdict was
+            // actually based on rather than requiring the command menu or
+            // the per-unit check's own toast first.
+            if (row.shading_status !== undefined || row.dead_panel_status !== undefined || row.risk !== undefined) {
                 const snapshotLine = document.createElement("div");
                 snapshotLine.className = "snapshot-task-line";
 
@@ -8792,6 +8954,11 @@
                     openGraphsModal(row.unit, "battery", "", null, openLabel);
                 });
                 snapshotLine.appendChild(graphBtn);
+                if (row.forecast && row.forecast.length) {
+                    snapshotLine.appendChild(
+                        forecastGlyphElement(row.forecast, row.cloudy_days, row.forecast_days)
+                    );
+                }
                 body.appendChild(snapshotLine);
             }
 
@@ -9051,6 +9218,33 @@
                 enrichFn: relatedTicketEnrichFn,
                 priorityFn: relatedTicketPriorityFn,
             },
+            batteryOutlook: {
+                listEl: document.getElementById("battery_outlook_list"),
+                countEl: document.getElementById("battery_outlook_count"),
+                statusEl: document.getElementById("battery_outlook_status"),
+                sectionEl: document.getElementById("battery_outlook_section"),
+                refreshBtn: document.getElementById("battery_outlook_refresh"),
+                liveEndpoint: "/issues/fleet-battery-outlook",
+                cachedEndpoint: "/issues/fleet-battery-outlook/cached",
+                emptyText: "No cached results yet — click \"Check whole fleet now.\"",
+                sortRank: function (row) {
+                    return { high: 0, elevated: 1 }[row.risk];
+                },
+                // Not a confidence score — battery_soc_percent itself, but
+                // inverted (100 - soc) so the existing "highest certainty
+                // first" descending sort still does the right thing here:
+                // the lower a unit's charge, the more it's worth a look
+                // before ones with more headroom in the same risk tier.
+                certainty: function (row) {
+                    return row.battery_soc_percent == null ? undefined : 100 - row.battery_soc_percent;
+                },
+                // Only actual findings — a report titled Battery Outlook
+                // listing every low-risk unit too just buries the ones
+                // worth a look, same reasoning as shadedUnits/deadPanel.
+                filterFn: function (row) { return row.risk === "elevated" || row.risk === "high"; },
+                enrichFn: relatedTicketEnrichFn,
+                priorityFn: relatedTicketPriorityFn,
+            },
         };
         const fleetReportLoadedOnce = {};
 
@@ -9182,7 +9376,7 @@
         // ---- Reports panel (panel_mode === "reports") -------------------------
         // Reports is a page alongside Issues/Projects, not a separate toolbar
         // dropdown — applyPanelMode shows every [data-panel="reports"] section
-        // at once (Flap Report + the four fleet-wide VRM checks) and this
+        // at once (Flap Report + the five fleet-wide VRM checks) and this
         // lazy-loads each exactly once, the same "don't refetch on every
         // visit" cache-then-load pattern loadFleetReportCached already uses
         // per report.

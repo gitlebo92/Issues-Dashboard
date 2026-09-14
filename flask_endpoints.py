@@ -175,6 +175,8 @@ _fleet_dead_panel_cache = {"rows": [], "fetched_at": None, "error": None}
 _fleet_dead_panel_cache_lock = threading.Lock()
 _fleet_vrm_freshness_cache = {"rows": [], "fetched_at": None, "error": None}
 _fleet_vrm_freshness_cache_lock = threading.Lock()
+_fleet_battery_outlook_cache = {"rows": [], "fetched_at": None, "error": None}
+_fleet_battery_outlook_cache_lock = threading.Lock()
 
 ISSUE_RESULT_KEYS = (
     "false_positives",
@@ -2207,6 +2209,27 @@ def issues_fleet_vrm_freshness_cached():
     return _fleet_cached_route(_fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock)
 
 
+@app.route("/issues/fleet-battery-outlook", methods=["GET"])
+def issues_fleet_battery_outlook():
+    """
+    Experimental: VRM battery SOC vs. multi-day cloud forecast for every
+    installation, fleet-wide — live, one VRM diagnostics read + one GPS
+    resolution + one (metro-shared) forecast fetch per site, run
+    concurrently. Backs the Battery Outlook report. Checked live
+    (2026-09-13): ~186 installations after staleness/site filters, ~104s.
+    """
+    return _fleet_cache_route(
+        work_tool.fleet_battery_outlook_status,
+        _fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock,
+    )
+
+
+@app.route("/issues/fleet-battery-outlook/cached", methods=["GET"])
+def issues_fleet_battery_outlook_cached():
+    """Instant cached read for the Battery Outlook report — see issues_fleet_battery_outlook."""
+    return _fleet_cached_route(_fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock)
+
+
 @app.route("/issues/network-latency-history/<unit>", methods=["POST"])
 def issues_network_latency_history(unit):
     """Experimental: Router/Switch ICMP ping response time & loss over time, from Zabbix."""
@@ -3650,6 +3673,7 @@ def _start_arizona_validation_scheduler():
             (_fleet_shading_status_loop, "fleet-shading-status", FLEET_SHADING_STATUS_REFRESH_SECONDS, "Shaded Units"),
             (_fleet_dead_panel_loop, "fleet-dead-panel", FLEET_DEAD_PANEL_REFRESH_SECONDS, "Dead Panels"),
             (_fleet_vrm_freshness_loop, "fleet-vrm-freshness", FLEET_VRM_FRESHNESS_REFRESH_SECONDS, "VRM Disconnected"),
+            (_fleet_battery_outlook_loop, "fleet-battery-outlook", FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS, "Battery Outlook"),
         ):
             fleet_thread = threading.Thread(target=loop_fn, daemon=True, name=thread_name)
             fleet_thread.start()
@@ -3829,6 +3853,20 @@ def _fleet_vrm_freshness_loop():
         time.sleep(FLEET_VRM_FRESHNESS_REFRESH_SECONDS)
 
 
+def _fleet_battery_outlook_loop():
+    # Fifth stagger slot, after the other four (120/150/180/60s).
+    time.sleep(210)
+    while True:
+        try:
+            _run_fleet_check(
+                "battery outlook", work_tool.fleet_battery_outlook_status,
+                _fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet battery outlook poll failed: {exc}")
+        time.sleep(FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS)
+
+
 def _run_due_shading_snapshot_tasks():
     """
     Process every snapshot task whose scheduled attempt has arrived:
@@ -3935,6 +3973,15 @@ FLEET_DEAD_PANEL_REFRESH_SECONDS = int(
 )
 FLEET_VRM_FRESHNESS_REFRESH_SECONDS = int(
     (os.getenv("FLEET_VRM_FRESHNESS_REFRESH_SECONDS") or "600").strip() or "600"
+)
+# One VRM diagnostics call + one GPS resolution + one (metro-shared)
+# forecast fetch per site — comparable load to FLEET_POWER_STATUS's single
+# VRM call, so the same interval. Also matches how slowly the underlying
+# data actually changes: SOC swings meaningfully hour to hour, but the
+# 5-day cloud outlook it's being weighed against barely moves in 30
+# minutes.
+FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS = int(
+    (os.getenv("FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS") or "1800").strip() or "1800"
 )
 # How often the shading-snapshot scheduler checks for due tasks. Short,
 # unlike the fleet-report polls above — a task's own next_attempt_at is

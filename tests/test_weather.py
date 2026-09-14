@@ -940,5 +940,100 @@ class FleetVrmFreshnessInactiveFilter(unittest.TestCase):
         self.assertEqual(units, ["MU1001", "MU1003"])
 
 
+class ResolveUnitWeatherCoords(unittest.TestCase):
+    # get_unit_weather (live weather icons), unit_battery_weather_outlook
+    # (single-unit Battery Outlook), and fleet_battery_outlook_status
+    # (fleet-wide Battery Outlook report) all share this one coordinate
+    # resolution — a regression here breaks all three at once, which is
+    # exactly why it's worth its own coverage now that a third caller
+    # exists.
+    def test_site_address_coords_take_priority(self):
+        with (
+            mock.patch.object(
+                work_tool.weather, "resolve_dashboard_site_id",
+                return_value=("SITE-1", None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_fetch_erp_site_doc_raw",
+                return_value=({"site_name": "Test Site"}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_coords_from_site_addresses",
+                return_value=(33.1, -112.2),
+            ),
+        ):
+            lat, lon, source, site_id, site_name, trailer, error = (
+                work_tool.weather._resolve_unit_weather_coords("RD3132", "")
+            )
+        self.assertEqual((lat, lon), (33.1, -112.2))
+        self.assertEqual(source, "site")
+        self.assertEqual(site_id, "SITE-1")
+        self.assertEqual(site_name, "Test Site")
+        self.assertEqual(trailer, "")
+        self.assertEqual(error, "")
+
+    def test_falls_back_to_trailer_when_site_has_no_coords(self):
+        with (
+            mock.patch.object(
+                work_tool.weather, "resolve_dashboard_site_id",
+                return_value=("SITE-1", None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_fetch_erp_site_doc_raw",
+                return_value=({"site_name": "Test Site"}, None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_coords_from_site_addresses", return_value=None
+            ),
+            mock.patch.object(
+                work_tool.weather, "_coords_from_trailer_component",
+                return_value=((34.5, -113.5), "MU9062"),
+            ),
+        ):
+            lat, lon, source, site_id, site_name, trailer, error = (
+                work_tool.weather._resolve_unit_weather_coords("RD3132", "")
+            )
+        self.assertEqual((lat, lon), (34.5, -113.5))
+        self.assertEqual(source, "trailer")
+        self.assertEqual(trailer, "MU9062")
+        self.assertEqual(error, "")
+
+    def test_falls_back_to_trailer_when_no_site_at_all(self):
+        with (
+            mock.patch.object(
+                work_tool.weather, "resolve_dashboard_site_id", return_value=("", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_coords_from_trailer_component",
+                return_value=((34.5, -113.5), "MU9062"),
+            ),
+        ):
+            lat, lon, source, site_id, site_name, trailer, error = (
+                work_tool.weather._resolve_unit_weather_coords("MU9062", "")
+            )
+        self.assertEqual((lat, lon), (34.5, -113.5))
+        self.assertEqual(source, "trailer")
+        self.assertEqual(site_id, "")
+
+    def test_neither_resolves_returns_none_and_error_detail(self):
+        with (
+            mock.patch.object(
+                work_tool.weather, "resolve_dashboard_site_id", return_value=("", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_coords_from_trailer_component",
+                return_value=(None, "MU9062"),
+            ),
+        ):
+            lat, lon, source, site_id, site_name, trailer, error = (
+                work_tool.weather._resolve_unit_weather_coords("MU9062", "")
+            )
+        self.assertIsNone(lat)
+        self.assertIsNone(lon)
+        self.assertEqual(source, "")
+        self.assertIn("No GPS on site address or trailer", error)
+        self.assertIn("MU9062", error)
+
+
 if __name__ == "__main__":
     unittest.main()
