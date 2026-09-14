@@ -3977,6 +3977,38 @@ def _power_vs_cell_outage_loop():
         time.sleep(POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
 
 
+def _camera_unit_for_shading_snapshot(unit):
+    """
+    A snapshot task's own `unit` is the VRM installation (an MU trailer
+    for most of the fleet, per fleet_shading_status) — right for the dip
+    verification, which is genuinely per-trailer solar data, but usually
+    wrong for the camera fetch: an MU trailer doesn't carry its own
+    fisheye, its ERP-linked RD/FD head does (see CLAUDE.md's "Unit
+    conventions"). Every OTHER caller that needs a camera off a trailer
+    (renderFleetReportRow, fleet_shading_status's own row.head_units)
+    already resolves this; this was the one path that didn't, and it
+    reliably failed every capture for exactly the units that need it
+    (checked live, 2026-09-14: several units' tasks stuck at "Dip
+    confirmed... but camera fetch failed: No fisheye configured for
+    MUxxxx" — read straight off the bare MU code with nothing to resolve
+    it, three wasted attempts each).
+
+    Falls back to `unit` unchanged on any failure or when it isn't an MU
+    code at all (an RD/FD-only ACRD unit already has its own camera).
+    """
+    unit = str(unit or "").strip().upper()
+    if not unit.startswith("MU"):
+        return unit
+    try:
+        heads_by_mu, error = work_tool._erp_heads_for_mu_trailers([unit])
+    except Exception:
+        return unit
+    if error:
+        return unit
+    heads = heads_by_mu.get(unit) or []
+    return heads[0] if heads else unit
+
+
 def _run_due_shading_snapshot_tasks():
     """
     Process every snapshot task whose scheduled attempt has arrived:
@@ -4003,8 +4035,9 @@ def _run_due_shading_snapshot_tasks():
                 task_id, f"Not captured: {detail or 'could not verify a current dip'}"
             )
             continue
+        camera_unit = _camera_unit_for_shading_snapshot(unit)
         try:
-            image, error = work_tool.camera_snapshot(unit, task["camera_target"])
+            image, error = work_tool.camera_snapshot(camera_unit, task["camera_target"])
         except Exception as exc:
             image, error = None, str(exc)
         if error or not image:
