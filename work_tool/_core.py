@@ -3791,6 +3791,17 @@ def _camera_targets_from_subject(subject):
         if re.search(pattern, subject or "", re.IGNORECASE):
             targets.append(target)
     return targets
+def _is_generic_camera_outage_subject(subject):
+    """
+    "Camera Outage" with no specific camera named — as opposed to "Camera 2
+    down", which _camera_targets_from_subject already catches on its own.
+    Caught live: ISS-2026-11561 ("PHX-RD3343(MU5044)-Camera Outage-...")
+    matched neither a c1-4 nor a fisheye pattern, so it silently fell
+    through to the generic router/compute connectivity check instead of
+    Camera Outage — the word "Camera" was in the subject, just never a
+    specific number for _camera_targets_from_subject to find.
+    """
+    return bool(re.search(r"\bcamera\s+outage\b", str(subject or ""), re.IGNORECASE))
 def _is_nuc_down_issue_subtype(subtype):
     """Exact ERP Issue Subtype spelling/capitalization: Nuc Down."""
     return str(subtype or "") == "Nuc Down"
@@ -6903,6 +6914,15 @@ def validate_issues_report(issue_path=None):
                     issue_type, issue_subtype, subject_cell
                 )
                 camera_targets = _camera_targets_from_subject(subject_cell)
+                if not camera_targets and _is_generic_camera_outage_subject(subject_cell):
+                    # No specific camera named — check every camera endpoint
+                    # this unit has (ping_camera itself already fails soft,
+                    # returning None, for one the net sheet has no IP for —
+                    # same as an explicitly-named camera on a unit that
+                    # doesn't have it), rather than silently falling through
+                    # to the generic router/compute check and never
+                    # mentioning cameras at all.
+                    camera_targets = list(CAMERA_ENDPOINTS.keys())
                 has_head_unit = bool(
                     re.search(r"\b(?:RD|FD)\s*\d+", subject_cell, re.IGNORECASE)
                 )

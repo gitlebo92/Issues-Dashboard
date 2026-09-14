@@ -23,6 +23,54 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import work_tool  # noqa: E402
 
 
+class CameraTargetsFromSubject(unittest.TestCase):
+    def test_specific_camera_numbers_and_short_forms(self):
+        self.assertEqual(work_tool._camera_targets_from_subject("Camera 2 down"), ["camera2"])
+        self.assertEqual(work_tool._camera_targets_from_subject("C3 not working"), ["camera3"])
+        self.assertEqual(work_tool._camera_targets_from_subject("Fisheye not working"), ["fisheye"])
+
+    def test_multiple_specific_cameras(self):
+        self.assertEqual(
+            work_tool._camera_targets_from_subject("Camera 1 and Camera 4 down"),
+            ["camera1", "camera4"],
+        )
+
+    def test_generic_camera_outage_has_no_specific_target(self):
+        # Caught live: ISS-2026-11561's real subject named no specific
+        # camera, so this returned [] and the ticket silently fell through
+        # to the generic connectivity check instead of Camera Outage — see
+        # _is_generic_camera_outage_subject, which is what now catches
+        # exactly this case.
+        self.assertEqual(
+            work_tool._camera_targets_from_subject(
+                "PHX-RD3343(MU5044)-Camera Outage-09/14/26-Facebook-OES Mesa"
+            ),
+            [],
+        )
+
+
+class GenericCameraOutageSubject(unittest.TestCase):
+    def test_real_ticket_subject_matches(self):
+        self.assertTrue(work_tool._is_generic_camera_outage_subject(
+            "PHX-RD3343(MU5044)-Camera Outage-09/14/26-Facebook-OES Mesa"
+        ))
+
+    def test_case_insensitive(self):
+        self.assertTrue(work_tool._is_generic_camera_outage_subject("camera outage"))
+
+    def test_does_not_match_a_specific_camera_number(self):
+        # Already caught by _camera_targets_from_subject on its own — no
+        # fallback needed, so this deliberately isn't required to match.
+        self.assertFalse(work_tool._is_generic_camera_outage_subject("Camera 2 Outage"))
+
+    def test_unrelated_subject_does_not_match(self):
+        self.assertFalse(work_tool._is_generic_camera_outage_subject("Router Down"))
+
+    def test_empty_subject_does_not_match(self):
+        self.assertFalse(work_tool._is_generic_camera_outage_subject(""))
+        self.assertFalse(work_tool._is_generic_camera_outage_subject(None))
+
+
 class RegionCodeFromSubject(unittest.TestCase):
     def test_parses_each_supported_region(self):
         for code in ("LAX", "OAK", "HOU", "PHX", "SLC", "DEN"):
