@@ -1425,6 +1425,41 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
     except (TypeError, ValueError):
         hours = 72
 
+    # Zabbix history first, deliberately — it's the cheap half of this
+    # check (no SSH), and most units asked about here (especially a fleet
+    # sweep over every Up Steady unit) will have no qualifying loss window
+    # at all. SSH'ing into every switch just to throw the answer away for
+    # units with nothing to explain would turn a fleet-wide sweep into a
+    # genuinely slow, needless SSH hammering of the whole switch fleet.
+    latency_info, latency_error = unit_network_latency_history(unit, hours)
+    if latency_error:
+        return None, latency_error
+    loss_points = (
+        ((latency_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
+    )
+    window = _latest_high_loss_window(loss_points)
+    if window is None:
+        return {
+            "unit": unit,
+            "verdict": "no_recent_outage",
+            "status": "ok",
+            "reason": f"no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ router loss window in the last {hours}h",
+            "switch_uptime_text": "",
+            "switch_uptime_seconds": None,
+            "switch_up_since": None,
+            "loss_window_start": None,
+            "loss_window_end": None,
+            "loss_window_points": 0,
+            "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
+            "summary": (
+                f"{unit} — no recent outage window: no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ "
+                f"router loss in the last {hours}h to compare switch uptime against "
+                "(switch not checked — nothing to explain)."
+            ),
+        }, None
+
+    # A real loss window exists — now it's worth the SSH round trip to
+    # find out when the switch itself last came up.
     uptime_info, uptime_error = get_robofiber_uptime(unit)
     if uptime_error:
         return None, uptime_error
@@ -1433,38 +1468,10 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
     if switch_uptime_seconds is None:
         return None, f"Could not parse switch uptime from: {uptime_text or '(empty)'}"
 
-    latency_info, latency_error = unit_network_latency_history(unit, hours)
-    if latency_error:
-        return None, latency_error
-    loss_points = (
-        ((latency_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
-    )
-    window = _latest_high_loss_window(loss_points)
-
     now = time.time()
     switch_up_since = now - switch_uptime_seconds
     switch_uptime_label = _format_switch_uptime_seconds(switch_uptime_seconds)
     switch_up_since_label = datetime.fromtimestamp(switch_up_since, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    if window is None:
-        return {
-            "unit": unit,
-            "verdict": "no_recent_outage",
-            "status": "ok",
-            "reason": f"no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ router loss window in the last {hours}h",
-            "switch_uptime_text": uptime_text,
-            "switch_uptime_seconds": switch_uptime_seconds,
-            "switch_up_since": switch_up_since,
-            "loss_window_start": None,
-            "loss_window_end": None,
-            "loss_window_points": 0,
-            "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
-            "summary": (
-                f"{unit} — no recent outage window: switch up {switch_uptime_label} "
-                f"(since {switch_up_since_label}), no {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ "
-                f"router loss in the last {hours}h to compare it against."
-            ),
-        }, None
 
     window_start_ms, window_end_ms, window_points = window
     window_start = window_start_ms / 1000
@@ -1506,3 +1513,42 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
         "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
         "summary": summary,
     }, None
+def fleet_power_vs_cell_outage_status(units, max_workers=8):
+    """
+    Power-vs-cell-outage for a whole list of units at once, concurrently —
+    backs the Up Steady list's "Diagnose Power vs Cell" sweep (both the
+    scheduled one that runs on startup and the manual on-demand button).
+    Unlike the VRM-based fleet_* checks in weather.py, this has no
+    fleet-wide "every installation" source of its own — the caller
+    supplies the unit list (in practice, whatever's currently in the
+    shared job's Up Steady/false_positives results), since this check has
+    nothing to do with VRM installations at all.
+
+    Lower default concurrency than the VRM fleet checks (8, not 10) —
+    each unit that actually has a loss window costs a real SSH connection
+    to its switch, which is heavier than an HTTP call to VRM, and a
+    fleet's worth of switches all getting SSH'd into at once is more
+    load, not less, than the same fleet's VRM installations getting
+    polled at once. Units with no qualifying loss window never touch SSH
+    at all (see unit_power_vs_cell_outage's own reordering), so in
+    practice most of a sweep is fast Zabbix-only checks with just a
+    handful of real SSH connections mixed in.
+
+    Returns (rows, error). Each row is whatever unit_power_vs_cell_outage
+    returns for that unit, plus "unit" always present (or "error" if that
+    one unit's check itself failed — the rest of the sweep still comes
+    back).
+    """
+    unique_units = sorted({str(u or "").strip().upper() for u in (units or []) if str(u or "").strip()})
+    if not unique_units:
+        return [], None
+
+    def check_one(unit):
+        info, error = unit_power_vs_cell_outage(unit)
+        if error:
+            return {"unit": unit, "error": error}
+        return info
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        rows = list(pool.map(check_one, unique_units))
+    return rows, None

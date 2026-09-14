@@ -492,13 +492,42 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertEqual(info["verdict"], "no_recent_outage")
 
     def test_unparseable_uptime_is_an_error_not_a_wrong_guess(self):
-        with mock.patch.object(
-            work_tool.diagnostics, "get_robofiber_uptime",
-            return_value=({"uptime": ""}, None),
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)
+        start = end - dt.timedelta(minutes=40)
+        with (
+            # A real loss window has to exist for SSH to even be reached —
+            # see unit_power_vs_cell_outage's cheap-Zabbix-first reorder.
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {"charts": {"router_loss": {"points": self._loss_points(start, end)}}}, None,
+                ),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": ""}, None),
+            ),
         ):
             info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
         self.assertIsNone(info)
         self.assertIn("Could not parse", error)
+
+    def test_no_recent_outage_never_calls_ssh_uptime(self):
+        # The whole point of checking Zabbix first — a unit with nothing
+        # to explain shouldn't cost a switch SSH connection at all.
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": [{"t": 1000, "v": 5.0}]}}}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                side_effect=AssertionError("SSH should not have been called"),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "no_recent_outage")
 
 
 if __name__ == "__main__":

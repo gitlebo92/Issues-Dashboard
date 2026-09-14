@@ -178,6 +178,14 @@ _fleet_vrm_freshness_cache_lock = threading.Lock()
 _fleet_battery_outlook_cache = {"rows": [], "fetched_at": None, "error": None}
 _fleet_battery_outlook_cache_lock = threading.Lock()
 
+# Same shape again, but NOT VRM-installation-scoped like the five above —
+# "Up Steady" (false_positives) only exists as a category inside the shared
+# ticket-queue pull's own results, so this cache is fed from that job's
+# current unit list rather than a fleet-wide VRM source. See
+# _up_steady_units_for_power_vs_cell / _power_vs_cell_check_fn.
+_power_vs_cell_cache = {"rows": [], "fetched_at": None, "error": None}
+_power_vs_cell_cache_lock = threading.Lock()
+
 ISSUE_RESULT_KEYS = (
     "false_positives",
     "nuc_down",
@@ -2108,6 +2116,41 @@ def _fleet_cached_route(cache, cache_lock, augment_fn=None):
     })
 
 
+def _up_steady_units_for_power_vs_cell():
+    """
+    Current Up Steady (false_positives) unit list from the shared ERP-pull
+    job. Unlike the VRM fleet checks above, this diagnostic has no
+    VRM-installation-wide "everything" source of its own — Up Steady only
+    exists as a category inside the live dashboard's own shared
+    ticket-queue pull (see ISSUE_RESULT_KEYS) — so it rides on whatever
+    that job's results currently hold.
+
+    Returns None (not an empty list) when the job doesn't exist yet or is
+    mid-run, so the caller can tell "genuinely zero Up Steady tickets right
+    now" apart from "nothing to check yet."
+    """
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if not job or not job.get("done"):
+        return None
+    entries = (job.get("results") or {}).get("false_positives") or []
+    units = {str((entry or {}).get("unit") or "").strip().upper() for entry in entries}
+    units.discard("")
+    return sorted(units)
+
+
+def _power_vs_cell_check_fn():
+    """check_fn adapter so this fits _run_fleet_check/_fleet_cache_route's
+    zero-arg contract — fleet_power_vs_cell_outage_status itself needs an
+    explicit unit list (it has no fleet-wide source of its own), supplied
+    here from the shared job's current Up Steady category."""
+    units = _up_steady_units_for_power_vs_cell()
+    if units is None:
+        return None, "Shared ticket-queue pull hasn't completed a run yet — nothing to check"
+    if not units:
+        return [], None
+    return work_tool.fleet_power_vs_cell_outage_status(units)
+
+
 def _snapshot_task_public(task):
     """Trim a shading_snapshots task row to what the UI needs — no internal
     subject text, just enough to render a status line + thumbnail link."""
@@ -2228,6 +2271,27 @@ def issues_fleet_battery_outlook():
 def issues_fleet_battery_outlook_cached():
     """Instant cached read for the Battery Outlook report — see issues_fleet_battery_outlook."""
     return _fleet_cached_route(_fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock)
+
+
+@app.route("/issues/fleet-power-vs-cell-outage", methods=["GET"])
+def issues_fleet_power_vs_cell_outage():
+    """
+    Power vs Cell Outage diagnostic for every unit currently in the Up
+    Steady (false_positives) list — live. SSH-heavy (see
+    fleet_power_vs_cell_outage_status), so slower than the VRM fleet checks
+    above; backs the Up Steady list's "Diagnose Up Steady (Cell/Power)"
+    button. The scheduled poll (every POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
+    is what keeps /cached warm without a tech ever pressing it.
+    """
+    return _fleet_cache_route(
+        _power_vs_cell_check_fn, _power_vs_cell_cache, _power_vs_cell_cache_lock,
+    )
+
+
+@app.route("/issues/fleet-power-vs-cell-outage/cached", methods=["GET"])
+def issues_fleet_power_vs_cell_outage_cached():
+    """Instant cached read for the Up Steady command-menu glyph — see issues_fleet_power_vs_cell_outage."""
+    return _fleet_cached_route(_power_vs_cell_cache, _power_vs_cell_cache_lock)
 
 
 @app.route("/issues/network-latency-history/<unit>", methods=["POST"])
@@ -3690,6 +3754,7 @@ def _start_arizona_validation_scheduler():
             (_fleet_dead_panel_loop, "fleet-dead-panel", FLEET_DEAD_PANEL_REFRESH_SECONDS, "Dead Panels"),
             (_fleet_vrm_freshness_loop, "fleet-vrm-freshness", FLEET_VRM_FRESHNESS_REFRESH_SECONDS, "VRM Disconnected"),
             (_fleet_battery_outlook_loop, "fleet-battery-outlook", FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS, "Battery Outlook"),
+            (_power_vs_cell_outage_loop, "power-vs-cell-outage", POWER_VS_CELL_OUTAGE_REFRESH_SECONDS, "Up Steady Power vs Cell"),
         ):
             fleet_thread = threading.Thread(target=loop_fn, daemon=True, name=thread_name)
             fleet_thread.start()
@@ -3883,6 +3948,31 @@ def _fleet_battery_outlook_loop():
         time.sleep(FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS)
 
 
+def _power_vs_cell_outage_loop():
+    """
+    Sixth stagger slot, after the other five (120/150/180/60/210s). Unlike
+    those, this one has nothing to check until the shared ticket-queue pull
+    has completed at least once — see _up_steady_units_for_power_vs_cell —
+    so it waits in a short retry loop for that (covers the ordinary startup
+    case, where a tech hasn't clicked Refresh Report yet) before settling
+    into the long steady-state interval. SSH into every Up Steady unit's
+    switch is heavier than the VRM fleet checks above, hence the longer
+    interval once it does start.
+    """
+    time.sleep(240)
+    while _up_steady_units_for_power_vs_cell() is None:
+        time.sleep(30)
+    while True:
+        try:
+            _run_fleet_check(
+                "power vs cell outage", _power_vs_cell_check_fn,
+                _power_vs_cell_cache, _power_vs_cell_cache_lock,
+            )
+        except Exception as exc:
+            print(f"Fleet power vs cell outage poll failed: {exc}")
+        time.sleep(POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
+
+
 def _run_due_shading_snapshot_tasks():
     """
     Process every snapshot task whose scheduled attempt has arrived:
@@ -3998,6 +4088,13 @@ FLEET_VRM_FRESHNESS_REFRESH_SECONDS = int(
 # minutes.
 FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS = int(
     (os.getenv("FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS") or "1800").strip() or "1800"
+)
+# Same interval as FLEET_POWER_STATUS — one real fan-out across every Up
+# Steady unit, most of which short-circuit on a cheap Zabbix-only check
+# (see unit_power_vs_cell_outage's docstring) and only SSH the ones with an
+# actual loss window to explain.
+POWER_VS_CELL_OUTAGE_REFRESH_SECONDS = int(
+    (os.getenv("POWER_VS_CELL_OUTAGE_REFRESH_SECONDS") or "1800").strip() or "1800"
 )
 # How often the shading-snapshot scheduler checks for due tasks. Short,
 # unlike the fleet-report polls above — a task's own next_attempt_at is

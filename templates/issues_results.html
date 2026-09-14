@@ -1119,6 +1119,35 @@
         .command-vrm-freshness-glyph.is-disconnected {
             border-color: var(--danger);
         }
+        /* Power vs Cell Outage — pure alert like shading/dead-panel/VRM
+           freshness above, only ever shown for an actual power_outage or
+           cell_outage verdict (see applyPowerVsCellGlyph; inconclusive and
+           no_recent_outage stay hidden, same "checked, nothing to say"
+           convention). One element, two looks: power gets the same danger
+           color as the dead-panel glyph (a hardware finding), cell gets the
+           same caution color as shading/VRM freshness (worth a look, not a
+           truck roll). Click re-runs the single-unit diagnostic for detail,
+           same as the Switch submenu's own button. */
+        .command-power-vs-cell-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 15px;
+            height: 15px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 9px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .command-power-vs-cell-glyph.is-power_outage {
+            border-color: var(--danger);
+        }
+        .command-power-vs-cell-glyph.is-cell_outage {
+            border-color: var(--caution-text);
+        }
         /* Battery Outlook's 5-day forecast — an info glyph, not an alert
            (see forecastGlyphElement): shown whenever a forecast resolved
            at all, regardless of risk, so unlike the alert-circle glyphs
@@ -2196,6 +2225,8 @@
                 Up Steady
                 <span class="count" id="false_positives_count"></span>
                 <span class="complete-badge">Complete</span>
+                <button type="button" id="power_vs_cell_sweep_btn" class="list-revalidate-btn"
+                    title="SSH every Up Steady unit's switch to tell power outage from cell outage (see the Switch submenu's own Power vs Cell Outage check)">Diagnose Up Steady (Cell/Power)</button>
             </h2>
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
             </div>
@@ -6526,6 +6557,7 @@
             const batteryGlyph = row.querySelector(".command-battery-glyph");
             const vrmFreshnessGlyph = row.querySelector(".command-vrm-freshness-glyph");
             const forecastGlyph = row.querySelector(".command-forecast-glyph");
+            const powerVsCellGlyph = row.querySelector(".command-power-vs-cell-glyph");
             // The connectivity LED (see renderList) has no hidden/shown
             // toggle of its own — once it's present at all, it's always
             // showing a real status (including the neutral idle color),
@@ -6534,7 +6566,8 @@
             const anyVisible = (alarmGlyph && !alarmGlyph.hidden) || (powerGlyph && !powerGlyph.hidden)
                 || (shadingGlyph && !shadingGlyph.hidden) || (deadPanelGlyph && !deadPanelGlyph.hidden)
                 || (batteryGlyph && !batteryGlyph.hidden) || (vrmFreshnessGlyph && !vrmFreshnessGlyph.hidden)
-                || (forecastGlyph && !forecastGlyph.hidden) || !!led;
+                || (forecastGlyph && !forecastGlyph.hidden) || (powerVsCellGlyph && !powerVsCellGlyph.hidden)
+                || !!led;
             row.hidden = !anyVisible;
         }
 
@@ -6554,6 +6587,44 @@
             glyph.hidden = false;
             glyph.classList.toggle("is-corroborated", !!info.corroborated);
             glyph.title = powerInfraAlertSummaryText(unit, info) + "\n(click for detail)";
+            refreshCommandMenuStatusRowVisibility(commandMenu);
+        }
+
+        // ---- Power vs Cell Outage glyph ---------------------------------------
+        // Same bulk-cache-plus-periodic-poll shape as powerInfraAlarmedUnits
+        // above, deliberately NOT the lazy on-open-fetch pattern the
+        // power/shading/dead-panel/forecast glyphs use — the underlying
+        // check is SSH-based (see unit_power_vs_cell_outage), so doing it
+        // per command-menu-open would hammer a switch every time someone
+        // clicked a row. Instead the server sweeps every current Up Steady
+        // unit on its own schedule (see POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
+        // and this just polls the cheap cached result.
+        let powerVsCellAlarmedUnits = {};
+
+        function powerVsCellSummaryText(unit, info) {
+            return (info.summary || "") + "\n(click to re-check now)";
+        }
+
+        function applyPowerVsCellGlyph(commandMenu) {
+            const glyph = commandMenu.querySelector(".command-power-vs-cell-glyph");
+            if (!glyph) {
+                return;
+            }
+            const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+            const info = powerVsCellAlarmedUnits[unit];
+            // Only power_outage/cell_outage are worth a glyph — inconclusive
+            // and no_recent_outage are "checked, nothing to say," same
+            // convention as the shading/dead-panel/VRM-freshness glyphs.
+            if (!info || (info.verdict !== "power_outage" && info.verdict !== "cell_outage")) {
+                glyph.hidden = true;
+                glyph.title = "";
+                refreshCommandMenuStatusRowVisibility(commandMenu);
+                return;
+            }
+            glyph.hidden = false;
+            glyph.textContent = info.verdict === "power_outage" ? "⚡" : "📶";
+            glyph.className = "command-power-vs-cell-glyph is-" + info.verdict;
+            glyph.title = powerVsCellSummaryText(unit, info);
             refreshCommandMenuStatusRowVisibility(commandMenu);
         }
 
@@ -7183,6 +7254,94 @@
                 });
         }
         pollPowerInfraAlertsCache();
+
+        // Same shape as pollPowerInfraAlertsCache, off the Up Steady
+        // sweep's own cache (never SSHes anything itself — see
+        // POWER_VS_CELL_OUTAGE_REFRESH_SECONDS). A slower interval than the
+        // alarm poll's 45s is fine: the underlying sweep only refreshes
+        // every 30 minutes server-side, so polling faster than that just
+        // burns a request for nothing.
+        function pollPowerVsCellCache() {
+            fetch("/issues/fleet-power-vs-cell-outage/cached")
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const next = {};
+                    (data.rows || []).forEach(function (row) {
+                        if (row && row.unit) {
+                            next[String(row.unit).toUpperCase()] = row;
+                        }
+                    });
+                    powerVsCellAlarmedUnits = next;
+                    document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
+                        applyPowerVsCellGlyph(commandMenu);
+                    });
+                })
+                .catch(function () {})
+                .finally(function () {
+                    setTimeout(pollPowerVsCellCache, 60000);
+                });
+        }
+        pollPowerVsCellCache();
+
+        // Manual "diagnose all" — forces the sweep to run right now instead
+        // of waiting for the next scheduled pass, same
+        // disable-while-running convention as revalidateList's button.
+        (function wirePowerVsCellSweepButton() {
+            const btn = document.getElementById("power_vs_cell_sweep_btn");
+            if (!btn) {
+                return;
+            }
+            let inFlight = false;
+            btn.addEventListener("click", function () {
+                if (inFlight) {
+                    return;
+                }
+                inFlight = true;
+                const originalLabel = btn.textContent;
+                btn.disabled = true;
+                btn.textContent = "Diagnosing...";
+                statusEl.textContent = "Diagnosing Up Steady units (cell/power)...";
+                fetch("/issues/fleet-power-vs-cell-outage")
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        const rows = data.rows || [];
+                        const next = {};
+                        rows.forEach(function (row) {
+                            if (row && row.unit) {
+                                next[String(row.unit).toUpperCase()] = row;
+                            }
+                        });
+                        powerVsCellAlarmedUnits = next;
+                        document.querySelectorAll("details.command-menu").forEach(function (commandMenu) {
+                            applyPowerVsCellGlyph(commandMenu);
+                        });
+                        const findings = rows.filter(function (row) {
+                            return row.verdict === "power_outage" || row.verdict === "cell_outage";
+                        });
+                        statusEl.textContent = "Diagnosed " + rows.length + " Up Steady unit"
+                            + (rows.length === 1 ? "" : "s") + " — " + findings.length
+                            + " power/cell finding" + (findings.length === 1 ? "" : "s") + ".";
+                    })
+                    .catch(function (error) {
+                        const message = "Up Steady power/cell diagnosis failed: " + (error.message || error);
+                        consoleLines.push(message);
+                        renderConsole(true);
+                        statusEl.textContent = message;
+                    })
+                    .finally(function () {
+                        inFlight = false;
+                        btn.disabled = false;
+                        btn.textContent = originalLabel;
+                    });
+            });
+        })();
 
         // ---- Busy flag -------------------------------------------------------
         // The per-unit lock already exists server-side; this surfaces it on the
@@ -8164,11 +8323,50 @@
             forecastGlyph.className = "command-forecast-glyph";
             forecastGlyph.hidden = true;
             statusRow.appendChild(forecastGlyph);
+            // Power vs Cell Outage — filled in by applyPowerVsCellGlyph off
+            // the scheduled sweep's cache (see pollPowerVsCellCache), same
+            // bulk pattern as the ⚠ alarm glyph. Click re-runs the
+            // single-unit check fresh (same endpoint as the Switch
+            // submenu's own button) rather than waiting for the next sweep.
+            const powerVsCellGlyph = document.createElement("span");
+            powerVsCellGlyph.className = "command-power-vs-cell-glyph";
+            powerVsCellGlyph.hidden = true;
+            powerVsCellGlyph.addEventListener("click", function (event) {
+                event.stopPropagation();
+                const unit = String(commandMenu.dataset.unit || "").toUpperCase();
+                if (!unit) {
+                    return;
+                }
+                const previousTitle = powerVsCellGlyph.title;
+                powerVsCellGlyph.title = "Checking " + unit + "...";
+                fetch("/issues/power-vs-cell-outage/" + encodeURIComponent(unit), {
+                    method: "POST",
+                })
+                    .then(function (response) { return response.json(); })
+                    .then(function (data) {
+                        if (!data.ok) {
+                            powerVsCellGlyph.title = previousTitle;
+                            notify("Power vs Cell Outage re-check failed for " + unit + ": " + (data.error || "unknown error"), "error");
+                            return;
+                        }
+                        consoleLines.push(data.summary || (unit + " — " + data.verdict));
+                        renderConsole(true);
+                        notify(data.summary || (unit + " — " + data.verdict), data.status === "warn" ? "error" : "info");
+                        powerVsCellAlarmedUnits[unit] = data;
+                        applyPowerVsCellGlyph(commandMenu);
+                    })
+                    .catch(function (error) {
+                        powerVsCellGlyph.title = previousTitle;
+                        notify("Power vs Cell Outage re-check failed for " + unit + ": " + (error.message || error), "error");
+                    });
+            });
+            statusRow.appendChild(powerVsCellGlyph);
             commandItems.appendChild(statusRow);
 
             commandMenuEntries.set(commandMenu, entry);
             wireCommandMenuToggle(commandMenu, rowEl);
             applyPowerInfraGlyph(commandMenu);
+            applyPowerVsCellGlyph(commandMenu);
             return {
                 commandMenu: commandMenu,
                 commandItems: commandItems,
