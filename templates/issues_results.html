@@ -1345,6 +1345,24 @@
             color: var(--text-muted);
             font-size: 13px;
         }
+        /* Scroll-to-zoom hint — quiet by default (a chart that's easy to
+           miss is better than one that shouts), brightens once actually
+           zoomed so it's obvious there's more of the series off-screen
+           and that double-click gets it back. */
+        .battery-chart-zoom-hint {
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            font-size: 9px;
+            color: var(--text-muted);
+            opacity: 0.55;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .battery-chart-zoom-hint.is-zoomed {
+            color: var(--accent-softer);
+            opacity: 0.9;
+        }
         .panel li:has(.command-menu[open]),
         .panel li.menu-open {
             z-index: 400;
@@ -5277,112 +5295,10 @@
                 return;
             }
 
-            const xs = points.map(function (p) { return p.t; });
-            const ys = points.map(function (p) { return p.v; });
-            const xMin = Math.min.apply(null, xs);
-            const xMax = Math.max.apply(null, xs);
-            const yMinRaw = Math.min.apply(null, ys);
-            const yMaxRaw = Math.max.apply(null, ys);
-            const yPad = (yMaxRaw - yMinRaw) * 0.12 || Math.abs(yMaxRaw) * 0.05 || 1;
-            const yLo = yMinRaw - yPad;
-            const yHi = yMaxRaw + yPad;
-
-            function xPos(t) {
-                return padding.left + (xMax === xMin ? plotW / 2 : (t - xMin) / (xMax - xMin) * plotW);
-            }
-            function yPos(v) {
-                return padding.top + (yHi === yLo ? plotH / 2 : (yHi - v) / (yHi - yLo) * plotH);
-            }
-
             const svgNS = "http://www.w3.org/2000/svg";
-            const svg = document.createElementNS(svgNS, "svg");
-            svg.setAttribute("viewBox", "0 0 " + width + " " + height);
-            svg.setAttribute("class", "battery-chart-svg");
-            svg.setAttribute("role", "img");
-            svg.setAttribute(
-                "aria-label",
-                options.label + ": " + points.length + " readings, "
-                    + ys[0].toFixed(1) + " to " + ys[ys.length - 1].toFixed(1) + " " + options.unit
-            );
-
-            // The finding's own time window (see the Diagnostic Header's
-            // "View Graph" action) — drawn first so grid/line/threshold
-            // all render on top of it. Silently does nothing if the
-            // window doesn't overlap this chart's own x domain at all
-            // (e.g. a shading window from hours ago on a chart currently
-            // showing only the last hour).
-            if (
-                options.highlightRange
-                && options.highlightRange.endMs >= xMin
-                && options.highlightRange.startMs <= xMax
-            ) {
-                const hx1 = xPos(Math.max(options.highlightRange.startMs, xMin));
-                const hx2 = xPos(Math.min(options.highlightRange.endMs, xMax));
-                const highlightRect = document.createElementNS(svgNS, "rect");
-                highlightRect.setAttribute("x", hx1);
-                highlightRect.setAttribute("y", padding.top);
-                highlightRect.setAttribute("width", Math.max(1, hx2 - hx1));
-                highlightRect.setAttribute("height", plotH);
-                highlightRect.setAttribute("class", "battery-chart-highlight");
-                svg.appendChild(highlightRect);
-                if (options.highlightRange.label) {
-                    const highlightLabel = document.createElementNS(svgNS, "text");
-                    highlightLabel.textContent = options.highlightRange.label;
-                    highlightLabel.setAttribute("x", (hx1 + hx2) / 2);
-                    highlightLabel.setAttribute("y", padding.top + 9);
-                    highlightLabel.setAttribute("class", "battery-chart-highlight-label");
-                    highlightLabel.setAttribute("text-anchor", "middle");
-                    svg.appendChild(highlightLabel);
-                }
-            }
-
-            [0, 0.5, 1].forEach(function (frac) {
-                const y = padding.top + frac * plotH;
-                const line = document.createElementNS(svgNS, "line");
-                line.setAttribute("x1", padding.left);
-                line.setAttribute("x2", width - padding.right);
-                line.setAttribute("y1", y);
-                line.setAttribute("y2", y);
-                line.setAttribute("class", "battery-chart-grid");
-                svg.appendChild(line);
-                const label = document.createElementNS(svgNS, "text");
-                label.textContent = (yHi - frac * (yHi - yLo)).toFixed(1);
-                label.setAttribute("x", padding.left - 6);
-                label.setAttribute("y", y + 3);
-                label.setAttribute("class", "battery-chart-axis-label");
-                label.setAttribute("text-anchor", "end");
-                svg.appendChild(label);
-            });
-
-            // Reference lines (e.g. a low-battery cutoff) — only ever
-            // added by the caller for a metric where a fixed number is
-            // actually meaningful regardless of system (SOC is a % of
-            // capacity on any battery; a voltage cutoff would need to
-            // know the trailer's system voltage first, which nothing here
-            // currently knows reliably, so no threshold is drawn for
-            // voltage — see renderGraphs).
-            (options.thresholds || []).forEach(function (threshold) {
-                if (threshold.value < yLo || threshold.value > yHi) {
-                    return;
-                }
-                const y = yPos(threshold.value);
-                const line = document.createElementNS(svgNS, "line");
-                line.setAttribute("x1", padding.left);
-                line.setAttribute("x2", width - padding.right);
-                line.setAttribute("y1", y);
-                line.setAttribute("y2", y);
-                line.setAttribute("class", "battery-chart-threshold");
-                svg.appendChild(line);
-                if (threshold.label) {
-                    const label = document.createElementNS(svgNS, "text");
-                    label.textContent = threshold.label;
-                    label.setAttribute("x", width - padding.right - 4);
-                    label.setAttribute("y", y - 3);
-                    label.setAttribute("class", "battery-chart-threshold-label");
-                    label.setAttribute("text-anchor", "end");
-                    svg.appendChild(label);
-                }
-            });
+            const dataXMin = Math.min.apply(null, points.map(function (p) { return p.t; }));
+            const dataXMax = Math.max.apply(null, points.map(function (p) { return p.t; }));
+            const dataYs = points.map(function (p) { return p.v; });
 
             // A straight line drawn across a real data gap (the unit
             // stopped reporting for a while) visually claims continuity
@@ -5395,6 +5311,7 @@
             // fixed number — a 15-min-interval window and an hourly-trend
             // one have very different normal cadences) with a 30-minute
             // floor so ordinary polling jitter never triggers a false break.
+            // Computed once off the full series — unaffected by zoom.
             const gaps = [];
             for (let i = 1; i < points.length; i++) {
                 gaps.push(points[i].t - points[i - 1].t);
@@ -5403,82 +5320,265 @@
             const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0;
             const gapThresholdMs = Math.max(medianGap * 4, 30 * 60 * 1000);
 
-            const pathD = points.map(function (p, i) {
-                const isGapStart = i > 0 && (p.t - points[i - 1].t) > gapThresholdMs;
-                return (i === 0 || isGapStart ? "M" : "L") + xPos(p.t).toFixed(1) + "," + yPos(p.v).toFixed(1);
-            }).join(" ");
-            const path = document.createElementNS(svgNS, "path");
-            path.setAttribute("d", pathD);
-            path.setAttribute("class", "battery-chart-line");
-            path.setAttribute("fill", "none");
-            svg.appendChild(path);
+            // Scroll-to-zoom state — a view window into [dataXMin, dataXMax].
+            // Starts full width; scrolling narrows/widens it around the
+            // cursor's own time position and Y auto-rescales to whatever's
+            // currently visible, same as most interactive chart tools.
+            // Independent per chart (its own closure/SVG) — deliberately
+            // not linked across the modal's stacked charts, which would
+            // need real shared state this modal doesn't have today.
+            let viewMin = dataXMin;
+            let viewMax = dataXMax;
+            // Below this span there's nothing meaningfully narrower to
+            // show — Zabbix's own finest native poll interval is ~3 min.
+            const MIN_SPAN_MS = 3 * 60 * 1000;
 
-            const crosshair = document.createElementNS(svgNS, "line");
-            crosshair.setAttribute("class", "battery-chart-crosshair");
-            crosshair.setAttribute("y1", padding.top);
-            crosshair.setAttribute("y2", height - padding.bottom);
-            crosshair.style.display = "none";
-            svg.appendChild(crosshair);
-
-            const dot = document.createElementNS(svgNS, "circle");
-            dot.setAttribute("r", 3.5);
-            dot.setAttribute("class", "battery-chart-dot");
-            dot.style.display = "none";
-            svg.appendChild(dot);
-
-            const overlay = document.createElementNS(svgNS, "rect");
-            overlay.setAttribute("x", padding.left);
-            overlay.setAttribute("y", padding.top);
-            overlay.setAttribute("width", plotW);
-            overlay.setAttribute("height", plotH);
-            overlay.setAttribute("fill", "transparent");
-            svg.appendChild(overlay);
+            container.style.position = "relative";
+            const svg = document.createElementNS(svgNS, "svg");
+            svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+            svg.setAttribute("class", "battery-chart-svg");
+            svg.setAttribute("role", "img");
+            container.appendChild(svg);
 
             const tooltip = document.createElement("div");
             tooltip.className = "battery-chart-tooltip";
             tooltip.hidden = true;
+            container.appendChild(tooltip);
 
-            function nearestPoint(clientX) {
-                const rect = svg.getBoundingClientRect();
-                const svgX = (clientX - rect.left) / rect.width * width;
-                const t = xMin + (svgX - padding.left) / plotW * (xMax - xMin);
-                let nearest = points[0];
-                let bestDiff = Infinity;
-                points.forEach(function (p) {
-                    const diff = Math.abs(p.t - t);
-                    if (diff < bestDiff) {
-                        bestDiff = diff;
-                        nearest = p;
+            const zoomHint = document.createElement("div");
+            zoomHint.className = "battery-chart-zoom-hint";
+            zoomHint.textContent = "scroll to zoom · dbl-click to reset";
+            container.appendChild(zoomHint);
+
+            function draw() {
+                svg.innerHTML = "";
+                svg.setAttribute(
+                    "aria-label",
+                    options.label + ": " + points.length + " readings, "
+                        + dataYs[0].toFixed(1) + " to " + dataYs[dataYs.length - 1].toFixed(1) + " " + options.unit
+                );
+
+                // Y rescales to whatever's actually in view, not the
+                // series' full range — falls back to the full range if
+                // the current window happens to contain zero points
+                // (a real gap zoomed into).
+                const visible = points.filter(function (p) { return p.t >= viewMin && p.t <= viewMax; });
+                const ys = (visible.length ? visible : points).map(function (p) { return p.v; });
+                const yMinRaw = Math.min.apply(null, ys);
+                const yMaxRaw = Math.max.apply(null, ys);
+                const yPad = (yMaxRaw - yMinRaw) * 0.12 || Math.abs(yMaxRaw) * 0.05 || 1;
+                const yLo = yMinRaw - yPad;
+                const yHi = yMaxRaw + yPad;
+
+                function xPos(t) {
+                    return padding.left + (viewMax === viewMin ? plotW / 2 : (t - viewMin) / (viewMax - viewMin) * plotW);
+                }
+                function yPos(v) {
+                    return padding.top + (yHi === yLo ? plotH / 2 : (yHi - v) / (yHi - yLo) * plotH);
+                }
+
+                // The finding's own time window (see the Diagnostic Header's
+                // "View Graph" action) — drawn first so grid/line/threshold
+                // all render on top of it. Silently does nothing if the
+                // window doesn't overlap the current view at all (e.g. a
+                // shading window from hours ago while zoomed into a recent
+                // few minutes).
+                if (
+                    options.highlightRange
+                    && options.highlightRange.endMs >= viewMin
+                    && options.highlightRange.startMs <= viewMax
+                ) {
+                    const hx1 = xPos(Math.max(options.highlightRange.startMs, viewMin));
+                    const hx2 = xPos(Math.min(options.highlightRange.endMs, viewMax));
+                    const highlightRect = document.createElementNS(svgNS, "rect");
+                    highlightRect.setAttribute("x", hx1);
+                    highlightRect.setAttribute("y", padding.top);
+                    highlightRect.setAttribute("width", Math.max(1, hx2 - hx1));
+                    highlightRect.setAttribute("height", plotH);
+                    highlightRect.setAttribute("class", "battery-chart-highlight");
+                    svg.appendChild(highlightRect);
+                    if (options.highlightRange.label) {
+                        const highlightLabel = document.createElementNS(svgNS, "text");
+                        highlightLabel.textContent = options.highlightRange.label;
+                        highlightLabel.setAttribute("x", (hx1 + hx2) / 2);
+                        highlightLabel.setAttribute("y", padding.top + 9);
+                        highlightLabel.setAttribute("class", "battery-chart-highlight-label");
+                        highlightLabel.setAttribute("text-anchor", "middle");
+                        svg.appendChild(highlightLabel);
+                    }
+                }
+
+                [0, 0.5, 1].forEach(function (frac) {
+                    const y = padding.top + frac * plotH;
+                    const line = document.createElementNS(svgNS, "line");
+                    line.setAttribute("x1", padding.left);
+                    line.setAttribute("x2", width - padding.right);
+                    line.setAttribute("y1", y);
+                    line.setAttribute("y2", y);
+                    line.setAttribute("class", "battery-chart-grid");
+                    svg.appendChild(line);
+                    const label = document.createElementNS(svgNS, "text");
+                    label.textContent = (yHi - frac * (yHi - yLo)).toFixed(1);
+                    label.setAttribute("x", padding.left - 6);
+                    label.setAttribute("y", y + 3);
+                    label.setAttribute("class", "battery-chart-axis-label");
+                    label.setAttribute("text-anchor", "end");
+                    svg.appendChild(label);
+                });
+
+                // Reference lines (e.g. a low-battery cutoff) — only ever
+                // added by the caller for a metric where a fixed number is
+                // actually meaningful regardless of system (SOC is a % of
+                // capacity on any battery; a voltage cutoff would need to
+                // know the trailer's system voltage first, which nothing here
+                // currently knows reliably, so no threshold is drawn for
+                // voltage — see renderGraphs).
+                (options.thresholds || []).forEach(function (threshold) {
+                    if (threshold.value < yLo || threshold.value > yHi) {
+                        return;
+                    }
+                    const y = yPos(threshold.value);
+                    const line = document.createElementNS(svgNS, "line");
+                    line.setAttribute("x1", padding.left);
+                    line.setAttribute("x2", width - padding.right);
+                    line.setAttribute("y1", y);
+                    line.setAttribute("y2", y);
+                    line.setAttribute("class", "battery-chart-threshold");
+                    svg.appendChild(line);
+                    if (threshold.label) {
+                        const label = document.createElementNS(svgNS, "text");
+                        label.textContent = threshold.label;
+                        label.setAttribute("x", width - padding.right - 4);
+                        label.setAttribute("y", y - 3);
+                        label.setAttribute("class", "battery-chart-threshold-label");
+                        label.setAttribute("text-anchor", "end");
+                        svg.appendChild(label);
                     }
                 });
-                return nearest;
+
+                // Drawn from the FULL points array, not just the visible
+                // window — xPos naturally pushes an off-view point outside
+                // the viewBox, which clips (SVG's default overflow:hidden
+                // on the root), so the path still looks right at a zoomed
+                // edge without needing to slice the data first.
+                const pathD = points.map(function (p, i) {
+                    const isGapStart = i > 0 && (p.t - points[i - 1].t) > gapThresholdMs;
+                    return (i === 0 || isGapStart ? "M" : "L") + xPos(p.t).toFixed(1) + "," + yPos(p.v).toFixed(1);
+                }).join(" ");
+                const path = document.createElementNS(svgNS, "path");
+                path.setAttribute("d", pathD);
+                path.setAttribute("class", "battery-chart-line");
+                path.setAttribute("fill", "none");
+                svg.appendChild(path);
+
+                const crosshair = document.createElementNS(svgNS, "line");
+                crosshair.setAttribute("class", "battery-chart-crosshair");
+                crosshair.setAttribute("y1", padding.top);
+                crosshair.setAttribute("y2", height - padding.bottom);
+                crosshair.style.display = "none";
+                svg.appendChild(crosshair);
+
+                const dot = document.createElementNS(svgNS, "circle");
+                dot.setAttribute("r", 3.5);
+                dot.setAttribute("class", "battery-chart-dot");
+                dot.style.display = "none";
+                svg.appendChild(dot);
+
+                const overlay = document.createElementNS(svgNS, "rect");
+                overlay.setAttribute("x", padding.left);
+                overlay.setAttribute("y", padding.top);
+                overlay.setAttribute("width", plotW);
+                overlay.setAttribute("height", plotH);
+                overlay.setAttribute("fill", "transparent");
+                svg.appendChild(overlay);
+
+                function timeAtClientX(clientX) {
+                    const rect = svg.getBoundingClientRect();
+                    const svgX = (clientX - rect.left) / rect.width * width;
+                    const frac = Math.min(1, Math.max(0, (svgX - padding.left) / plotW));
+                    return viewMin + frac * (viewMax - viewMin);
+                }
+
+                function nearestPoint(clientX) {
+                    const t = timeAtClientX(clientX);
+                    let nearest = points[0];
+                    let bestDiff = Infinity;
+                    points.forEach(function (p) {
+                        const diff = Math.abs(p.t - t);
+                        if (diff < bestDiff) {
+                            bestDiff = diff;
+                            nearest = p;
+                        }
+                    });
+                    return nearest;
+                }
+
+                overlay.addEventListener("mousemove", function (event) {
+                    const nearest = nearestPoint(event.clientX);
+                    const x = xPos(nearest.t);
+                    const y = yPos(nearest.v);
+                    crosshair.setAttribute("x1", x);
+                    crosshair.setAttribute("x2", x);
+                    crosshair.style.display = "";
+                    dot.setAttribute("cx", x);
+                    dot.setAttribute("cy", y);
+                    dot.style.display = "";
+                    tooltip.hidden = false;
+                    tooltip.textContent = new Date(nearest.t).toLocaleString() + " — "
+                        + nearest.v.toFixed(2) + " " + options.unit;
+                    const leftPct = (x / width) * 100;
+                    tooltip.style.left = Math.min(Math.max(leftPct, 5), 75) + "%";
+                });
+                overlay.addEventListener("mouseleave", function () {
+                    crosshair.style.display = "none";
+                    dot.style.display = "none";
+                    tooltip.hidden = true;
+                });
+
+                // Scroll to zoom, centered on the cursor's own time
+                // position — narrows/widens [viewMin, viewMax] and
+                // redraws. preventDefault (needs {passive:false} — wheel
+                // listeners default to passive) so this doesn't ALSO
+                // scroll the graphs modal itself while the cursor's over
+                // a chart.
+                overlay.addEventListener("wheel", function (event) {
+                    event.preventDefault();
+                    if (dataXMax === dataXMin) {
+                        return;
+                    }
+                    const cursorT = timeAtClientX(event.clientX);
+                    const zoomFactor = event.deltaY < 0 ? 0.8 : 1.25;
+                    const currentSpan = viewMax - viewMin;
+                    const span = Math.max(MIN_SPAN_MS, Math.min(dataXMax - dataXMin, currentSpan * zoomFactor));
+                    const ratio = span / currentSpan;
+                    let newMin = cursorT - (cursorT - viewMin) * ratio;
+                    let newMax = newMin + span;
+                    if (newMin < dataXMin) {
+                        newMin = dataXMin;
+                        newMax = newMin + span;
+                    }
+                    if (newMax > dataXMax) {
+                        newMax = dataXMax;
+                        newMin = newMax - span;
+                    }
+                    viewMin = Math.max(dataXMin, newMin);
+                    viewMax = Math.min(dataXMax, newMax);
+                    zoomHint.classList.toggle("is-zoomed", viewMin > dataXMin || viewMax < dataXMax);
+                    draw();
+                }, { passive: false });
+
+                overlay.addEventListener("dblclick", function () {
+                    if (viewMin === dataXMin && viewMax === dataXMax) {
+                        return;
+                    }
+                    viewMin = dataXMin;
+                    viewMax = dataXMax;
+                    zoomHint.classList.remove("is-zoomed");
+                    draw();
+                });
             }
 
-            overlay.addEventListener("mousemove", function (event) {
-                const nearest = nearestPoint(event.clientX);
-                const x = xPos(nearest.t);
-                const y = yPos(nearest.v);
-                crosshair.setAttribute("x1", x);
-                crosshair.setAttribute("x2", x);
-                crosshair.style.display = "";
-                dot.setAttribute("cx", x);
-                dot.setAttribute("cy", y);
-                dot.style.display = "";
-                tooltip.hidden = false;
-                tooltip.textContent = new Date(nearest.t).toLocaleString() + " — "
-                    + nearest.v.toFixed(2) + " " + options.unit;
-                const leftPct = (x / width) * 100;
-                tooltip.style.left = Math.min(Math.max(leftPct, 5), 75) + "%";
-            });
-            overlay.addEventListener("mouseleave", function () {
-                crosshair.style.display = "none";
-                dot.style.display = "none";
-                tooltip.hidden = true;
-            });
-
-            container.style.position = "relative";
-            container.appendChild(svg);
-            container.appendChild(tooltip);
+            draw();
         }
 
         function renderGraphs(data) {
