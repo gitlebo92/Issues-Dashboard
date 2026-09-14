@@ -11427,12 +11427,13 @@
                             ? "Scrypted is offline or needs verification"
                             : entry.computeLabel + " is offline or needs verification";
                     }
-                    // Not appended here — moved into the expanded command
-                    // menu's status row below, alongside the alarm/power/
-                    // shading/dead-panel glyphs (see "leds.forEach" further
-                    // down), so every per-unit status indicator lives in
-                    // one place once the menu is open, not scattered
-                    // across the row and the button.
+                    // Appended to the row itself here; the "rowLed" block
+                    // further down also drops a CLONE of whichever LED
+                    // applies into the expanded command menu's status row,
+                    // so the same status is visible both at a glance on
+                    // the row and inside the menu alongside the alarm/
+                    // power/shading/dead-panel glyphs.
+                    rowBody.appendChild(computeLed);
                 }
 
                 let speakerLed = null;
@@ -11448,6 +11449,7 @@
                             : (entry.speakerUp === false ? "Speaker is down" : "Speaker status unknown");
                     }
                     updateSpeakerLed();
+                    rowBody.appendChild(speakerLed);
                 }
 
                 let cameraLed = null;
@@ -11461,6 +11463,7 @@
                         : (entry.cameraUp === false
                             ? entry.cameraLabel + " is down"
                             : entry.cameraLabel + " status unknown");
+                    rowBody.appendChild(cameraLed);
                 }
 
                 let panelLed = null;
@@ -11474,6 +11477,7 @@
                         : (entry.panelFisheyeUp === false
                             ? "Fisheye is down"
                             : "Fisheye status unknown");
+                    rowBody.appendChild(panelLed);
                 }
 
                 appendWeatherIcon(rowBody, entry);
@@ -11544,14 +11548,17 @@
                 const commandItems = menuParts.commandItems;
                 // Whichever connectivity LED this row built above (at most
                 // one applies per row — list type and entry flags are
-                // mutually exclusive in practice) lives in the expanded
-                // menu's status row now, alongside the alarm/power/shading/
-                // dead-panel glyphs, instead of out on the row itself.
+                // mutually exclusive in practice) already sits on the row
+                // itself; a CLONE of it also goes into the expanded menu's
+                // status row, alongside the alarm/power/shading/dead-panel
+                // glyphs, so the same status is visible both places. A
+                // clone is safe here — none of these LEDs carry a click
+                // listener, just classes and a title.
                 const rowLed = computeLed || speakerLed || cameraLed || panelLed;
                 if (rowLed) {
                     const statusRow = commandItems.querySelector(".command-menu-status");
                     if (statusRow) {
-                        statusRow.insertBefore(rowLed, statusRow.firstChild);
+                        statusRow.insertBefore(rowLed.cloneNode(true), statusRow.firstChild);
                         statusRow.hidden = false;
                     }
                 }
@@ -13404,7 +13411,7 @@
             {
                 selector: ".command-menu[open] .command-menu-status",
                 title: "Status row",
-                body: "Nuance: this only appears when there's something to say — a clean unit with no alarms shows nothing here, not a quiet \"OK\". The LED reflects connectivity; the 🔌/🌳/🔧 glyphs are live checks (power / shading / dead panel) run the moment the menu opens and cached 5 minutes, so reopening the same menu right after doesn't refetch.",
+                body: "Nuance: the alert glyphs here only appear when there's something to say — a clean unit with no alarms shows nothing beyond the LED, not a quiet \"OK\". The connectivity LED is the same one on the row itself, repeated here for convenience. The 🔌/🌳/🔧 glyphs are live checks (power / shading / dead panel) run the moment the menu opens and cached 5 minutes, so reopening the same menu right after doesn't refetch.",
                 before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
             },
             {
