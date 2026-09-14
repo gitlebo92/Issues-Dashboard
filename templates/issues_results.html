@@ -1317,6 +1317,20 @@
             fill: var(--danger-text);
             font-size: 9px;
         }
+        /* A single point in time (see renderLineChart's `marker` option) —
+           distinct from the highlight above, which shades a WINDOW/
+           duration. Currently just "when the switch came back up" (see
+           openPowerVsCellRowDetail), so it gets the ok/resolution color
+           rather than the highlight's danger one — a solid line, not
+           dashed, so it doesn't read as another threshold reference. */
+        .battery-chart-marker {
+            stroke: var(--ok);
+            stroke-width: 1.5px;
+        }
+        .battery-chart-marker-label {
+            fill: var(--ok-text);
+            font-size: 9px;
+        }
         .battery-chart-crosshair {
             stroke: var(--text-muted);
             stroke-width: 1px;
@@ -5175,6 +5189,14 @@
         // openGraphsModal's optional 4th argument; every other caller
         // (Graphs submenu, report rows) omits it and gets a plain chart.
         let graphsHighlightRange = null;
+        // {tMs, label} or null — a single point in time worth marking on
+        // every chart, distinct from graphsHighlightRange's shaded WINDOW
+        // (a duration). Set by openGraphsModal's optional 6th argument —
+        // currently only openPowerVsCellRowDetail uses it, to mark when
+        // the switch itself came back up alongside the shaded loss window,
+        // so the relationship (or lack of one) between the two is visible
+        // on the graph, not just in the summary text.
+        let graphsMarker = null;
         // A fleet report row is keyed by its MU trailer (the actual VRM
         // installation), not the RD/FD head a tech would recognize from a
         // ticket subject — opening a graph straight from one of those rows
@@ -5332,6 +5354,14 @@
             // Below this span there's nothing meaningfully narrower to
             // show — Zabbix's own finest native poll interval is ~3 min.
             const MIN_SPAN_MS = 3 * 60 * 1000;
+            // Click-and-drag panning once zoomed in — outer-scope (not
+            // re-declared in draw()) so a drag survives the SVG rebuild
+            // each pan step triggers (draw() tears down and recreates the
+            // overlay it started on).
+            let isDragging = false;
+            let dragStartClientX = 0;
+            let dragStartViewMin = viewMin;
+            let dragStartViewMax = viewMax;
 
             container.style.position = "relative";
             const svg = document.createElementNS(svgNS, "svg");
@@ -5405,6 +5435,39 @@
                         highlightLabel.setAttribute("class", "battery-chart-highlight-label");
                         highlightLabel.setAttribute("text-anchor", "middle");
                         svg.appendChild(highlightLabel);
+                    }
+                }
+
+                // A single point in time — see renderLineChart's `marker`
+                // option, e.g. "switch came back up"
+                // (openPowerVsCellRowDetail) — drawn alongside (not
+                // instead of) any highlight range above, so the
+                // relationship between "when the outage was" and "when
+                // the switch rebooted" is visible on the graph itself,
+                // not just in the summary text. Label anchored at the
+                // bottom (the highlight's own label sits near the top) so
+                // the two don't collide when the marker lands inside or
+                // right at the edge of a highlighted window.
+                if (options.marker && options.marker.tMs >= viewMin && options.marker.tMs <= viewMax) {
+                    const mx = xPos(options.marker.tMs);
+                    const markerLine = document.createElementNS(svgNS, "line");
+                    markerLine.setAttribute("x1", mx);
+                    markerLine.setAttribute("x2", mx);
+                    markerLine.setAttribute("y1", padding.top);
+                    markerLine.setAttribute("y2", height - padding.bottom);
+                    markerLine.setAttribute("class", "battery-chart-marker");
+                    svg.appendChild(markerLine);
+                    if (options.marker.label) {
+                        const markerLabel = document.createElementNS(svgNS, "text");
+                        markerLabel.textContent = options.marker.label;
+                        markerLabel.setAttribute("x", mx);
+                        markerLabel.setAttribute("y", height - padding.bottom - 4);
+                        markerLabel.setAttribute("class", "battery-chart-marker-label");
+                        markerLabel.setAttribute(
+                            "text-anchor",
+                            mx > width - 100 ? "end" : (mx < 100 ? "start" : "middle")
+                        );
+                        svg.appendChild(markerLabel);
                     }
                 }
 
@@ -5490,6 +5553,10 @@
                 overlay.setAttribute("width", plotW);
                 overlay.setAttribute("height", plotH);
                 overlay.setAttribute("fill", "transparent");
+                // Re-applied every draw() (the overlay itself is rebuilt
+                // each time) — reflects whether a drag is currently in
+                // progress on THIS chart.
+                overlay.style.cursor = isDragging ? "grabbing" : "grab";
                 svg.appendChild(overlay);
 
                 function timeAtClientX(clientX) {
@@ -5514,6 +5581,12 @@
                 }
 
                 overlay.addEventListener("mousemove", function (event) {
+                    // A drag in progress moves the view itself — the
+                    // crosshair/tooltip tracking the cursor at the same
+                    // time would just be confusing noise on top of that.
+                    if (isDragging) {
+                        return;
+                    }
                     const nearest = nearestPoint(event.clientX);
                     const x = xPos(nearest.t);
                     const y = yPos(nearest.v);
@@ -5576,6 +5649,76 @@
                     zoomHint.classList.remove("is-zoomed");
                     draw();
                 });
+
+                // Click-and-drag to pan once zoomed in — content follows
+                // the cursor (drag right reveals what was off-screen to
+                // the left), same convention most chart/map tools use.
+                // mousemove/mouseup live on document, not the overlay: a
+                // drag calls draw() on every step (to show the pan live),
+                // which tears down and rebuilds this exact overlay, so a
+                // listener attached to IT specifically would stop
+                // receiving events mid-drag; document-level listeners
+                // don't have that problem, and also let the drag continue
+                // even if the cursor strays outside the small chart area.
+                // Added only while a drag is active and removed the
+                // moment it ends, so nothing accumulates across re-renders.
+                function onDragMove(event) {
+                    if (!isDragging) {
+                        return;
+                    }
+                    const rect = svg.getBoundingClientRect();
+                    const svgDeltaX = (event.clientX - dragStartClientX) / rect.width * width;
+                    const msPerSvgUnit = (dragStartViewMax - dragStartViewMin) / plotW;
+                    const deltaMs = svgDeltaX * msPerSvgUnit;
+                    const span = dragStartViewMax - dragStartViewMin;
+                    let newMin = dragStartViewMin - deltaMs;
+                    let newMax = dragStartViewMax - deltaMs;
+                    if (newMin < dataXMin) {
+                        newMin = dataXMin;
+                        newMax = newMin + span;
+                    }
+                    if (newMax > dataXMax) {
+                        newMax = dataXMax;
+                        newMin = newMax - span;
+                    }
+                    viewMin = newMin;
+                    viewMax = newMax;
+                    draw();
+                }
+                function onDragEnd() {
+                    if (!isDragging) {
+                        return;
+                    }
+                    isDragging = false;
+                    document.removeEventListener("mousemove", onDragMove);
+                    document.removeEventListener("mouseup", onDragEnd);
+                    // Re-applies the cursor on whichever overlay is
+                    // current (a drag's own onDragMove calls draw() on
+                    // every step, so "this" draw()'s overlay may already
+                    // be stale by the time the drag ends) — without this,
+                    // the cursor would stay stuck on "grabbing" until
+                    // something else happens to redraw the chart.
+                    draw();
+                }
+                overlay.addEventListener("mousedown", function (event) {
+                    // Only a plain, unmodified left-drag pans — ctrl/meta/
+                    // shift-click stay free for whatever the browser or a
+                    // future feature wants them for.
+                    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) {
+                        return;
+                    }
+                    event.preventDefault();
+                    isDragging = true;
+                    dragStartClientX = event.clientX;
+                    dragStartViewMin = viewMin;
+                    dragStartViewMax = viewMax;
+                    // Instant feedback — draw() only reapplies the cursor
+                    // on its own next call (the first onDragMove), which
+                    // could lag a real drag's first movement.
+                    overlay.style.cursor = "grabbing";
+                    document.addEventListener("mousemove", onDragMove);
+                    document.addEventListener("mouseup", onDragEnd);
+                });
             }
 
             draw();
@@ -5628,6 +5771,7 @@
                             // "definitely dying," on either chemistry.
                             thresholds: key === "soc" ? [{ value: 20, label: "20% low-battery reference" }] : [],
                             highlightRange: graphsHighlightRange,
+                            marker: graphsMarker,
                         }
                     );
                 }
@@ -5674,13 +5818,14 @@
                 });
         }
 
-        function openGraphsModal(unit, mode, subject, highlightRange, displayLabel) {
+        function openGraphsModal(unit, mode, subject, highlightRange, displayLabel, marker) {
             graphsMode = GRAPH_MODES[mode] ? mode : "battery";
             const modeConfig = GRAPH_MODES[graphsMode];
             graphsUnit = unit || "";
             graphsSubject = subject || "";
             graphsHighlightRange = highlightRange || null;
             graphsDisplayLabel = displayLabel || null;
+            graphsMarker = marker || null;
             graphsTitle.firstChild.textContent = modeConfig.titleText + " ";
             graphsSubtitle.textContent = graphsDisplayLabel || unit || "";
             const previousValue = graphsHours.value;
@@ -5697,12 +5842,18 @@
             if (modeConfig.hoursOptions.some(function (opt) { return String(opt.value) === previousValue; })) {
                 graphsHours.value = previousValue;
             }
-            // A highlight from hours/days ago is useless if the default
-            // window doesn't even reach back that far — widen to the
-            // smallest option that covers it (or the widest available,
-            // if none do).
-            if (graphsHighlightRange) {
-                const neededHours = Math.ceil((Date.now() - graphsHighlightRange.startMs) / 3600000) + 2;
+            // A highlight (or marker) from hours/days ago is useless if the
+            // default window doesn't even reach back that far — widen to
+            // the smallest option that covers the EARLIER of the two (they
+            // can be far apart — see openPowerVsCellRowDetail, where the
+            // switch's own reboot can be days after the loss window it's
+            // being compared against), or the widest available if none do.
+            if (graphsHighlightRange || graphsMarker) {
+                const earliestMs = Math.min(
+                    graphsHighlightRange ? graphsHighlightRange.startMs : Infinity,
+                    graphsMarker ? graphsMarker.tMs : Infinity
+                );
+                const neededHours = Math.ceil((Date.now() - earliestMs) / 3600000) + 2;
                 const covering = modeConfig.hoursOptions
                     .filter(function (opt) { return Number(opt.value) >= neededHours; })
                     .sort(function (a, b) { return Number(a.value) - Number(b.value); })[0];
@@ -6898,7 +7049,16 @@
                     label: info.verdict === "power_outage" ? "power outage window" : "cell outage window",
                 };
             }
-            openGraphsModal(unit, "network", subject || "", highlightRange);
+            // Marks when the switch itself came back up, separately from
+            // the shaded loss window above — the two can be far apart in
+            // time (see the "since rebooted again for an unrelated
+            // reason" verdict text), which is exactly when seeing both on
+            // one graph matters most.
+            let marker = null;
+            if (info.switch_up_since != null) {
+                marker = { tMs: info.switch_up_since * 1000, label: "switch came back up" };
+            }
+            openGraphsModal(unit, "network", subject || "", highlightRange, null, marker);
             const uptimeText = powerVsCellUptimeDetailText(info);
             const message = (info.summary || "") + (uptimeText ? "\n" + uptimeText : "");
             consoleLines.push(message);
