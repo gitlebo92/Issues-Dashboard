@@ -1359,6 +1359,16 @@ def _parse_switch_uptime_seconds(text):
 # ~3-minute native poll granularity, narrow enough that two genuinely
 # distinct events don't get conflated.
 _POWER_VS_CELL_TOLERANCE_SECONDS = 15 * 60
+# Same idea, widened for a loss window found in Zabbix trend data (see
+# unit_network_latency_history's use_trends) rather than native history —
+# past 7 days the window's own start/end only land on hourly buckets, not
+# individual ~3-minute polls, so the edge a real event lands on can be off
+# by close to an hour even before Zabbix's own poll jitter. Matching the
+# tight native tolerance against a coarse window would call a real
+# power/cell match "inconclusive" just because the edges don't line up to
+# the minute — this is the same comparison, just with room for the
+# resolution it's actually working with.
+_POWER_VS_CELL_TOLERANCE_SECONDS_COARSE = 90 * 60
 # How much loss counts as "fully down" for a window, not just flaky —
 # matches the "100%" a tech reads straight off the graph as a flat
 # plateau, with a little headroom so one missed/late poll doesn't split a
@@ -1391,7 +1401,7 @@ def _latest_high_loss_window(points, threshold=_POWER_VS_CELL_LOSS_THRESHOLD):
             run_start = None
             run_count = 0
     return best
-def unit_power_vs_cell_outage(unit, subject="", hours=72):
+def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
     """
     Power outage vs. cell/carrier outage for a down unit — automates the
     comparison a tech makes by hand: pull the switch's own uptime (when
@@ -1417,13 +1427,17 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
     if not unit:
         return None, "Missing unit"
     try:
-        # Capped at 7 days (not unit_network_latency_history's own 90d
-        # max) — past that it switches to hourly-trend data, which loses
-        # the per-poll timestamp precision this comparison's tolerance
-        # window depends on.
-        hours = max(1, min(int(hours), 24 * 7))
+        # Default/cap at 2 weeks, not unit_network_latency_history's own
+        # 90d max — a unit whose switch has been quietly up for many days
+        # can easily have its last real outage older than a 72h window
+        # (reported live: RD3122, switch up 5d+, "no recent outage window"
+        # against the old 72h default). Past 7 days the underlying Zabbix
+        # query switches to hourly-trend data (see use_trends below) —
+        # coarser, but _POWER_VS_CELL_TOLERANCE_SECONDS_COARSE accounts
+        # for that rather than silently losing precision.
+        hours = max(1, min(int(hours), 24 * 14))
     except (TypeError, ValueError):
-        hours = 72
+        hours = 24 * 14
 
     # Zabbix history first, deliberately — it's the cheap half of this
     # check (no SSH), and most units asked about here (especially a fleet
@@ -1436,6 +1450,14 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
         return None, latency_error
     loss_points = (
         ((latency_info or {}).get("charts") or {}).get("router_loss", {}).get("points") or []
+    )
+    # Which tolerance applies depends on what resolution the loss window
+    # itself was actually found in — see _POWER_VS_CELL_TOLERANCE_SECONDS_
+    # COARSE's own comment.
+    tolerance_seconds = (
+        _POWER_VS_CELL_TOLERANCE_SECONDS_COARSE
+        if (latency_info or {}).get("resolution") == "hourly average"
+        else _POWER_VS_CELL_TOLERANCE_SECONDS
     )
     window = _latest_high_loss_window(loss_points)
     if window is None:
@@ -1480,10 +1502,10 @@ def unit_power_vs_cell_outage(unit, subject="", hours=72):
     window_start_label = datetime.fromtimestamp(window_start, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     window_end_label = datetime.fromtimestamp(window_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    if abs(switch_up_since - window_end) <= _POWER_VS_CELL_TOLERANCE_SECONDS:
+    if abs(switch_up_since - window_end) <= tolerance_seconds:
         verdict = "power_outage"
         reason = "switch came back up right when pings resumed"
-    elif switch_up_since <= window_start - _POWER_VS_CELL_TOLERANCE_SECONDS:
+    elif switch_up_since <= window_start - tolerance_seconds:
         verdict = "cell_outage"
         reason = "switch has been up continuously since before the outage began"
     else:

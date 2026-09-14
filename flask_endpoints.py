@@ -2314,8 +2314,12 @@ def issues_power_vs_cell_outage(unit):
     work_tool.unit_power_vs_cell_outage).
     """
     payload = request.get_json(silent=True) or {}
-    hours = payload.get("hours") or request.args.get("hours") or 72
-    info, error = work_tool.unit_power_vs_cell_outage(unit, hours=hours)
+    hours = payload.get("hours") or request.args.get("hours")
+    # Only override when the caller actually asked for a different window
+    # — otherwise let unit_power_vs_cell_outage's own default (2 weeks)
+    # apply rather than pinning this route to a stale, shorter one.
+    kwargs = {"hours": hours} if hours else {}
+    info, error = work_tool.unit_power_vs_cell_outage(unit, **kwargs)
     if error:
         return jsonify({"ok": False, "error": error}), 400
     return jsonify({"ok": True, **info})

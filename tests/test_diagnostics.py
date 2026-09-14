@@ -529,6 +529,59 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(info["verdict"], "no_recent_outage")
 
+    def test_default_window_is_two_weeks_not_three_days(self):
+        # Reported live: RD3122's switch had been up 5+ days with nothing
+        # to compare against inside the old 72h default — the outage that
+        # actually explained it was simply older than the window checked.
+        captured = {}
+
+        def fake_latency_history(unit, hours):
+            captured["hours"] = hours
+            return {"charts": {"router_loss": {"points": []}}}, None
+
+        with mock.patch.object(
+            work_tool.diagnostics, "unit_network_latency_history",
+            side_effect=fake_latency_history,
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(captured["hours"], 24 * 14)
+        self.assertIn("336h", info["reason"])
+
+    def test_coarse_tolerance_applies_to_an_hourly_trend_window(self):
+        # Past 7 days, unit_network_latency_history falls back to Zabbix
+        # trend (hourly-average) data — the loss window's own start/end
+        # then only land on hour boundaries, not individual ~3-minute
+        # polls, so a switch that came up 40 minutes after the window
+        # "ended" (well outside the native 15-minute tolerance, but inside
+        # the widened one for this resolution) should still resolve as a
+        # real power-outage match, not inconclusive.
+        end = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)
+        start = end - dt.timedelta(hours=3)
+        uptime_seconds = int(
+            (dt.datetime.now(dt.timezone.utc) - (end + dt.timedelta(minutes=40))).total_seconds()
+        )
+        points = self._loss_points(start, end)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=(
+                    {
+                        "charts": {"router_loss": {"points": points}},
+                        "resolution": "hourly average",
+                    },
+                    None,
+                ),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": f"Uptime: 0 Days 0 Hours 0 Mins {uptime_seconds} Secs"}, None),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999", hours=24 * 14)
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "power_outage")
+
 
 if __name__ == "__main__":
     unittest.main()
