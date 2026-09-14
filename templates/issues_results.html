@@ -8066,6 +8066,9 @@
                 recentBox.appendChild(label);
             } else {
                 Array.from(recentBox.querySelectorAll(".command-recent-btn")).forEach(function (b) {
+                    if (b._syncObserver) {
+                        b._syncObserver.disconnect();
+                    }
                     b.remove();
                 });
             }
@@ -8077,6 +8080,24 @@
                 shortcut.title = "Recently used in this menu";
                 shortcut.addEventListener("click", function () {
                     item.original.click();
+                });
+                // The shortcut only re-triggers the real button's own click
+                // handler — that's what actually sets disabled/"Verb-ing..."
+                // while the action runs (see e.g. appendValidateButton) —
+                // but that happens on the ORIGINAL button, buried in its own
+                // submenu, out of sight. Without mirroring it here, clicking
+                // "Recent: Validate (Full)" looked like nothing happened
+                // (caught live: "recent buttons are lacking the feature" —
+                // the running-state feedback wasn't gone, just invisible on
+                // the one button anyone was actually looking at).
+                const syncRecentState = function () {
+                    shortcut.disabled = item.original.disabled;
+                    shortcut.textContent = item.original.textContent;
+                };
+                shortcut._syncObserver = new MutationObserver(syncRecentState);
+                shortcut._syncObserver.observe(item.original, {
+                    attributes: true, attributeFilter: ["disabled"],
+                    childList: true, characterData: true, subtree: true,
                 });
                 recentBox.appendChild(shortcut);
             });
