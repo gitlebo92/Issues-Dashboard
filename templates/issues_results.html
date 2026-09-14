@@ -62,6 +62,7 @@
             /* rgb triplets for rgba() tints of the colours above */
             --bg-deepest-rgb: 0, 0, 0;
             --bg-sunken-rgb: 6, 9, 11;
+            --accent-rgb: 42, 214, 238;
             --caution-border-rgb: 168, 102, 15;
             --ok-rgb: 46, 224, 138;
             --warn-rgb: 255, 212, 38;
@@ -809,6 +810,84 @@
             border-radius: var(--radius-pill);
             padding: 1px 6px;
             flex-shrink: 0;
+        }
+        /* ---- Guided tour --------------------------------------------------
+           Read-only by construction: the backdrop swallows every click on
+           the real page (pointer-events: auto) so nothing underneath can be
+           triggered by accident mid-tour, and the highlight ring is
+           pointer-events: none — it only ever points, never intercepts.
+           z-index sits above every existing modal (confirm dialogs top out
+           around 3100, command menus around 2000) so a tour step can point
+           at literally anything, including an open modal. */
+        .tour-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(var(--bg-deepest-rgb), 0.62);
+            z-index: 6000;
+        }
+        .tour-highlight {
+            position: fixed;
+            z-index: 6001;
+            border: 2px solid var(--accent);
+            border-radius: var(--radius);
+            box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.22), 0 0 24px rgba(var(--accent-rgb), 0.35);
+            pointer-events: none;
+            transition: top 0.15s ease, left 0.15s ease, width 0.15s ease, height 0.15s ease, opacity 0.1s ease;
+        }
+        .tour-highlight.is-hidden {
+            opacity: 0;
+        }
+        .tour-callout {
+            position: fixed;
+            z-index: 6002;
+            width: min(340px, calc(100vw - 32px));
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            box-shadow: 0 16px 40px rgba(var(--bg-deepest-rgb), 0.65);
+            padding: 16px;
+            transition: top 0.15s ease, left 0.15s ease;
+        }
+        .tour-callout-eyebrow {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--accent-soft);
+            margin: 0 0 4px;
+        }
+        .tour-callout h3 {
+            margin: 0 0 8px;
+            font-size: 15px;
+            color: var(--text-bright);
+        }
+        .tour-callout p {
+            margin: 0;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+        .tour-callout-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 14px;
+        }
+        .tour-callout-actions .tour-skip {
+            color: var(--text-muted);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 2px;
+            text-decoration: underline;
+        }
+        .tour-callout-spacer {
+            flex: 1;
+        }
+        .tour-callout-step {
+            font-size: 11px;
+            color: var(--text-muted);
         }
         .power-infra-row-stats {
             color: var(--text-muted);
@@ -1815,6 +1894,7 @@
                 <button type="button" id="resolve_selected" class="toolbar-btn" title="Remove every ticket with the Resolved checkbox checked" disabled>Resolve Selected (<span id="resolve_selected_count">0</span>)</button>
                 <button type="button" id="power_infra_toggle" class="toolbar-btn" title="Experimental: Zabbix active problems x VRM battery alarms, merged by unit">Power &amp; Infra Alerts</button>
                 <button type="button" id="alarm_frequency_toggle" class="toolbar-btn" title="Repeat offenders: units whose Zabbix/VRM alarms keep clearing and coming back, not just what's active right now">Alarm Frequency</button>
+                <button type="button" id="take_tour_btn" class="toolbar-btn" title="A guided walkthrough of the dashboard's features — purely visual, never runs or changes anything">Take a Tour</button>
                 <span class="list-match-count" id="list_match_count"></span>
             </div>
             <div class="list-section" id="flap_report_section" data-panel="reports" hidden>
@@ -13285,6 +13365,491 @@
                     statePollInFlight = false;
                     window.setTimeout(pollSharedReportState, 1000);
                 });
+        }
+
+        // ---- Guided tour --------------------------------------------------
+        // Every step is purely visual — no step here clicks a real action
+        // button, submits anything, or calls the server (steps that touch
+        // the live command-menu structure only ever read/open it, and
+        // "opening" a <details> triggers no network call on its own).
+        // Steps that need something on screen that's normally hidden
+        // (Reports mode, an open command menu, a collapsed section) change
+        // exactly that and endTour() restores it — so leaving the tour, at
+        // any step, any way (Finish, Skip, Esc, clicking the backdrop),
+        // always puts the page back exactly how it was found.
+        const TOUR_STEPS = [
+            {
+                title: "Welcome to the NOC Dashboard",
+                body: "A quick tour of what's here. It's look-only — no step runs a check, saves a note, or talks to ERP/VRM/Zabbix. Back/Next or the arrow keys move around; Skip tour or Esc leaves anytime, and nothing you saw stays changed.",
+            },
+            {
+                selector: "#panel_mode",
+                title: "Issues / Projects / Reports",
+                body: "Three pages, one control. Issues is the live ERP ticket queue, split into categories (False Positives, NUC Down, Truly Down, Camera Outage, ...). Projects is NOC projects (Open / In Progress / Prep). Reports is fleet-wide checks that don't belong to any single ticket — covered near the end of this tour.",
+                before: function () { tourSetPanelMode("issues"); },
+            },
+            {
+                selector: "#list_search",
+                title: "Search",
+                body: "Filters whatever's currently on screen — unit, ticket ID, subject, outage type. Nuance: type a unit that ISN'T in any visible list and Unit Tools (bottom of the page) opens on its own with that unit's full command menu — the fast path to a unit with no open ticket at all.",
+            },
+            {
+                selector: "#list_view_toggle",
+                title: "All lists / One list",
+                body: "All lists shows every category at once. One list narrows to just the categories ticked in the Select Lists dropdown that appears next to it — for working one category (say, Truly Down) without the rest crowding the page.",
+            },
+            {
+                selector: ".ticket-row-rws",
+                title: "Resolved / Worked / Skipped",
+                body: "Per-ticket checkboxes on issue rows (projects don't have these). Resolved queues a ticket for removal — nothing happens until Resolve Selected is clicked, so checking it is safe to undo. Worked/Skipped just track what you've triaged this session; they're per-browser, not saved to ERP.",
+                before: function () { tourSetPanelMode("issues"); },
+            },
+            {
+                selector: "li.ticket-row .command-menu summary",
+                title: "Commands",
+                body: "Click a unit's button to expand its full command menu right here — no page navigation, no losing your place in the list. The moment it opens, a status row appears at the top if there's anything worth flagging.",
+                before: function () { tourSetPanelMode("issues"); },
+            },
+            {
+                selector: ".command-menu[open] .command-menu-status",
+                title: "Status row",
+                body: "Nuance: this only appears when there's something to say — a clean unit with no alarms shows nothing here, not a quiet \"OK\". The LED reflects connectivity; the 🔌/🌳/🔧 glyphs are live checks (power / shading / dead panel) run the moment the menu opens and cached 5 minutes, so reopening the same menu right after doesn't refetch.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Validate",
+                title: "Validate",
+                body: "Quick vs Full — both re-check the unit and, quietly, feed the Flap Report (Reports page): every validation counts toward catching a unit that keeps bouncing between healthy and unhealthy, not just a dedicated flap check.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Weather",
+                title: "Weather",
+                body: "Current conditions and historic weather for the unit's region, plus Battery Outlook — experimental: correlates VRM battery SOC against the multi-day cloud forecast (45% heading into three sunny days reads differently than 45% heading into three cloudy ones).",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Router",
+                title: "Router",
+                body: "Carrier lookup (from the SIM ICCID) and ping tools — Quick Validate stops at the first reply, Ping Router always pings 4 times, Long Ping Router runs continuously for up to 30 minutes for watching a flaky link live.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Cameras",
+                title: "Cameras",
+                body: "A fisheye snapshot, or open every configured camera at once — proxied through this dashboard, so there's no separate login per camera, Dahua or Hikvision.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Diagnostics",
+                title: "Diagnostics",
+                body: "Read-only checks, several marked Experimental: Power Status, Shading Status, and a dead-panel check each return a confidence percentage, not a certainty — a lead worth a look, not a verdict. Shading Status can also Schedule a Shading Snapshot: a camera photo timed for the FOLLOWING day's peak hour, only fired after re-confirming the dip is actually happening again. Graphs (nested in here) plots the same solar-power data those checks read.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                submenuLabel: "Open",
+                title: "Open",
+                body: "Direct links out — the ERP/Shield ticket, the unit's ERP site page, and Mesh VPN — always a new tab, never navigating away from the dashboard.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                selector: ".command-menu[open] .unit-notes-box",
+                title: "Notes & lock",
+                body: "Notes here are shared — visible to everyone who opens this unit's menu, not just you. If someone else has a job running on this unit (like the Security Update wizard), a busy banner appears above the notes with who/what and a Force Clear option if it's stuck.",
+                before: function () { tourSetPanelMode("issues"); tourOpenFirstRowMenu(); },
+            },
+            {
+                selector: ".quick-actions",
+                title: "Quick actions",
+                body: "The handful of actions promoted onto the row itself, outside the menu — set once, shown on every ticket, so the single most common action for a row doesn't cost two clicks.",
+                before: function () { tourSetPanelMode("issues"); },
+            },
+            {
+                title: "Recent commands",
+                body: "Once a few commands have been used, the expanded menu grows a short \"Recent\" strip at the top — a shortcut back to whatever you actually use. It's per-browser, not shared with teammates, and won't show anything on a first visit.",
+            },
+            {
+                selector: "#pull_erp",
+                title: "Pull, checkboxes, weather",
+                body: "Pull Issues (or Pull Projects, depending on the page) refreshes straight from ERP on demand. Clear checkboxes resets every Resolved/Worked/Skipped box at once. Update Weather refreshes the weather icon on every visible ticket. Resolve Selected finalizes every Resolved-checked ticket in one batch.",
+                before: function () { tourSetPanelMode("issues"); },
+            },
+            {
+                selector: "#stats_strip",
+                title: "Stats strip",
+                body: "A live summary — click a chip to jump straight to that category (it drives the same Select Lists filter as the dropdown, so ticking a box lights the matching chip and vice versa). \"mid-maintenance\" is a plain count, not a filter — it stays inert.",
+            },
+            {
+                selector: "#console",
+                title: "Console",
+                body: "Shared scrollback for everything run this session — every command's output lands here, capped at 5,000 lines (trimmed in chunks so it doesn't grow forever).",
+            },
+            {
+                selector: "#console_search",
+                title: "Console search",
+                body: "Filters the console pane itself, separately from the ticket-list search above it — for finding one unit's output in a long session.",
+            },
+            {
+                selector: "#power_infra_section",
+                title: "Power & Infra Alerts",
+                body: "Experimental: merges Zabbix's currently-open problems with VRM's own battery alarms, by unit. \"Corroborated\" means both systems agree something's wrong on that unit right now — a stronger signal than either alone.",
+                before: function () {
+                    tourSetPanelMode("issues");
+                    tourShow(document.getElementById("power_infra_section"));
+                },
+            },
+            {
+                selector: "#alarm_frequency_section",
+                title: "Alarm Frequency",
+                body: "Repeat offenders — units whose alarms keep clearing and coming back, not just what's active right now. A unit that flaps 15 times a day is a different problem than one that's been steadily down since this morning, even if neither looks \"currently alarmed\" at any single instant.",
+                before: function () {
+                    tourSetPanelMode("issues");
+                    tourShow(document.getElementById("alarm_frequency_section"));
+                },
+            },
+            {
+                selector: "#flap_report_section",
+                title: "Reports — Flap Report",
+                body: "Switching to Reports mode (top-left) brings up five fleet-wide checks as their own page. Flap Report counts healthy ↔ unhealthy TRANSITIONS, not just failures — what separates a unit that's simply down from one that keeps bouncing.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#units_unplugged_section",
+                title: "Units Unplugged",
+                body: "Every VRM installation fleet-wide, checked for AC/shore power — not just units with an open \"unplugged\" ticket. Cached and refreshed on a schedule; \"Check whole fleet now\" forces a fresh pass (a real check per site, so it takes about a minute).",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#shaded_units_section",
+                title: "Shaded Units",
+                body: "Nuance: only lists units the check actually confirmed shaded — not healthy units, not ones it couldn't reach a verdict on. Each row links straight to the solar-power graph the verdict came from, and can schedule a snapshot individually or for every shaded unit at once.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#dead_panel_section",
+                title: "Dead Panels",
+                body: "Same idea as Shaded Units, a different signature: output down roughly EQUALLY across every hour of the day (consistent with hardware) rather than just certain hours (consistent with shading) — the two checks cross-reference that distinction before confirming either verdict.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#vrm_freshness_section",
+                title: "VRM Disconnected",
+                body: "How recently every installation last reported to VRM at all — the cheapest of the five checks (no per-site call needed). Nuance: a unit here that ALSO has an open issue ticket is pushed to the very top with a \"possibly related ticket\" badge — likely means someone's already on it, or it explains the silence.",
+                before: function () { tourSetPanelMode("reports"); },
+            },
+            {
+                selector: "#unit_tools_section",
+                title: "Unit Tools",
+                body: "The same full command menu as a ticket row, for any unit — no open ticket required. Search a unit above and, if it isn't already visible in a list, this section opens with its menu ready to go.",
+                before: function () {
+                    tourSetPanelMode("issues");
+                    tourShow(document.getElementById("unit_tools_section"));
+                },
+            },
+            {
+                title: "That's the tour",
+                body: "Everything shown was look-only — nothing was run, saved, or sent anywhere. Click Take a Tour again anytime to replay it, or jump straight in.",
+            },
+        ];
+
+        let tourActive = false;
+        let tourIndex = 0;
+        let tourSavedPanelMode = null;
+        let tourOpenedMenu = null;
+        let tourForcedVisible = [];
+        const tourBackdropEl = document.createElement("div");
+        tourBackdropEl.className = "tour-backdrop";
+        const tourHighlightEl = document.createElement("div");
+        tourHighlightEl.className = "tour-highlight is-hidden";
+        const tourCalloutEl = document.createElement("div");
+        tourCalloutEl.className = "tour-callout";
+        tourCalloutEl.setAttribute("role", "dialog");
+        tourCalloutEl.setAttribute("aria-label", "Guided tour");
+
+        function tourSetPanelMode(mode) {
+            if (!panelModeEl || panelModeEl.value === mode) {
+                return;
+            }
+            panelModeEl.value = mode;
+            applyPanelMode();
+        }
+
+        function tourShow(el) {
+            if (!el) {
+                return;
+            }
+            if (!tourForcedVisible.some(function (item) { return item.el === el; })) {
+                tourForcedVisible.push({ el: el, wasHidden: el.hidden });
+            }
+            el.hidden = false;
+        }
+
+        function tourQueryVisible(selector) {
+            const matches = document.querySelectorAll(selector);
+            for (let i = 0; i < matches.length; i++) {
+                if (matches[i].offsetParent !== null) {
+                    return matches[i];
+                }
+            }
+            return null;
+        }
+
+        function tourOpenFirstRowMenu() {
+            const summary = tourQueryVisible("li.ticket-row .command-menu summary");
+            if (!summary) {
+                return null;
+            }
+            const menu = summary.closest("details.command-menu");
+            if (!menu) {
+                return null;
+            }
+            if (tourOpenedMenu && tourOpenedMenu !== menu) {
+                tourOpenedMenu.open = false;
+            }
+            if (!menu.open) {
+                menu.open = true;
+                // Setting .open directly doesn't reliably fire the native
+                // "toggle" event synchronously — placeCommandMenu is what
+                // actually calls updateCommandMenuContext, which is what
+                // lazily builds the notes box and a few other status
+                // pieces. Without this, a menu opened this way stays
+                // structurally empty even though .open is true.
+                placeCommandMenu(menu);
+            }
+            tourOpenedMenu = menu;
+            return menu;
+        }
+
+        function tourFindSubmenuSummary(label) {
+            const summaries = document.querySelectorAll(".command-menu[open] .command-submenu > summary");
+            for (let i = 0; i < summaries.length; i++) {
+                if (summaries[i].textContent.trim() === label) {
+                    return summaries[i];
+                }
+            }
+            return null;
+        }
+
+        // undefined = no target at all (a centered, informational step —
+        // always shown). null = a real target that isn't there RIGHT NOW
+        // (e.g. no ticket rows loaded yet) — the caller skips this step.
+        function tourResolveTarget(step) {
+            if (step.submenuLabel) {
+                return tourFindSubmenuSummary(step.submenuLabel);
+            }
+            if (step.selector) {
+                return tourQueryVisible(step.selector);
+            }
+            return undefined;
+        }
+
+        function tourPositionFor(target) {
+            const rect = target.getBoundingClientRect();
+            tourHighlightEl.style.top = (rect.top - 4) + "px";
+            tourHighlightEl.style.left = (rect.left - 4) + "px";
+            tourHighlightEl.style.width = (rect.width + 8) + "px";
+            tourHighlightEl.style.height = (rect.height + 8) + "px";
+            tourHighlightEl.classList.remove("is-hidden");
+
+            const calloutRect = tourCalloutEl.getBoundingClientRect();
+            const margin = 12;
+            let top = rect.bottom + margin;
+            const left = Math.min(
+                Math.max(rect.left, margin),
+                Math.max(margin, window.innerWidth - calloutRect.width - margin)
+            );
+            if (top + calloutRect.height > window.innerHeight - margin) {
+                top = Math.max(margin, rect.top - calloutRect.height - margin);
+            }
+            tourCalloutEl.style.top = top + "px";
+            tourCalloutEl.style.left = left + "px";
+        }
+
+        function tourPositionCentered() {
+            tourHighlightEl.classList.add("is-hidden");
+            const calloutRect = tourCalloutEl.getBoundingClientRect();
+            tourCalloutEl.style.top = Math.max(12, (window.innerHeight - calloutRect.height) / 2) + "px";
+            tourCalloutEl.style.left = Math.max(12, (window.innerWidth - calloutRect.width) / 2) + "px";
+        }
+
+        function tourRenderCallout(step, index) {
+            tourCalloutEl.innerHTML = "";
+            const eyebrow = document.createElement("p");
+            eyebrow.className = "tour-callout-eyebrow";
+            eyebrow.textContent = "Guided tour — look only";
+            tourCalloutEl.appendChild(eyebrow);
+            const h3 = document.createElement("h3");
+            h3.textContent = step.title;
+            tourCalloutEl.appendChild(h3);
+            const p = document.createElement("p");
+            p.textContent = step.body;
+            tourCalloutEl.appendChild(p);
+
+            const actions = document.createElement("div");
+            actions.className = "tour-callout-actions";
+
+            const skipBtn = document.createElement("button");
+            skipBtn.type = "button";
+            skipBtn.className = "tour-skip";
+            skipBtn.textContent = "Skip tour";
+            skipBtn.addEventListener("click", endTour);
+            actions.appendChild(skipBtn);
+
+            const spacer = document.createElement("div");
+            spacer.className = "tour-callout-spacer";
+            actions.appendChild(spacer);
+
+            const stepLabel = document.createElement("span");
+            stepLabel.className = "tour-callout-step";
+            stepLabel.textContent = (index + 1) + " / " + TOUR_STEPS.length;
+            actions.appendChild(stepLabel);
+
+            if (index > 0) {
+                const backBtn = document.createElement("button");
+                backBtn.type = "button";
+                backBtn.className = "toolbar-btn";
+                backBtn.textContent = "Back";
+                backBtn.addEventListener("click", function () { tourGoTo(index - 1, -1); });
+                actions.appendChild(backBtn);
+            }
+
+            const nextBtn = document.createElement("button");
+            nextBtn.type = "button";
+            nextBtn.className = "toolbar-btn";
+            nextBtn.textContent = index === TOUR_STEPS.length - 1 ? "Finish" : "Next";
+            nextBtn.addEventListener("click", function () {
+                if (index === TOUR_STEPS.length - 1) {
+                    endTour();
+                } else {
+                    tourGoTo(index + 1, 1);
+                }
+            });
+            actions.appendChild(nextBtn);
+
+            tourCalloutEl.appendChild(actions);
+        }
+
+        function tourGoTo(index, direction, attempts) {
+            attempts = attempts || 0;
+            if (index < 0 || index >= TOUR_STEPS.length) {
+                return;
+            }
+            if (attempts > TOUR_STEPS.length) {
+                // Every remaining step in this direction failed to resolve
+                // (e.g. no ticket rows loaded at all yet) — stop rather
+                // than spin forever; Back/Skip still work from here.
+                return;
+            }
+            const step = TOUR_STEPS[index];
+            if (step.before) {
+                try {
+                    step.before();
+                } catch (ignore) {
+                    // Fall through to the skip path below rather than break
+                    // the tour over one step's setup failing.
+                }
+            }
+            const target = tourResolveTarget(step);
+            if (target === null) {
+                tourGoTo(index + direction, direction, attempts + 1);
+                return;
+            }
+            tourIndex = index;
+            tourRenderCallout(step, index);
+            if (target === undefined) {
+                tourPositionCentered();
+            } else {
+                target.scrollIntoView({ block: "center", inline: "nearest" });
+                tourPositionFor(target);
+            }
+            const focusable = tourCalloutEl.querySelector("button");
+            if (focusable) {
+                focusable.focus({ preventScroll: true });
+            }
+        }
+
+        function tourReposition() {
+            if (!tourActive) {
+                return;
+            }
+            const target = tourResolveTarget(TOUR_STEPS[tourIndex]);
+            if (target) {
+                tourPositionFor(target);
+            } else {
+                tourPositionCentered();
+            }
+        }
+
+        function tourBackdropClick(event) {
+            if (event.target === tourBackdropEl) {
+                endTour();
+            }
+        }
+
+        function tourKeydown(event) {
+            if (event.key === "Escape") {
+                endTour();
+            } else if (event.key === "ArrowRight" && tourIndex < TOUR_STEPS.length - 1) {
+                tourGoTo(tourIndex + 1, 1);
+            } else if (event.key === "ArrowLeft" && tourIndex > 0) {
+                tourGoTo(tourIndex - 1, -1);
+            }
+        }
+
+        function startTour() {
+            if (tourActive) {
+                return;
+            }
+            tourActive = true;
+            tourSavedPanelMode = panelModeEl ? panelModeEl.value : "issues";
+            tourForcedVisible = [];
+            // Start from a clean slate — any menu already open (from before
+            // the tour started) closes now and isn't reopened at endTour();
+            // a minor, acceptable side effect of taking the tour.
+            document.querySelectorAll("details.command-menu[open]").forEach(function (menu) {
+                menu.open = false;
+            });
+            tourOpenedMenu = null;
+            document.body.appendChild(tourBackdropEl);
+            document.body.appendChild(tourHighlightEl);
+            document.body.appendChild(tourCalloutEl);
+            tourBackdropEl.addEventListener("click", tourBackdropClick);
+            document.addEventListener("keydown", tourKeydown);
+            window.addEventListener("resize", tourReposition);
+            tourGoTo(0, 1);
+        }
+
+        function endTour() {
+            if (!tourActive) {
+                return;
+            }
+            tourActive = false;
+            if (tourOpenedMenu) {
+                tourOpenedMenu.open = false;
+                tourOpenedMenu = null;
+            }
+            tourForcedVisible.forEach(function (item) {
+                item.el.hidden = item.wasHidden;
+            });
+            tourForcedVisible = [];
+            if (panelModeEl && tourSavedPanelMode !== null && panelModeEl.value !== tourSavedPanelMode) {
+                panelModeEl.value = tourSavedPanelMode;
+                applyPanelMode();
+            }
+            tourSavedPanelMode = null;
+            tourBackdropEl.removeEventListener("click", tourBackdropClick);
+            document.removeEventListener("keydown", tourKeydown);
+            window.removeEventListener("resize", tourReposition);
+            [tourBackdropEl, tourHighlightEl, tourCalloutEl].forEach(function (el) {
+                if (el.parentNode) {
+                    el.parentNode.removeChild(el);
+                }
+            });
+        }
+
+        const takeTourBtn = document.getElementById("take_tour_btn");
+        if (takeTourBtn) {
+            takeTourBtn.addEventListener("click", startTour);
         }
 
         applyPanelMode();
