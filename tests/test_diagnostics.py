@@ -10,10 +10,12 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import work_tool  # noqa: E402
+import work_tool.diagnostics  # noqa: E402
 import unit_history  # noqa: E402
 
 
@@ -269,6 +271,76 @@ class UnitHistoryDatabase(unittest.TestCase):
         self.assertTrue(info["ok"])
         self.assertEqual(info["events"], 1)
         self.assertEqual(info["units"], 1)
+
+
+class CombinedPowerInfraAlertsSiteFilter(unittest.TestCase):
+    # Same "no ERP Site linked = not a real, currently-deployed trailer"
+    # exclusion as the fleet reports (see
+    # FleetVrmInstallationsSiteFilter in test_weather.py) — a trailer with
+    # an active Zabbix/VRM alarm but no Site is noise a tech can't act on.
+    def _patched(self, zabbix_by_unit, vrm_by_unit, site_cache_contents):
+        def fake_site_map(names, cache, headers=None, quiet=False):
+            cache.update(site_cache_contents)
+
+        return (
+            mock.patch.object(
+                work_tool.diagnostics, "zabbix_active_problems_by_unit",
+                return_value=(zabbix_by_unit, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "vrm_active_alarms_by_unit",
+                return_value=(vrm_by_unit, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "_erp_heads_for_mu_trailers", return_value=({}, None)
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "_fetch_erp_component_site_map", side_effect=fake_site_map
+            ),
+        )
+
+    def test_mu_with_no_site_is_excluded_even_though_alarmed(self):
+        zabbix_by_unit = {
+            "MU1001": [{"device": "Router", "host": "MU1001-Router", "name": "p", "severity": 3, "clock": 1}],
+            "MU1002": [{"device": "Router", "host": "MU1002-Router", "name": "p", "severity": 3, "clock": 1}],
+        }
+        p1, p2, p3, p4 = self._patched(
+            zabbix_by_unit, {},
+            {
+                "SC-MU1001": {"name": "SC-MU1001", "site": "SITE-A"},
+                "SC-MU1002": {"name": "SC-MU1002", "site": ""},
+            },
+        )
+        with p1, p2, p3, p4:
+            info, error = work_tool.diagnostics.combined_power_infra_alerts()
+        self.assertIsNone(error)
+        units = sorted(r["unit"] for r in info["rows"])
+        self.assertEqual(units, ["MU1001"])
+
+    def test_non_mu_units_are_never_site_filtered(self):
+        # RD/FD heads aren't trailers — the "no Site" exclusion only
+        # applies to MU-prefixed rows (see combined_power_infra_alerts).
+        zabbix_by_unit = {
+            "RD3076": [{"device": "Router", "host": "RD3076-Router", "name": "p", "severity": 3, "clock": 1}],
+        }
+        p1, p2, p3, p4 = self._patched(zabbix_by_unit, {}, {})
+        with p1, p2, p3, p4:
+            info, error = work_tool.diagnostics.combined_power_infra_alerts()
+        self.assertIsNone(error)
+        self.assertEqual([r["unit"] for r in info["rows"]], ["RD3076"])
+
+    def test_site_lookup_failure_fails_open_and_keeps_every_mu(self):
+        zabbix_by_unit = {
+            "MU1001": [{"device": "Router", "host": "MU1001-Router", "name": "p", "severity": 3, "clock": 1}],
+        }
+        p1, p2, p3, _p4 = self._patched(zabbix_by_unit, {}, {})
+        with p1, p2, p3, mock.patch.object(
+            work_tool.diagnostics, "_fetch_erp_component_site_map",
+            side_effect=RuntimeError("ERP unreachable"),
+        ):
+            info, error = work_tool.diagnostics.combined_power_infra_alerts()
+        self.assertIsNone(error)
+        self.assertEqual([r["unit"] for r in info["rows"]], ["MU1001"])
 
 
 if __name__ == "__main__":

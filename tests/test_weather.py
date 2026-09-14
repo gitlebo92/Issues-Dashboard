@@ -806,5 +806,80 @@ class SocTrendCrossCheck(unittest.TestCase):
         self.assertIsNone(delta)
 
 
+class FleetVrmInstallationsSiteFilter(unittest.TestCase):
+    # A trailer with no ERP Site linked to its Component is one ERP never
+    # provisioned a location for — not a real, currently-deployed unit —
+    # so the four fleet reports (Units Unplugged/Shaded Units/Dead Panels/
+    # VRM Disconnected) should never show it. See
+    # _fleet_vrm_installations_with_heads.
+    def _patched(self, site_cache_contents):
+        fake_response = mock.Mock()
+        fake_response.status_code = 200
+        fake_response.json.return_value = {
+            "records": [
+                {"idSite": 1, "name": "MU1001", "last_timestamp": time.time()},
+                {"idSite": 2, "name": "MU1002", "last_timestamp": time.time()},
+                {"idSite": 3, "name": "MU1003", "last_timestamp": time.time()},
+            ]
+        }
+
+        def fake_site_map(names, cache, headers=None, quiet=False):
+            cache.update(site_cache_contents)
+
+        return (
+            mock.patch.object(
+                work_tool.weather, "_vrm_credentials", return_value=("user1", "tok", None)
+            ),
+            mock.patch.object(work_tool.weather.requests, "get", return_value=fake_response),
+            mock.patch.object(
+                work_tool.weather, "_erp_heads_for_mu_trailers", return_value=({}, None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_fetch_erp_component_site_map", side_effect=fake_site_map
+            ),
+        )
+
+    def test_mu_with_no_site_is_excluded(self):
+        # MU1001/MU1003 have a Site; MU1002's Component has none at all
+        # (never cached, mirroring _fetch_erp_component_site_map's real
+        # behavior for a name it looked up and found no Site on).
+        p1, p2, p3, p4 = self._patched({
+            "SC-MU1001": {"name": "SC-MU1001", "site": "SITE-A"},
+            "SC-MU1002": {"name": "SC-MU1002", "site": ""},
+            "SC-MU1003": {"name": "SC-MU1003", "site": "SITE-C"},
+        })
+        with p1, p2, p3, p4:
+            installations, mu_to_heads, error = work_tool.weather._fleet_vrm_installations_with_heads()
+        self.assertIsNone(error)
+        names = sorted(i["installation_name"] for i in installations)
+        self.assertEqual(names, ["MU1001", "MU1003"])
+
+    def test_mu_missing_from_site_cache_entirely_is_also_excluded(self):
+        # _fetch_erp_component_site_map caches an unfound name as None
+        # rather than omitting it, but a lookup failure/omission should
+        # fail the same safe direction — excluded, not silently kept in.
+        p1, p2, p3, p4 = self._patched({
+            "SC-MU1001": {"name": "SC-MU1001", "site": "SITE-A"},
+            "SC-MU1002": None,
+            # MU1003 absent entirely from the cache.
+        })
+        with p1, p2, p3, p4:
+            installations, mu_to_heads, error = work_tool.weather._fleet_vrm_installations_with_heads()
+        self.assertIsNone(error)
+        names = sorted(i["installation_name"] for i in installations)
+        self.assertEqual(names, ["MU1001"])
+
+    def test_site_lookup_failure_fails_open_and_keeps_every_mu(self):
+        p1, p2, p3, _p4 = self._patched({})
+        with p1, p2, p3, mock.patch.object(
+            work_tool.weather, "_fetch_erp_component_site_map",
+            side_effect=RuntimeError("ERP unreachable"),
+        ):
+            installations, mu_to_heads, error = work_tool.weather._fleet_vrm_installations_with_heads()
+        self.assertIsNone(error)
+        names = sorted(i["installation_name"] for i in installations)
+        self.assertEqual(names, ["MU1001", "MU1002", "MU1003"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,9 +34,11 @@ import urllib3
 
 from ._core import (  # noqa: F401  (re-exported dependencies)
     _erp_heads_for_mu_trailers,
+    _fetch_erp_component_site_map,
     _fetch_erp_site_doc_raw,
     _fetch_mu_component_doc,
     _normalize_netsheet_unit,
+    _sc_component_name,
     missing,
     resolve_attached_mu_code,
     resolve_dashboard_site_id,
@@ -1782,8 +1784,22 @@ def _fleet_vrm_installations_with_heads():
     fleet_shading_status, so checking the whole fleet for two different
     things only fetches the installation list and resolves the ERP
     crosswalk once between them, not once each.
+
+    Also drops any MU trailer that has no ERP Site linked to its Component
+    record — the same "Component {X} has no Site" case resolve_shield_site_id
+    treats as unresolvable for a single unit. An MU with no Site is one ERP
+    never provisioned a location for (retired, spare, or never finished
+    setup), so it's not a real, currently-deployed trailer — including it in
+    a fleet report just adds a row nobody can act on. Uses the same bulk
+    Component-site lookup resolve_shield_site_id uses for one unit
+    (_fetch_erp_component_site_map), not a new call, so this costs one more
+    chunked ERP GET alongside the existing head crosswalk, not one per MU.
+
     Returns (installations, mu_to_heads, error). installations is a list of
-    {site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name}.
+    {site_id, installation_name, vrm_last_seen_seconds_ago, timezone_name},
+    already filtered down to MUs with a linked Site (non-MU-named
+    installations, if any exist, are never filtered — the concept of "no
+    Site" only applies to a trailer's own Component).
     """
     id_user, victron_token, cred_error = _vrm_credentials()
     if cred_error:
@@ -1820,6 +1836,33 @@ def _fleet_vrm_installations_with_heads():
         mu_to_heads = mu_to_heads or {}
         if crosswalk_error:
             print(f"_fleet_vrm_installations_with_heads: ERP head crosswalk failed: {crosswalk_error}")
+
+    if mu_names:
+        site_cache = {}
+        try:
+            _fetch_erp_component_site_map(
+                [_sc_component_name(name) for name in mu_names], site_cache, quiet=True,
+            )
+        except Exception as exc:
+            # Fail open — a broken site lookup should never wipe out an
+            # otherwise-working fleet report; every MU just stays included,
+            # same as before this filter existed.
+            print(f"_fleet_vrm_installations_with_heads: ERP Site lookup failed: {exc}")
+            site_cache = None
+        if site_cache is not None:
+            no_site_mus = {
+                name for name in mu_names
+                if not (site_cache.get(_sc_component_name(name)) or {}).get("site")
+            }
+            if no_site_mus:
+                print(
+                    f"_fleet_vrm_installations_with_heads: {len(no_site_mus)} MU(s) have no "
+                    f"ERP Site linked, excluded as inactive: {', '.join(sorted(no_site_mus))}"
+                )
+                installations = [
+                    i for i in installations
+                    if i["installation_name"] not in no_site_mus
+                ]
     return installations, mu_to_heads, None
 
 

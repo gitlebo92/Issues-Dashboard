@@ -30,8 +30,18 @@ work on the code without breaking a live NOC tool.
   `_erp_writes_blocked_response()` like its neighbours. Resolve (R) is local
   only and deliberately not gated.
 - **`PAUSE_AUTOMATED_TASKS=1` in both `run_live.bat` and `run_sandbox.bat`.**
-  The 4:00/4:05/4:10 AM jobs and the 30-minute ERP poll stay off. Don't
-  "fix" a scheduler that looks idle — it is paused on purpose.
+  The 4:00/4:05/4:10 AM jobs, the hourly ART report refresh, and the
+  30-minute ERP poll stay off. Don't "fix" a scheduler that looks idle — it
+  is paused on purpose. The four fleet report polls (Units Unplugged/Shaded
+  Units/Dead Panels/VRM Disconnected) and the Power & Infra Alerts
+  (Zabbix+VRM) poll are a deliberate exception — they're read-only with no
+  side effects, and a tech shouldn't have to hit Refresh by hand after every
+  service restart just to see them populate, so they run regardless of this
+  flag (see `_run_fleet_check` / `_run_scheduled_power_infra_alerts` in
+  `flask_endpoints.py`). None of them start in sandbox at all though — their
+  whole scheduler is skipped there (`WORK_TOOL_ENV != "sandbox"` at the
+  `_start_arizona_validation_scheduler()` call sites), so this doesn't add
+  any VRM/Zabbix load to a dev sandbox.
 - **The live instance is a Windows service, `IssuesDashboard`.** It runs
   :5000 continuously, starts automatically, and launches
   `flask_endpoints.py` **directly — it never reads `run_live.bat`**. So a

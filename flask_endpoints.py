@@ -3572,11 +3572,12 @@ def _start_arizona_validation_scheduler():
             name="power-infra-alerts",
         )
         power_infra_thread.start()
-        if not automated_tasks_paused():
-            print(
-                "Power & Infra Alerts (Zabbix + VRM) poll scheduled every "
-                f"{POWER_INFRA_ALERTS_REFRESH_SECONDS // 60} minutes"
-            )
+        # Always-on regardless of PAUSE_AUTOMATED_TASKS — see
+        # _run_scheduled_power_infra_alerts's docstring.
+        print(
+            "Power & Infra Alerts (Zabbix + VRM) poll scheduled every "
+            f"{POWER_INFRA_ALERTS_REFRESH_SECONDS // 60} minutes"
+        )
         for loop_fn, thread_name, refresh_seconds, label in (
             (_fleet_power_status_loop, "fleet-power-status", FLEET_POWER_STATUS_REFRESH_SECONDS, "Units Unplugged"),
             (_fleet_shading_status_loop, "fleet-shading-status", FLEET_SHADING_STATUS_REFRESH_SECONDS, "Shaded Units"),
@@ -3585,8 +3586,8 @@ def _start_arizona_validation_scheduler():
         ):
             fleet_thread = threading.Thread(target=loop_fn, daemon=True, name=thread_name)
             fleet_thread.start()
-            if not automated_tasks_paused():
-                print(f"Fleet {label} report poll scheduled every {refresh_seconds // 60} minutes")
+            # Always-on too — see _run_fleet_check's docstring.
+            print(f"Fleet {label} report poll scheduled every {refresh_seconds // 60} minutes")
 
 def _run_scheduled_art_recovery_report():
     if automated_tasks_paused():
@@ -3616,9 +3617,16 @@ def _run_scheduled_power_infra_alerts():
     time. This is the "log/notify" half of the request; it never writes to
     Zabbix or VRM, only reads. The cache it fills is what the dashboard's
     warning glyphs and the Power & Infra Alerts panel's cached view read.
+
+    Deliberately NOT gated on automated_tasks_paused() — unlike the
+    4:00/4:05/4:10 AM validation jobs and the 30-minute ERP poll that flag
+    exists to hold off, this is a read-only Zabbix+VRM poll with no side
+    effects, and gating it meant Power & Infra Alerts (and the fleet report
+    polls below) never populated on their own — a tech had to open the page
+    and hit Refresh just to see anything, every single time the service
+    restarted. Same reasoning _shading_snapshot_scheduler_loop already
+    applies to its own always-on loop.
     """
-    if automated_tasks_paused():
-        return
     when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
     info, error = work_tool.combined_power_infra_alerts()
     if error:
@@ -3670,9 +3678,13 @@ def _run_fleet_check(label, check_fn, cache, cache_lock):
     the previous rows just stay in place for the next read (only
     cache["error"] updates, so the UI can still show "data as of a while
     ago" instead of nothing).
+
+    Deliberately NOT gated on automated_tasks_paused() — see
+    _run_scheduled_power_infra_alerts's docstring for why: these are the
+    Units Unplugged/Shaded Units/Dead Panels/VRM Disconnected reports, and
+    a tech shouldn't have to hit each one's Refresh button by hand just to
+    see whether anything is wrong right after the service starts.
     """
-    if automated_tasks_paused():
-        return
     when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
     try:
         rows, error = check_fn()
@@ -3790,16 +3802,17 @@ def _run_due_shading_snapshot_tasks():
 
 def _shading_snapshot_scheduler_loop():
     # Brief startup delay so the service finishes boot before the first
-    # pass. Deliberately does NOT check automated_tasks_paused() like the
-    # fleet-report loops above: each task here is a specific, user-
-    # scheduled one-off (a button click created it, aimed at a specific
-    # future day), not a recurring automatic poll, and it only ever does
-    # read-only VRM/camera GETs plus writes to this app's own local
-    # snapshot store — none of what PAUSE_AUTOMATED_TASKS exists to hold
-    # off (ERP polling/writes, the 4 AM validation jobs). Running it in
-    # sandbox too is also how this feature gets exercised there at all —
-    # unlike the fleet-report pollers, its own startup isn't gated behind
-    # WORK_TOOL_ENV != "sandbox" either (see _start_shading_snapshot_scheduler).
+    # pass. Deliberately does NOT check automated_tasks_paused() — same as
+    # the fleet-report/Power & Infra Alerts loops above, now: each task
+    # here is a specific, user-scheduled one-off (a button click created
+    # it, aimed at a specific future day), not a recurring automatic poll,
+    # and it only ever does read-only VRM/camera GETs plus writes to this
+    # app's own local snapshot store — none of what PAUSE_AUTOMATED_TASKS
+    # exists to hold off (ERP polling/writes, the 4 AM validation jobs).
+    # Running it in sandbox too is also how this feature gets exercised
+    # there at all — unlike the fleet-report pollers, its own startup isn't
+    # gated behind WORK_TOOL_ENV != "sandbox" either (see
+    # _start_shading_snapshot_scheduler).
     time.sleep(90)
     while True:
         try:

@@ -35,11 +35,13 @@ import urllib3
 
 from ._core import (  # noqa: F401  (re-exported dependencies)
     _erp_heads_for_mu_trailers,
+    _fetch_erp_component_site_map,
     _host_only,
     _net_row_for_unit,
     _ping_host,
     _ping_reachable,
     _pve_ssh_credentials,
+    _sc_component_name,
     _scrypted_ssh_credentials,
     _scrypted_ssh_target,
     ensure_unit_net_info,
@@ -1139,8 +1141,39 @@ def combined_power_infra_alerts():
         if crosswalk_error:
             print(f"combined_power_infra_alerts: ERP head crosswalk failed: {crosswalk_error}")
 
+    # Drop MU trailers with no ERP Site linked to their Component — same
+    # "not a real, currently-deployed trailer" case fleet_power_status/
+    # fleet_shading_status/etc. exclude for the same reason (see
+    # _fleet_vrm_installations_with_heads). Reuses the identical bulk
+    # Component-site lookup, not a new call — one more chunked ERP GET
+    # alongside the head crosswalk already made above.
+    no_site_mus = set()
+    if mu_units:
+        site_cache = {}
+        try:
+            _fetch_erp_component_site_map(
+                [_sc_component_name(u) for u in mu_units], site_cache, quiet=True,
+            )
+        except Exception as exc:
+            # Fail open — never let a broken site lookup wipe out an
+            # otherwise-working alert poll.
+            print(f"combined_power_infra_alerts: ERP Site lookup failed: {exc}")
+            site_cache = None
+        if site_cache is not None:
+            no_site_mus = {
+                u for u in mu_units
+                if not (site_cache.get(_sc_component_name(u)) or {}).get("site")
+            }
+            if no_site_mus:
+                print(
+                    f"combined_power_infra_alerts: {len(no_site_mus)} MU(s) have no ERP Site "
+                    f"linked, excluded as inactive: {', '.join(sorted(no_site_mus))}"
+                )
+
     rows = []
     for unit in units:
+        if unit in no_site_mus:
+            continue
         # own_zabbix_problems is what THIS unit's own Zabbix hosts actually
         # reported — kept separate from the fold-in below so callers that
         # care about true attribution (alarm_history, recording who is
