@@ -34,9 +34,19 @@ run_sandbox.bat   rem http://127.0.0.1:5001 — dev/test (auto-reload)
 > or from `.env` (which is loaded at import). Setting an environment variable
 > in `run_live.bat` has no effect on the service.
 
-With `PAUSE_AUTOMATED_TASKS=1` (default on both bats), scheduled 4:00/4:05/4:10 jobs and 30‑minute ERP polling stay off. Manual **Pull Issues**, validate, Open menus, etc. still work.
+With `PAUSE_AUTOMATED_TASKS=1` (default on both bats), the scheduled 4:00/4:05/4:10 AM jobs stay off. Manual **Pull Issues**, validate, Open menus, etc. still work. The read-only background work runs regardless of the flag: the 30‑minute ERP ticket/project pull, the hourly ART report and its recovery email check, the fleet reports, and Power & Infra Alerts. None of the background schedulers start in sandbox.
 
-With `DISABLE_ERP_WRITES=1` (default when unset), ERP-mutating actions (Set Fields, Create Project, Terminate/Activate Site, Clear MU, Tech Checks, Add Missing Components) stay visible but disabled; matching POST routes return 403. **Resolve (R)** is local-only and stays enabled. Set `DISABLE_ERP_WRITES=0` to allow writes.
+### Startup order
+
+After the live service starts, background work runs in a fixed order. Each stage starts as soon as the one before it finishes its first pass:
+
+1. **Initial ping sweep**: the shared ticket-queue validation, started immediately.
+2. **Weather** (the Battery Outlook report).
+3. **Power vs Cell** (needs the sweep's results).
+4. **Reports**: the ART report download + recovery email check, VRM Disconnected and Power & Infra Alerts first, then Units Unplugged, Shaded Units and Dead Panels 30 seconds apart.
+5. **Camera Outage Report, last**: once every report above has done its first pass, the server pulls the camera-buffer alert list from Zabbix and runs Find Camera on each unit, one at a time (read-only). Then hourly.
+
+After that, each one repeats on its own interval (the ART report, email check and camera report hourly). Stdout prints the order at startup and a line as each stage finishes. If a stage hangs, the next one starts anyway after `STARTUP_STAGE_TIMEOUT_SECONDS` (default 30 minutes) and says so in Stdout. The ERP ticket/project pull and the shading-snapshot scheduler are not part of this chain. Flap Report, Zabbix Flap Report and Alarm Frequency aren't background jobs either: they're instant lookups made when you open Reports.
 
 ---
 
@@ -57,9 +67,9 @@ Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navba
 - **Weather icons:** Between the LED and the ticket link. Metro weather from the subject region code (`LAX` / `OAK` / `HOU` / `PHX` / `SLC` / `DEN`) via Open-Meteo — **no ERP**. Fresh fetch on page load; auto-refresh every **30 minutes**. Distinct icons for clear / partly cloudy / mostly cloudy / rain / thunder / etc. **Click an icon** (or **Weather → Weather (Current)**) for precise site/trailer weather → stdout + icon update. Toolbar **Update Weather** force-refreshes all region icons.
 - **R / W / S:** Resolved / Worked / Skipped checkboxes (local UI state only; Resolve does not post to ERP).
 - **All lists / One list:** **All lists** shows everything. **One list** reveals the category dropdown, which now takes **several lists at once** — tick Offline compute and Down Full and see both — with each list's ticket count beside it. The button reads the list name when one is ticked, "3 lists selected" for several. **Select all** / **Clear** sit at the bottom of the menu, empty lists are dimmed, and completed lists show their count in green. Switching to **Projects** swaps the menu for the project lists, and each panel keeps its own selection.
-- **Quick actions:** A short row of buttons on every ticket — **Validate**, **Uptime** (switch/Robofiber), **VRM**, **Mesh**, **Snap** — promoted out of the nested command menus. Edit the `QUICK_ACTIONS` array near the top of `templates/issues_results.html` to change which appear, reorder them, or set it to `[]` to remove the row.
+- **Quick actions:** A short row of buttons on every ticket — **Validate**, **Uptime** (switch/Robofiber), **VRM**, **Mesh**, **Snap** — promoted out of the nested command menus. Edit the `QUICK_ACTIONS` array in `static/issues_results.js` to change which appear, reorder them, or set it to `[]` to remove the row.
 - **Busy flag:** An amber pill appears on a ticket when that unit is locked by another action (Security Update Fix, a reboot, Restart All Services), refreshed every 20 seconds from `/issues/busy-units`. Shows the action and its phase so two people don't collide on one unit.
-- **Toasts:** Failures appear as non-blocking toasts in the bottom-right instead of `alert()` dialogs. Errors stay until dismissed; other messages fade after six seconds. Every message is still written to stdout and the status line.
+- **Toasts:** Failures appear as non-blocking toasts in the bottom-right instead of `alert()` dialogs. Every toast fades on its own (errors a little later than the rest, and not while your mouse is over one) unless the code asks for it to stay. Every message is still written to stdout and the status line.
 
 ### Issue list categories
 
@@ -74,7 +84,8 @@ Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navba
 | **Panel issues** | Panel / fisheye panel tickets |
 | **Camera View** | Router + compute reachability view |
 | **On Hold** | Held tickets (with hold kind) |
-| **Monitoring Hours / Termination / Relocation** | Specialty buckets |
+| **Monitoring Hours / Termination / Relocation / Footage Request** | Specialty buckets |
+| **Miscellaneous** | Tickets the validator set aside, with the reason in red (no unit in the subject, deployment issue type, welcome packet, etc.). A ticket whose subject names a unit gets a unit button per unit; clicking it loads that unit's full command menu in place. |
 
 Each list (except a few write-heavy specialty buckets) has **Revalidate** to re-check tickets in that list only.
 
@@ -96,19 +107,19 @@ Type a unit into the list filter even if it is not on the current report. Matchi
 
 ## 2. Per-unit command menu
 
-Click the unit button (left of the LED) to open **Commands**.
+On a ticket row, the control left of the LED is `[⚡ RD3079 │▾]`: the **unit button** opens that unit's Power vs Cell graphs modal (where a ticket gets worked: see [below](#working-a-ticket-from-the-power-vs-cell-modal)), and the small **▾** opens this quick command menu in place, for a one-off action. Rows without a unit (projects, etc.) keep a single unit pill that opens the menu. Everything in the menu is also in the modal's command rail.
 
 ![Command menu](docs/screenshots/03-command-menu.png)
 
 ### Search commands
 
-The menu holds around 87 actions across nested submenus, four levels deep at worst. A **Search commands** box sits at the top and is focused as soon as the menu opens, so you can type instead of clicking through the tree.
+The menu holds around 87 actions across nested submenus. A **Search commands** box sits at the top and is focused as soon as the menu opens, so you can type instead of clicking through the tree. The same box sits in the Power vs Cell graphs modal's command rail, also focused when the modal opens.
 
-- Typing filters the actions live and opens whichever submenus contain a match — `reb` surfaces Reboot Scrypted, Reboot PVE and Reboot NUC together, from three different submenus.
+- Typing filters the actions live and opens whichever submenus contain a match. Every word you type must appear in the label: `reboot` surfaces Reboot Scrypted and Reboot PVE together from inside Linux → Scrypted → Power / Disruptive Actions; `ping router` narrows to Ping Router and Long Ping Router.
 - Matching a submenu's own name reveals everything inside it: `cameras` shows every camera action.
-- **Enter** runs the action when the search has narrowed to exactly one.
-- **Escape** clears the search; press it again to close the menu.
-- Clearing the box restores the menu exactly as it was, with the submenus closed.
+- **Enter** runs the action when the search has narrowed to exactly one. Disruptive actions still ask for confirmation first.
+- **Escape** clears the search; press it again to close the menu (or the modal).
+- Clearing the box puts every submenu back open or closed exactly as it was. The Recent strip hides while you search, so matches don't show twice.
 
 ### Validate
 
@@ -147,8 +158,9 @@ Read-only checks. None of them change anything on the device, so none take the p
 |--------|----------|
 | **Run All Diagnostics** | Every applicable check below in one pass, reported as a single list of problems |
 | **Camera Reachability** | Pings every camera, the fisheye and the speaker at once and prints a ✓/× table |
-| **Service Status** | *(PVE units)* Which of the sixteen platform services (15 sentracam-* daemons + docker) are actually active — run this **before** Restart All Services |
 | **PVE Host Resources** | *(PVE units)* Memory, swap, root disk, load average and VM 101 state |
+| **NUC Resources** | *(NUC units)* Memory, C: drive and CPU load on the Windows NUC |
+| **NUC Disk Health** | *(NUC units)* Each drive's own health, SMART counters (temperature, wear, read/write errors, power-on hours) and SMART predict-failure (SATA drives), plus 90 days of disk / NTFS / storage-driver events. Events that mean a failing disk (bad block, controller or paging error, SMART predicted failure, file-system corruption) are marked ✗; early signs (I/O retried, drive reset) are marked !. Read-only, about 10 seconds |
 | **NVMe Health (PVE)** | *(PVE units)* `smartctl -a` on the boot drive — wear, spare, errors, temperature. Lives under Linux → Scrypted |
 | **Unit History** | Recorded validations for this unit and how many times it has flapped in the last week |
 | **Power Status (Plugged In?)** *(Experimental)* | Best-effort "is this trailer on AC/shore power" read from VRM telemetry, with a confidence percentage and how stale the underlying VRM data is |
@@ -174,15 +186,60 @@ All three are checked lazily the first time you open a unit's menu and cached fo
 
 Under Diagnostics → Graphs: **Battery Graphs** (voltage / SOC / current / solar power / today's solar yield, from VRM, up to 30 days) and **Network Latency Graphs** (router/switch ICMP response time and loss, from Zabbix, up to 90 days). Charts break the line across a real data gap rather than interpolating through it, and the SOC chart carries a 20%-low-battery reference line.
 
+#### Working a ticket from the Power vs Cell modal
+
+Every ticket row that names a unit (any list except Projects) opens this modal from the **unit button** on the left of the row; the glyph on that button is the Power vs Cell verdict:
+
+- **⚡ red / 📶 orange**: the background sweep found a power or cell outage. The modal opens with the loss window shaded and markers for when the ticket opened and when the switch came back up.
+- **∿ grey**: no power/cell verdict yet (not checked, inconclusive, or no recent outage; hover to see which). The modal opens on the plain network graphs and runs the check for that unit in the background (a read-only SSH read of the switch's uptime plus Zabbix ping history, usually a few seconds). The verdict line says **Checking…**, then shows the result in words: Power outage, Cell outage, Inconclusive, No recent outage, or **Check failed** with the reason (e.g. "No switch IP", or the switch's SSH timing out on a unit that's fully down). A power/cell result is drawn onto the graphs in place, and the row's badge updates too.
+
+A ticket that names several units ("RD3079(MU6006)RD3231(MU6007)", "RD3237 / RD3219", "RD3079 & RD3231", any separator) gets **one unit button per unit**, in subject order, each with its own verdict glyph (they share one ▾ quick menu). In the modal, a **unit switcher** under the title ("This ticket lists 2 units: RD3079 ∿ RD3231 📶") flips the graphs, verdict, stats, notes and commands to another unit; Resolved/Worked/Skipped stay wired to the one ticket. The background sweep only checks a ticket's first unit, so the others start grey until opened.
+
+**Re-check** on the verdict line runs the check again at any time. The modal is laid out so you can work the ticket without leaving it.
+
+**Summary panel** (top), showing only the parts that apply:
+
+- **Verdict**, on one line: the ⚡ / 📶 badge, **Power outage** or **Cell outage** in words, when the loss window ran (and how long), and how old the ticket is. The sweep's full explanation is behind **Details** (or hover the line).
+- **Switch uptime** when checked and now (estimated), with **↻** to re-read it without closing the modal. The text turns yellow at 20 days up and red at 50.
+- **Stats**, each shown only when there's something to say: **⚠ Active alert** (Zabbix/VRM), **🔌 AC power on / No AC power**, **VRM stale / disconnected**, **battery %**, the 5-day **forecast** (taken at the site's or trailer's own GPS, which can be far from the ticket's region code, e.g. an "LAX" ticket out in the Coachella Valley; the tooltip names the place and coordinates), and **flapping** over the last 7 days (flip count plus a small up/down timeline, from this dashboard's own validation history).
+- **Open Ticket ↗** and the **email status** pill (below).
+- **Resolved / Worked / Skipped**, wired to the same ticket as the row. Closing the modal scrolls back to that row and briefly highlights it.
+- **Output**: what the buttons you press while the modal is open print (a ping, a diagnostic), since the main Stdout is hidden behind the modal. Background output (validation, scheduled polls) stays out of it. It appears once something prints, follows the newest line unless you scroll up, keeps the last 500 lines, and is cleared each time the modal opens. Everything still goes to the main Stdout as well.
+
+**Toolbar:** **Window** (time range), **Refresh**, and **360 Snapshot** (the same feature as Cameras → 360 Snapshot, since checking the sky is often why you opened the graph).
+
+**Right-hand rail**, which stays in place while you scroll the charts:
+
+- **Notes**: the same shared per-unit note as the row's command menu, so a note written in either place shows in both, for everyone. **Ctrl+Enter** saves; saving an empty note clears it. If the saved note fails to load, the box says so, so you don't overwrite it by accident.
+- **Search commands** box, the same one as the row menu (see [Search commands](#search-commands)).
+- **Validate / Weather / Cameras / Open / Diagnostics / Router / Art / Switch / Set Fields / Linux**: the same submenus as the row's quick menu (Set Fields only when opened from a ticket, and still disabled while `DISABLE_ERP_WRITES` is on). Art → **Get site contacts** replaced the old toolbar button.
+
+Under 900px wide the rail moves above the graphs.
+
+**Email status pill.** Shows where the unit stands on outage and recovery emails, from the hourly Recovery Email Check (see [section 4](#4-recovery-email-check)):
+
+| Pill | Meaning |
+|------|---------|
+| ✉ Outage email needed (red) | Unit is down and no outage email has been sent |
+| ✉ Recovery email needed (yellow) | Outage email was sent and the unit is back up |
+| ? No emails · unit back up (orange) | No emails were sent and the unit recovered, so the ticket may be a false positive |
+| ✉ Outage sent · awaiting recovery (grey) | Outage email was sent; the unit is still down |
+| ✓ Emails sent (green) | Both emails have gone out |
+
+The pill is hidden when the unit isn't on the ART report. If the check hasn't run yet, or failed with no earlier result, the pill says so. Hover for the ticket, the check time and any error. **Click** to re-run the check now; it pings every unit on the report, so it takes a few minutes, and the pill updates when it finishes. When a unit is on more than one ticket, the most urgent status is shown.
+
 ![Battery Graphs](docs/screenshots/18-battery-graphs.png)
 
 ### Reports menu
 
-Toolbar → **Reports**: **Flap Report** (fleet-wide, who keeps bouncing healthy/unhealthy), **Units Unplugged**, and **Shaded Units**. The latter two aren't fleet scans — each checks VRM live only for tickets already open on the page with a matching subtype ("Unit Unplugged" / "shaded"), cross-checked against the same logic behind the Diagnostics buttons above.
+Toolbar → **Reports**: **Flap Report** (fleet-wide, who keeps bouncing healthy/unhealthy, from this app's own validation history), **Zabbix Flap Report** (same idea, read straight from Zabbix's own trigger history instead, so it covers the whole fleet continuously), **Camera Outage Report** (units with the SNUC-Watch camera-buffer Zabbix alert open, with each unit's Find Camera result already filled in: the server runs it last at startup and then hourly, so opening Reports just shows the result. **Refresh** re-pulls the list and re-runs every find live; **Find All Cameras** re-runs the finds. With no server result yet (sandbox, or right after a restart) the page loads it live and runs Find All itself, after every other report), **Units Unplugged**, **Shaded Units** (with **Schedule Snapshots for Shaded Units** — auto-schedules a fisheye capture for tomorrow's peak-shading hour on every currently-shaded unit that doesn't already have one queued), **Dead Panels**, **VRM Disconnected**, **Battery Outlook**, **Power & Infra Alerts** (live Zabbix + VRM problems), **Alarm Frequency** (repeat-offender units by alarm episode count, read from local history — not a live fleet sweep like its neighbors), and **Recovery Emails** (the hourly Recovery Email Check as a list: grouped Outage email needed → Recovery email needed → possible false positive → awaiting recovery → emails sent, each row with its status pill, ticket link and a Commands button; the header counts emails waiting to be sent, and **Re-run check now** runs it immediately).
+
+The Camera Outage list on the main dashboard groups a ticket's fanned-out camera rows (one per camera checked) back into a single row with a per-camera status strip, instead of showing up to 5 near-duplicate rows for one ticket.
 
 ### Cameras
 
-- **Fisheye Snapshot** — grab snapshot into the UI  
+- **Fisheye Snapshot** — grab a snapshot into the UI. Scroll to zoom (or the +/−/Reset Zoom buttons), drag to pan once zoomed, and **Copy to clipboard** copies whatever's currently visible — a real crop at source resolution, not a screenshot of on-screen pixels.
+- **360 Snapshot** — one snapshot from every camera on the unit except fisheye. A PTZ-capable camera (verified per-unit, not assumed) tilts up toward the sky first, shoots, then returns to its saved preset — built for visually checking cloud cover against a weather-driven alert (Battery Outlook, Power vs Cell) without driving out. A non-PTZ camera just gets today's static snapshot. Also reachable from the Graphs modal (see below) when it's open on a unit.
 - **Open All Cameras** — multi-tile launch page  
 - **Open Camera N / Open Fisheye** — single camera (when netsheet has IPs)
 
@@ -230,10 +287,16 @@ These open browser tabs / redirects. They do **not** write ERP fields by themsel
 
 - Bounce ports / uptime / log helpers when switch IP exists (see menu items on a unit with a switch).
 
+### Art
+
+A top-level submenu, a peer of Open/Shield rather than nested inside either — this pulls directly from ART, not from ERP/Shield.
+
+- **Get site contacts** — pulls ART report 152 (NOC Outage Site Contacts), filtered down to whichever site this ticket's unit is on. The matches go to stdout and into a popup with one row per line. The **TO: CC** and **TO: Contacts** lines are separate boxed rows: **double-click** one (or focus it and press Enter) to copy just its addresses, without the label, separated by commas (never semicolons, which break Frappe/ERP's send-email To/CC fields). The row flashes "✓ copied". **Copy All** copies the whole block, labels included.
+
 ### Linux / NUC (when unit supports them)
 
 - **NUC:** reboot, uptime, chkdsk (read-only)  
-- **Linux → Scrypted:** Set No Audio, Reboot Scrypted / Reboot PVE, Check Patch Version, Update Patch Version
+- **Linux → Scrypted:** Check Patch Version, Update Patch Version, Set No Audio, Reboot Scrypted / Reboot PVE, **Platform Status** *(which of the sixteen platform services are actually active — run before Restart All Services)*, NVMe Health, Kernel I/O Errors, Boot Errors, Filesystem Mount Health, Link Stats
 
 ### Disabled ERP Write Functions
 
@@ -270,7 +333,9 @@ From **Cameras → Open All Cameras** (or `/issues/cameras-launch/<UNIT>`).
 
 From the Issues Dashboard navbar → **Recovery Email Check** (`/recovery_email`).
 
-The live service pulls ART report **153** (*Shield: NOC: Outage Issues with no initial email*) about once an hour (htmlDataTable → local `.xlsx`; native ART xlsx export fails server-side). Uses `myemail` / `mypass` from `.env`. Honors `PAUSE_AUTOMATED_TASKS`.
+The live service pulls ART report **153** (*Shield: NOC: Outage Issues with no initial email*) about once an hour (htmlDataTable → local `.xlsx`; native ART xlsx export fails server-side). Uses `myemail` / `mypass` from `.env`. Runs regardless of `PAUSE_AUTOMATED_TASKS`.
+
+Straight after each hourly download, the service also runs this check itself and caches one status per unit. After a restart the first download and check run as soon as the Power vs Cell sweep finishes (see [Startup order](#startup-order)), so the pill isn't blank for long. That cache drives the **email status pill** in the Power vs Cell graphs modal (see [Working a ticket from the Power vs Cell modal](#working-a-ticket-from-the-power-vs-cell-modal)). The check only pings units and reads the spreadsheet; it never sends an email or writes to ERP. A check run from this page does not update that cache; click the pill to refresh it.
 
 On the page:
 
@@ -324,7 +389,7 @@ All HTTP routes are defined in `flask_endpoints.py` (there is no separate `app.p
 |------|----------|
 | JSON errors | Usually `{"ok": false, "error": "<message>"}` with `400` / `403` / `404` / `409` / `502` |
 | ERP write guard | When `DISABLE_ERP_WRITES=1` (default), mutating POSTs return **403** with `{"ok": false, "error": "ERP writes are disabled (set DISABLE_ERP_WRITES=0 in .env to enable)."}` |
-| Automation pause | `PAUSE_AUTOMATED_TASKS=1` / sandbox skips background ERP poll unless `force` + `manual` |
+| Automation pause | `PAUSE_AUTOMATED_TASKS=1` pauses the 4:00/4:05/4:10 AM jobs only; sandbox starts no background schedulers |
 | Shared job id | Issues Dashboard uses job id `"shared"` |
 | SSE | `Content-Type: text/event-stream` — lines like `data: {"type":"log","line":"..."}\n\n` |
 
@@ -544,6 +609,16 @@ All HTTP routes are defined in `flask_endpoints.py` (there is no separate `app.p
 - `200` — `image/jpeg` (`Cache-Control: no-store`)
 - `502` — plain-text error
 
+#### `GET /issues/camera-sky-snapshot/<unit>/<target>`
+
+**Description:** Tilt a PTZ-capable camera up toward the sky, snapshot, then return it to its saved preset (see `work_tool.camera_sky_snapshot`). Falls back to a plain in-place snapshot when the camera has no PTZ channel. Locked per `(unit, target)` — a concurrent request for the same camera is refused rather than interleaved.
+
+**Request:** Path `unit`, `target`.
+
+**Response:**
+- `200` — `image/jpeg` (`Cache-Control: no-store`), plus `X-Camera-Tilted` (`1`/`0`) and `X-Camera-Restored` (`1`/`0`, only meaningful when tilted) headers
+- `502` — plain-text error
+
 #### `GET /issues/camera/<unit>/<target>`
 
 **Description:** Redirect helper page into the camera login/proxy flow.
@@ -645,6 +720,16 @@ All HTTP routes are defined in `flask_endpoints.py` (there is no separate `app.p
 **Description:** Redirect to ERP event-records for the unit.
 
 **Request:** Path `unit`.
+
+#### `POST /issues/art-site-contacts/<unit>`
+
+**Description:** ART report 152 (NOC Outage Site Contacts), filtered to this ticket's own site (see `work_tool.get_art_site_contacts`). Pulls the whole report (no server-side filter on ART's end) and matches it down to the unit's site by ERP Site docname/SiteID, falling back to a fuzzy site-name match if ART's own SiteID column is missing.
+
+**Request body (JSON):** `{ "subject": "PHX - RD3076 - ..." }` (used to resolve the site; optional if the unit alone resolves one).
+
+**Response:**
+- `200` — `{"ok": true, "site_id": "...", "site_name": "...", "columns": [...], "site_column": "SiteID", "contacts": [{"SiteID": "...", "Site Name": "...", ...}]}` — `contacts` keeps every column ART returned per row, not just name/email.
+- `400` — `{"ok": false, "error": "..."}`
 
 **Response:** `302`, or `404` if unit/`workTLD` missing.
 
@@ -975,6 +1060,14 @@ None of these change anything on the device, so none take the per-unit lock and 
 
 `status` is `ok` when every service is active, `fail` when any is not.
 
+#### `POST /issues/nuc-disk-health/<unit>`
+
+**Description:** Read-only disk health for a unit's Windows NUC, over the same SSH login chkdsk uses (see `work_tool.nuc_disk_health`): `Get-PhysicalDisk`, `Get-StorageReliabilityCounter`, `MSStorageDriver_FailurePredictStatus` and the System event log (providers disk, Ntfs, stornvme, storahci, iaStor*, volmgr, StorPort; 90 days, warnings and errors).
+
+**Request:** Path `unit` (a NUC unit; PVE units get a 400 pointing at NVMe Health).
+
+**Response:** `200` — `{"ok": true, "status": "ok"|"warn"|"fail", "summary": "...", "reasons": [...], "disks": [{"name", "media", "bus", "health", "size_gb", "temperature", "wear", "read_errors_total", "read_errors_uncorrected", "power_on_hours", "predict_failure", ...}], "events": [{"provider", "id", "count", "tier": "critical"|"warning"|"other", "meaning", "disk", "days_ago", "message"}]}`. `fail` = a drive not Healthy, SMART predicts failure, uncorrected errors, or a failure event in the last 30 days; `warn` = an older failure event, an early-warning event, wear ≥ 80% or ≥ 70 °C. `400` — `{"ok": false, "error": "..."}`.
+
 #### `POST /issues/pve-resources/<unit>`
 
 **Description:** Memory, swap, root disk, load average and VM 101 state on the PVE host. Answers "is the host wedged, or is only the guest down?" PVE units only.
@@ -1111,7 +1204,7 @@ When the unit is free, only `ok`, `busy: false`, `note` and `note_updated_at` ar
 
 #### `GET /issues/unit-note/<unit>`
 
-**Description:** Read the shared free-text note for a unit. Persisted to JSON in the data dir, so it survives restarts and is visible to everyone on the dashboard. Not an ERP write.
+**Description:** Read the shared free-text note for a unit. Persisted to JSON in the data dir, so it survives restarts and is visible to everyone on the dashboard. Shown in the row's command menu and in the Power vs Cell graphs modal's Notes rail. Not an ERP write.
 
 **Request:** Path `unit`.
 
@@ -1219,7 +1312,7 @@ Five steps of one wizard, run in order against a PVE unit. Step 1 acquires the p
 
 **Request:** Path `list_id` (e.g. `false_positives`, `truly_down`, `scrypted_outage`, …). Empty body.
 
-**Disallowed lists:** `discarded_tickets`, `monitoring_hours`, `termination`, `relocation`.
+**Disallowed lists:** `discarded_tickets`, `monitoring_hours`, `termination`, `relocation`, `footage_request`.
 
 **Response:**
 - `200`
@@ -1462,6 +1555,30 @@ Unless noted, these return **403** when ERP writes are disabled.
 **Response:** `200` `text/event-stream`. Done payload includes:
 `needs_recovery_email`, `needs_initial_email`, `potential_false_positive`, `pending_recovery`, `email_status_up_to_date`.
 
+#### `GET /issues/camera-outage-report/cached`
+
+**Description:** The server's scheduled Camera Outage Report (run last at startup, then every `CAMERA_OUTAGE_REFRESH_SECONDS`): units with the camera-buffer alert open plus each unit's camera find, exactly as the per-unit `POST /issues/scrypted-ram-folder/<unit>` or `POST /issues/camera-outage-ping/<unit>` would return it. Never runs a check itself.
+
+**Request:** None.
+
+**Response:** `200` — `{"ok": true, "units": [...], "finds": {"RD3417": {"ok": true, "summary": "...", "cameras": [...]}}, "fetched_at": 1790980790.1, "error": null, "running": false}`. `fetched_at` is `null` until the first scheduled run (always, in sandbox).
+
+#### `GET /issues/recovery-email-status`
+
+**Description:** Cached per-unit result of the hourly recovery email check (run after each ART report download; see `work_tool.recovery_email`). Cheap: never runs the check itself. A failed check keeps the last good `by_unit` and sets `error`.
+
+**Request:** None.
+
+**Response:** `200` — `{"ok": true, "by_unit": {"RD3421": {"status": "needs_initial_email", "issue_id": "...", "url": "...", "subject": "..."}}, "checked_at": 1790959057.5, "error": null, "running": false}`. `status` is one of `needs_initial_email`, `needs_recovery_email`, `potential_false_positive`, `pending_recovery`, `email_status_up_to_date`; when a unit is on several tickets, the most urgent wins. `checked_at` is `null` until the first check completes.
+
+#### `POST /issues/recovery-email-status/refresh`
+
+**Description:** Start the recovery email check now, in the background (downloads the ART report first if none is cached). Read-only: pings units and reads the spreadsheet. This is the only way to run it in sandbox, where the hourly scheduler doesn't start.
+
+**Request:** None.
+
+**Response:** `200` — `{"ok": true, "started": true, "running": true}`, or `"started": false` if a check was already running. Poll `GET /issues/recovery-email-status` until `running` is `false`.
+
 ---
 
 ### Route index (quick reference)
@@ -1490,6 +1607,7 @@ Unless noted, these return **403** when ERP writes are disabled.
 | GET | `/issues/cameras-launch/<unit>` |
 | POST | `/issues/open-camera-urls` |
 | GET | `/issues/camera-snapshot/<unit>/<target>` |
+| GET | `/issues/camera-sky-snapshot/<unit>/<target>` |
 | GET | `/issues/camera/<unit>/<target>` |
 | GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS | `/issues/camera-proxy/<unit>/<target>/` |
 | GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS | `/issues/camera-proxy/<unit>/<target>/<path:subpath>` |
@@ -1543,6 +1661,7 @@ Unless noted, these return **403** when ERP writes are disabled.
 | GET | `/issues/unit-context/<unit>` |
 | POST | `/issues/pve-nvme-health/<unit>` |
 | POST | `/issues/service-status/<unit>` |
+| POST | `/issues/nuc-disk-health/<unit>` |
 | POST | `/issues/pve-resources/<unit>` |
 | POST | `/issues/camera-matrix/<unit>` |
 | POST | `/issues/run-diagnostics/<unit>` |
@@ -1565,6 +1684,7 @@ Unless noted, these return **403** when ERP writes are disabled.
 | GET | `/issues/attached-mu/<unit>` |
 | GET | `/issues/site-page/<unit>` |
 | GET | `/issues/event-records/<unit>` |
+| POST | `/issues/art-site-contacts/<unit>` |
 | GET | `/issues/switch/<unit>` |
 | GET | `/issues/relay/<unit>` |
 | GET | `/issues/pve/<unit>` |
@@ -1572,6 +1692,9 @@ Unless noted, these return **403** when ERP writes are disabled.
 | POST | `/recovery_email/results` |
 | GET | `/recovery_email/watch/<job_id>` |
 | GET | `/recovery_email/stream/<job_id>` |
+| GET | `/issues/camera-outage-report/cached` |
+| GET | `/issues/recovery-email-status` |
+| POST | `/issues/recovery-email-status/refresh` |
 
 ---
 
@@ -1591,12 +1714,14 @@ See `.env.example` for the full list. Common ones:
 | `scryptuserweb` / `scryptuserssh` / `scryptpass` | Scrypted |
 | `MESH_BASE_URL` / `RAINDANCE_BASE_URL` | Optional Open menu bases |
 | `SENTRA_NETWORK_TOOL_V19_DIR` | Path to `Sentra_Network_toolv19` |
-| `PAUSE_AUTOMATED_TASKS` | `1` pauses schedulers / auto poll |
+| `PAUSE_AUTOMATED_TASKS` | `1` pauses the 4:00/4:05/4:10 AM jobs. Read-only background polls run regardless (see [Setup](#setup-coworkers)). |
+| `CAMERA_OUTAGE_REFRESH_SECONDS` | How often the server re-runs the Camera Outage Report + per-unit camera find (default `3600`) |
+| `STARTUP_STAGE_TIMEOUT_SECONDS` | How long each [startup stage](#startup-order) waits for the one before it before starting anyway (default `1800`) |
 | `DISABLE_ERP_WRITES` | `1` (default) leaves ERP write buttons visible but disabled; POST routes return 403. Set `0` to allow writes. Resolve (R) is local-only and stays enabled. |
 | `WORK_TOOL_ENV` / `WORK_TOOL_PORT` | live vs sandbox |
 | `WORK_TOOL_BIND` | Interface to bind. Defaults to `0.0.0.0` so the dashboard is reachable at the machine's LAN IP, which is how the NOC uses it. Set `127.0.0.1` to restrict it to the local machine. Put this in `.env` — the service reads `.env`, not `run_live.bat`. |
-| `myemail` / `mypass` | ART form login (Recovery Email hourly report) |
-| `company` | Service-name prefix on the Scrypted box (`acme` → `acme-web.service`). Required by Restart All Services and Service Status. |
+| `myemail` / `mypass` | ART form login (Recovery Email hourly report and its email status check) |
+| `company` | Service-name prefix on the Scrypted box (`acme` → `acme-web.service`). Required by Restart All Services and Platform Status. |
 | `UNIT_HISTORY_KEEP_DAYS` | Days of validation history to keep in `data/<env>/unit_history.db` (default `90`). A hard 200,000-row ceiling applies regardless. |
 | `ART_DATA_URL` | Optional ART report URL (default reportId=153) |
 | `ART_REPORT_REFRESH_SECONDS` | ART spreadsheet refresh interval (default `3600`) |

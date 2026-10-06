@@ -150,7 +150,28 @@ def _wmo_icon_class(code, cloud_cover=None):
     if cover >= 50 and icon == "sun":
         return "sun-cloud"
     return icon
+# Free-tier Open-Meteo enforces a DAILY call quota (10,000/day), not just a
+# burst limit — caught live, 2026-09-23: "Daily API request limit exceeded.
+# Please try again tomorrow." Once that hits, every call for the rest of
+# the day 429s too, so retrying on the very next poll/page-load just wastes
+# a round trip for a guaranteed failure. This is a short, self-clearing
+# backoff (not a "wait until midnight" one — Open-Meteo doesn't document an
+# exact reset time, and a modest backoff that re-checks periodically is
+# simpler and safer than guessing one) shared by both fetch functions below,
+# so a hit on either one backs off the other too.
+_OPEN_METEO_BACKOFF_SEC = 30 * 60
+_open_meteo_backoff_until = 0
+_open_meteo_backoff_lock = threading.Lock()
+def _open_meteo_blocked():
+    with _open_meteo_backoff_lock:
+        return time.time() < _open_meteo_backoff_until
+def _open_meteo_mark_blocked():
+    global _open_meteo_backoff_until
+    with _open_meteo_backoff_lock:
+        _open_meteo_backoff_until = time.time() + _OPEN_METEO_BACKOFF_SEC
 def _fetch_open_meteo_current(lat, lon):
+    if _open_meteo_blocked():
+        return None, "Open-Meteo rate-limited earlier — backing off, will retry automatically"
     response = requests.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
@@ -166,6 +187,9 @@ def _fetch_open_meteo_current(lat, lon):
         },
         timeout=20,
     )
+    if response.status_code == 429:
+        _open_meteo_mark_blocked()
+        return None, "Open-Meteo rate limit hit — backing off"
     if not response.ok:
         return None, f"Open-Meteo HTTP {response.status_code}"
     payload = response.json() or {}
@@ -388,14 +412,137 @@ def get_weather_for_regions(regions, force=False):
         out[code] = payload
 
     return out, None
+# WEATHER_V2 (2026-09-15, Andrew's own request): the per-ticket weather
+# icon used to key off region_code_from_subject/REGION_WEATHER_COORDS — a
+# fixed metro-center coordinate shared by every ticket whose subject
+# happened to start with the same region code, cheap (~6 Open-Meteo
+# calls total) but only ever as precise as "somewhere in this metro."
+# get_weather_for_units below reuses _resolve_unit_weather_coords (already
+# built for get_unit_weather/Battery Outlook) to fetch each TRAILER's own
+# GPS instead — subject parsing is no longer part of the icon's data path
+# at all. Units resolving to the same rounded coordinate (an RD/FD head
+# and its own MU trailer share one physical location) still share a
+# single Open-Meteo call and cache entry, so a fleet-wide bulk request
+# costs one call per distinct LOCATION, not one per unit.
+_UNIT_WEATHER_CACHE = {}
+_UNIT_WEATHER_CACHE_TTL_SEC = 30 * 60
+_UNIT_WEATHER_CACHE_LOCK = threading.Lock()
+# Weather doesn't meaningfully vary at finer resolution than this even
+# for a precise per-trailer lookup — rounding to 2 decimal places (~1.1km)
+# is purely a cache-grouping key, not a loss of the "per trailer" intent;
+# an RD head resolved via its Site address and its own MU trailer
+# resolved via the trailer's Component can differ by a few meters of GPS
+# noise even at the exact same physical location, and this absorbs that
+# without a second Open-Meteo call for what is, for weather purposes, the
+# same spot.
+_UNIT_WEATHER_COORD_ROUND_DECIMALS = 2
+def get_weather_for_units(unit_subject_pairs, force=False):
+    """
+    Current weather for a batch of units, using each one's own resolved
+    GPS (site address, else attached MU trailer Component — see
+    _resolve_unit_weather_coords) instead of a shared per-region
+    coordinate. unit_subject_pairs is a list of {"unit": ..., "subject":
+    ...} dicts (subject is optional context _resolve_unit_weather_coords
+    can use to help resolve the trailer, same as get_unit_weather takes).
+
+    Returns ({unit: payload_or_None}, error_message). A unit with no
+    resolvable GPS comes back mapped to None rather than omitted, so the
+    caller can tell "checked, nothing to show" from "never asked about
+    this unit" — same convention as get_weather_for_regions omitting a
+    region Open-Meteo itself failed on, just explicit per-unit here since
+    the caller needs to know which specific units came up empty.
+    """
+    wanted = []
+    seen = set()
+    for pair in unit_subject_pairs or []:
+        unit = str((pair or {}).get("unit") or "").strip().upper()
+        subject = str((pair or {}).get("subject") or "").strip()
+        if unit and unit not in seen:
+            seen.add(unit)
+            wanted.append((unit, subject))
+    if not wanted:
+        return {}, None
+
+    # Resolve coordinates first (ERP-only, no Open-Meteo yet) so units
+    # sharing a location can share one fetch below.
+    coords_by_unit = {}
+    group_by_unit = {}
+    for unit, subject in wanted:
+        lat, lon, coord_source, site_id, site_name, trailer, _error_detail = (
+            _resolve_unit_weather_coords(unit, subject)
+        )
+        if lat is None:
+            coords_by_unit[unit] = None
+            continue
+        coords_by_unit[unit] = {
+            "lat": lat, "lon": lon, "coord_source": coord_source,
+            "site_id": site_id, "site_name": site_name, "trailer": trailer,
+        }
+        group_by_unit[unit] = (
+            round(lat, _UNIT_WEATHER_COORD_ROUND_DECIMALS),
+            round(lon, _UNIT_WEATHER_COORD_ROUND_DECIMALS),
+        )
+
+    now = time.time()
+    weather_by_group = {}
+    groups_needed = set(group_by_unit.values())
+    with _UNIT_WEATHER_CACHE_LOCK:
+        for group in list(groups_needed):
+            cached = _UNIT_WEATHER_CACHE.get(group)
+            if not force and cached and cached.get("expires_at", 0) > now:
+                weather_by_group[group] = cached["payload"]
+                groups_needed.discard(group)
+
+    for group in groups_needed:
+        lat, lon = group
+        weather, error = _fetch_open_meteo_current(lat, lon)
+        if error:
+            continue
+        weather_by_group[group] = weather
+        with _UNIT_WEATHER_CACHE_LOCK:
+            _UNIT_WEATHER_CACHE[group] = {
+                "expires_at": now + _UNIT_WEATHER_CACHE_TTL_SEC,
+                "payload": dict(weather),
+            }
+
+    out = {}
+    for unit, _subject in wanted:
+        coords = coords_by_unit.get(unit)
+        if not coords:
+            out[unit] = None
+            continue
+        weather = weather_by_group.get(group_by_unit[unit])
+        if not weather:
+            out[unit] = None
+            continue
+        place = coords["site_name"] or (f"site {coords['site_id']}" if coords["site_id"] else unit)
+        out[unit] = {
+            "unit": unit,
+            "site_id": coords["site_id"],
+            "site_name": coords["site_name"],
+            "trailer": coords["trailer"],
+            "coord_source": coords["coord_source"],
+            "latitude": coords["lat"],
+            "longitude": coords["lon"],
+            **weather,
+            "message": f"{unit} weather @ {place}: {weather['temperature_label']}, {weather['conditions']}",
+        }
+    return out, None
 def _fetch_open_meteo_daily_outlook(lat, lon, days=5):
     """
     Multi-day cloud-cover outlook at a coordinate — the forecast half of the
     battery/weather correlation below. A day counts "cloudy" at >=60% mean
-    cloud cover, which is a coarse cutoff but matches the coarse question
-    being asked (is solar charging about to have a bad week, not exactly how
-    bad). Returns (days_list, error).
+    cloud cover, OR when weather_code itself is >=3 (Overcast, fog, any
+    precipitation/thunderstorm code) — the mean-cover cutoff alone missed
+    days Open-Meteo already labels "Overcast"/"Fog"/etc with a low mean
+    (e.g. an overcast morning + clear afternoon can average under 60% while
+    still being the kind of day that hurts solar charging); reported live on
+    RD3243, 2026-09-29: a 5-day forecast with two "Overcast" days still read
+    "0/5 cloudy" because both had cloud_cover_mean under the threshold.
+    Returns (days_list, error).
     """
+    if _open_meteo_blocked():
+        return None, "Open-Meteo rate-limited earlier — backing off, will retry automatically"
     try:
         response = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -410,6 +557,9 @@ def _fetch_open_meteo_daily_outlook(lat, lon, days=5):
         )
     except requests.RequestException as exc:
         return None, f"Open-Meteo forecast failed: {exc}"
+    if response.status_code == 429:
+        _open_meteo_mark_blocked()
+        return None, "Open-Meteo rate limit hit — backing off"
     if not response.ok:
         return None, f"Open-Meteo HTTP {response.status_code}"
     daily = (response.json() or {}).get("daily") or {}
@@ -424,6 +574,11 @@ def _fetch_open_meteo_daily_outlook(lat, lon, days=5):
             cloudy = float(cover) >= 60
         except (TypeError, ValueError):
             cloudy = False
+        try:
+            if int(code) >= 3:
+                cloudy = True
+        except (TypeError, ValueError):
+            pass
         out.append({
             "date": date,
             "cloud_cover_mean": cover,
@@ -543,15 +698,21 @@ def _resolve_vrm_site(unit_key, subject, id_user, victron_token):
             timezone_name = str(record.get("timezone") or "").strip() or None
             return record.get("idSite"), name, last_seen_seconds_ago, timezone_name, None
     return None, None, None, None, f"No VRM installation named {mu_code} (attached trailer for {unit_key})"
-def _vrm_pv_history_points(site_id, victron_token, days, end=None):
+def _vrm_pv_history_points(site_id, victron_token, days, end=None, interval="hours"):
     """
-    Hourly PVP (solar power) points over the last `days`. Shared by the
-    AC-power solar-ceiling fallback and the shading-dip detector below —
-    both need "what has this trailer's solar produced, hour by hour,
-    recently" and differ only in what they do with it. Returns a list of
-    (timestamp_ms, watts) or None on any failure (network, non-success
-    response, or no data at all) — callers treat None the same as "can't
-    tell," never as "confirmed zero."
+    PVP (solar power) points over the last `days`, at `interval` resolution
+    (VRM accepts "hours" or "15mins" — checked live, 2026-09-15: VRM will
+    happily serve a full 21-day window at 15-minute resolution, it isn't
+    limited to a short recent range the way Zabbix's native-vs-trend split
+    is). Hourly is the default and what most callers want (the AC-power
+    solar-ceiling fallback, detect_solar_shading, detect_persistent_
+    obstruction) — "15mins" exists for detect_compressed_daylight_window,
+    which needs to resolve an edge that can fall in the MIDDLE of an hour;
+    hourly averaging would smear a real sharp cutoff into a
+    misleadingly-gradual-looking one (see COMPRESSED_WINDOW_V1). Returns a
+    list of (timestamp_ms, watts) or None on any failure (network,
+    non-success response, or no data at all) — callers treat None the same
+    as "can't tell," never as "confirmed zero."
     """
     end = end if end is not None else int(time.time())
     try:
@@ -560,7 +721,7 @@ def _vrm_pv_history_points(site_id, victron_token, days, end=None):
             headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
             params=[
                 ("type", "custom"), ("start", end - days * 24 * 3600), ("end", end),
-                ("interval", "hours"), ("attributeCodes[]", "PVP"),
+                ("interval", interval), ("attributeCodes[]", "PVP"),
             ],
             timeout=30,
         )
@@ -632,6 +793,21 @@ def _vrm_pv_typical_by_hour(pv_points, hour_tolerance=1):
 # 6-37% of what that same trailer typically produced in those same hours on
 # other days — comfortably past this cutoff.
 _SHADE_DEFICIT_RATIO = 0.35
+# verify_shading_dip_now's own, much looser bar — a single live reading
+# only needs to sit below this fraction of typical to justify spending a
+# camera fetch on it, NOT the same 35% the aggregate detector above needs.
+# Those are different questions: detect_solar_shading only needs ONE run
+# of points that deep within a whole 30h window to flag a unit at all;
+# demanding every later re-check hit that same severity is a much harder
+# bar than the detection it's meant to confirm, and real shading (drifting
+# sun angle, moving cloud cover) doesn't reliably repeat at full severity
+# on schedule. Caught live, 2026-09-16 (MU8074): a task scheduled off a
+# real, 64%-confidence detection burned all 3 attempts on "Current reading
+# 186W vs this hour's typical 201W (93%) — no dip right now" — a reading
+# that WAS below typical, just not below 35% of it. Calibrated between the
+# regression fixtures in VerifyShadingDipNow: comfortably above the MU8074
+# ratio (~93%) and below the "clearly normal" fixture (~96%).
+_SHADE_VERIFY_DEFICIT_RATIO = 0.94
 # Only judge hours this trailer's own history shows are genuinely, TYPICALLY
 # productive — a low ratio against a near-zero median is meaningless noise,
 # not shading. Raised from an earlier max-based 100W after the false-positive
@@ -1018,26 +1194,365 @@ def detect_persistent_obstruction(site_id, victron_token, days=21, hour_toleranc
     return True, detail, confidence, info
 
 
-def verify_shading_dip_now(unit_key, subject_text, hour_utc, ceiling_days=21):
+# COMPRESSED_WINDOW_V1 (2026-09-15, prompted by a live report on RD3342/
+# MU8043 — a second report on MU9003 turned out, once its own raw data was
+# pulled directly, to be a normal gradual ramp on every day checked, not
+# this pattern; that trailer's own graph likely just looked square-wave-ish
+# from a zoomed-out multi-day view compressing each day's ordinary bell
+# curve into a narrow-looking hump, not a real recurring hard edge):
+# a fixed obstruction can suppress ALL but a narrow midday window every
+# day, not just one hour. Neither existing check sees this shape:
+#   - detect_solar_shading looks for a dip against the trailer's own
+#     hour-of-day typical, but when EVERY affected hour is chronically low,
+#     the "typical" for those hours already reflects the obstruction — there
+#     is no dip left to find.
+#   - detect_persistent_obstruction needs a genuinely productive NEIGHBOR
+#     hour on at least one side of the bad hour to compare against; when
+#     several consecutive hours are all suppressed, no such neighbor exists.
+# What both miss — and what a tech's own eye catches immediately on the
+# graph — is the SHAPE: a healthy day ramps up and down gradually around
+# sunrise/sunset (dawn/dusk taper); an obstructed trailer instead shows a
+# near-vertical step up into a short plateau and an equally abrupt step
+# back down, a square wave rather than a bell curve. This looks for that
+# shape directly rather than for a deficit against any baseline.
+#
+# Runs on 15-MINUTE data, not the hourly resolution every other check here
+# uses — checked live against RD3342/MU8043 (2026-09-15): the real cutoff
+# fell in the MIDDLE of an hour (rose ~11:10-11:25am, fell back ~12:40-
+# 12:55pm Pacific), so the hourly average for those boundary hours blended
+# the dead time with the productive time and read as a gradual ~28% taper
+# — a real, sharp, ~90%+ one-slot drop laundered into a misleadingly
+# gradual-looking one purely by the coarser bucket. 15-minute data resolved
+# the same cutoff correctly.
+_COMPRESSED_WINDOW_SLOT_MINUTES = 15
+_COMPRESSED_WINDOW_MAX_MINUTES = 4 * 60
+# How much of the window's own peak a bordering slot is allowed to keep
+# before this reads as a normal taper rather than a hard cutoff — a real
+# dawn/dusk ramp typically still holds a meaningful fraction of peak one
+# slot out; RD3342's own bordering slots ran under 10% of its window peak.
+_COMPRESSED_WINDOW_EDGE_RATIO = 0.15
+# Looser per-day tolerance for the same edge check, used only in the
+# persistence pass below — checked live (RD3342, 2026-09-15): individual
+# days bounced 4-28% on one edge even though its own MEDIAN across days
+# stayed comfortably under _COMPRESSED_WINDOW_EDGE_RATIO — ordinary
+# day-to-day noise around a real, chronic edge, not evidence the edge
+# itself isn't real.
+_COMPRESSED_WINDOW_DAILY_EDGE_RATIO = 0.30
+# Same "hold across most days, not a one-off" bar as the other V2/V1
+# guards in this file (_SHADE_PERSISTENT_EXCLUSION_DAY_FRACTION,
+# _OBSTRUCTION_MIN_DAY_FRACTION) — a single unusually cloudy-then-clear day
+# could coincidentally produce one square-shaped reading.
+_COMPRESSED_WINDOW_MIN_DAY_FRACTION = 0.70
+def _vrm_pv_typical_by_slot(pv_points, slot_minutes=_COMPRESSED_WINDOW_SLOT_MINUTES):
     """
-    Lightweight, single-point re-check for the shading-snapshot scheduler
-    (work_tool.shading_snapshots): is this trailer's solar reading, RIGHT
-    NOW, still consistent with a dip at hour_utc? A snapshot task already
-    knows which hour to aim for (the worst hour from a past
-    detect_solar_shading run); before spending a camera fetch on it, this
-    confirms the dip is actually happening THIS occurrence too — the
-    shading pattern may have moved, cleared, or that specific day may just
-    be generally cloudy in a way that isn't really "shading" at all.
+    typical_by_slot from a list of (timestamp_ms, watts) points — the
+    MEDIAN of non-zero PVP readings seen in each `slot_minutes`-wide slot
+    of the UTC day (slot 0 = 00:00-00:15, slot 1 = 00:15-00:30, ...). No
+    tolerance blending across neighboring slots (unlike
+    _vrm_pv_typical_by_hour) — COMPRESSED_WINDOW_V1 needs to resolve a
+    sharp edge precisely, which blending would smear right back into the
+    misleadingly-gradual shape finer resolution exists to avoid. Returns
+    (typical_by_slot, slots_per_day).
+    """
+    from statistics import median
+    slots_per_day = (24 * 60) // slot_minutes
+    by_slot_values = {}
+    for t, value in pv_points:
+        if value <= 0:
+            continue
+        dt = datetime.utcfromtimestamp(t / 1000)
+        slot = (dt.hour * 60 + dt.minute) // slot_minutes
+        by_slot_values.setdefault(slot, []).append(value)
+    return {slot: median(values) for slot, values in by_slot_values.items()}, slots_per_day
+def _compressed_window_slot_label(slot, slot_minutes):
+    hour, minute = divmod(slot * slot_minutes, 60)
+    return f"{hour:02d}:{minute:02d}"
+def detect_compressed_daylight_window(site_id, victron_token, days=21):
+    """
+    Looks for a trailer whose entire productive day compresses into a
+    short (<= _COMPRESSED_WINDOW_MAX_MINUTES) window with an abrupt, not
+    gradual, edge on both sides — the square-wave signature of a fixed
+    obstruction that only clears a narrow sun-angle gap each day. See the
+    COMPRESSED_WINDOW_V1 comment above for why detect_solar_shading and
+    detect_persistent_obstruction both miss this shape, and why this runs
+    on 15-minute data rather than the hourly resolution every other check
+    here uses.
 
-    Reuses the same ratio/threshold detect_solar_shading itself uses
-    (_SHADE_DEFICIT_RATIO, _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS) so a
-    verified "yes" here means the same thing a fresh detection would have
-    found, just cheaper (one short recent-history call instead of a full
-    ceiling+run search).
+    Real limitations, stated plainly rather than papered over:
+    - Doesn't handle a productive window that wraps UTC midnight (an
+      installation whose local peak sun hours straddle 00:00 UTC) — the
+      plain min()/max() slot-of-day math below isn't correct for that
+      case, and this returns whatever (likely wrong) window it computes
+      rather than trying to be clever about the wraparound. Not hit by
+      the one real case this was built from (window slots well inside the
+      day), but worth fixing before trusting this near the International
+      Date Line.
+    - Validated so far against exactly ONE real case (RD3342/MU8043,
+      2026-09-15) — treat the specific duration/ratio cutoffs as
+      provisional until a second confirmed example is checked against
+      them. A second reported case (MU9003) did NOT independently confirm
+      once its own raw data was pulled directly — every day checked showed
+      a normal gradual ramp, no hard edge at all — so it isn't counted as
+      a validating example here.
+    - Same cloud-cover confound as every other check here: it cannot
+      independently rule out "this trailer just happens to only get clear
+      sky in a narrow window" from telemetry alone, though a pattern this
+      sharp and this consistent across weeks is a much stronger tell than
+      an ordinary weather-driven dip.
 
-    Returns (is_dip, detail, current_watts, typical_watts). is_dip is None
-    on a data problem (no credentials, no VRM site, no usable history) —
-    never treated as "dip confirmed."
+    Returns (found, detail, confidence, window) — found is None when there
+    isn't enough productive-time history to judge at all. window (when
+    found) is shaped like detect_solar_shading's own: {"start_ts_ms",
+    "end_ts_ms", "hours_utc", "worst_hour_utc"} — start/end come from the
+    most recent day that matched the pattern, and worst_hour_utc is
+    whichever bordering slot had the sharper cutoff (the hour a
+    confirmation snapshot should aim for), converted from slot to hour.
+    """
+    points = _vrm_pv_history_points(site_id, victron_token, days, interval="15mins")
+    if not points:
+        return None, "No solar-power history available", None, None
+    slot_minutes = _COMPRESSED_WINDOW_SLOT_MINUTES
+    typical_by_slot, slots_per_day = _vrm_pv_typical_by_slot(points, slot_minutes)
+    productive_slots = {
+        s for s, w in typical_by_slot.items() if w >= _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS
+    }
+    if not productive_slots:
+        return None, (
+            "Not enough productive time in this trailer's own history to check for a "
+            "compressed daylight window"
+        ), None, None
+
+    window_start = min(productive_slots)
+    window_end = max(productive_slots)
+    window_minutes = (window_end - window_start + 1) * slot_minutes
+    def label(slot):
+        return _compressed_window_slot_label(slot, slot_minutes)
+    if window_minutes > _COMPRESSED_WINDOW_MAX_MINUTES:
+        return False, (
+            f"Productive window spans {window_minutes // 60}h{window_minutes % 60:02d}m "
+            f"({label(window_start)}-{label(window_end)} UTC) — too wide to read as a "
+            f"compressed/obstructed window"
+        ), None, None
+
+    peak_typical = max(typical_by_slot[s] for s in productive_slots)
+    pre_slot = (window_start - 1) % slots_per_day
+    post_slot = (window_end + 1) % slots_per_day
+    pre_ratio = typical_by_slot.get(pre_slot, 0) / peak_typical
+    post_ratio = typical_by_slot.get(post_slot, 0) / peak_typical
+    if pre_ratio > _COMPRESSED_WINDOW_EDGE_RATIO or post_ratio > _COMPRESSED_WINDOW_EDGE_RATIO:
+        return False, (
+            f"Productive window ({label(window_start)}-{label(window_end)} UTC) borders a gradual, "
+            f"not abrupt, edge (bordering slot still at {round(max(pre_ratio, post_ratio) * 100)}% "
+            f"of this window's own peak) — consistent with a normal dawn/dusk taper, not a hard "
+            f"obstruction edge"
+        ), None, None
+
+    # Persistence: does this SAME narrow-window-with-hard-edges shape hold
+    # on most individual days, not just in the aggregated median? Uses a
+    # LOOSER per-day bar than the strict aggregate one above — checked
+    # live (RD3342, 2026-09-15): the aggregated median for each edge ran
+    # comfortably under 15%, but individual days bounced around a fair
+    # bit more (one edge ranged roughly 4-28% day to day even though it
+    # never got anywhere close to gradual-taper territory) — ordinary
+    # per-day noise around a real, chronic edge, not evidence the edge
+    # itself isn't real. Gating day-by-day at the same strict bar the
+    # median has to clear over-rejected a pattern that was plainly there
+    # on the graph. Also tracks the most recent qualifying day, to build a
+    # real window timestamp from (same "window" shape detect_solar_shading
+    # returns).
+    by_day = {}
+    for t, v in points:
+        dt = datetime.utcfromtimestamp(t / 1000)
+        slot = (dt.hour * 60 + dt.minute) // slot_minutes
+        day_slots = by_day.setdefault(dt.date(), {})
+        day_slots[slot] = max(day_slots.get(slot, 0), v)
+    consistent_days = 0
+    total_days = 0
+    latest_consistent_day = None
+    for day, slots_map in by_day.items():
+        day_peak = max((slots_map.get(s, 0) for s in range(window_start, window_end + 1)), default=0)
+        if day_peak < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
+            continue  # not a usable comparison day — cloudy/no data, not evidence either way
+        total_days += 1
+        day_pre_ratio = slots_map.get(pre_slot, 0) / day_peak
+        day_post_ratio = slots_map.get(post_slot, 0) / day_peak
+        if (
+            day_pre_ratio <= _COMPRESSED_WINDOW_DAILY_EDGE_RATIO
+            and day_post_ratio <= _COMPRESSED_WINDOW_DAILY_EDGE_RATIO
+        ):
+            consistent_days += 1
+            if latest_consistent_day is None or day > latest_consistent_day:
+                latest_consistent_day = day
+    if not total_days or consistent_days / total_days < _COMPRESSED_WINDOW_MIN_DAY_FRACTION:
+        return False, (
+            f"Compressed-window shape doesn't hold consistently across days ({consistent_days} of "
+            f"{total_days} clear-enough day(s) in the last {days}d) — likely a one-off, not chronic"
+        ), None, None
+
+    worst_slot = pre_slot if pre_ratio <= post_ratio else post_slot
+    worst_hour, _worst_minute = divmod(worst_slot * slot_minutes, 60)
+    window_start_hour, window_start_minute = divmod(window_start * slot_minutes, 60)
+    window_end_hour, window_end_minute = divmod(window_end * slot_minutes, 60)
+    window = {
+        "start_ts_ms": int(datetime(
+            latest_consistent_day.year, latest_consistent_day.month, latest_consistent_day.day,
+            window_start_hour, window_start_minute, tzinfo=timezone.utc,
+        ).timestamp() * 1000),
+        "end_ts_ms": int(datetime(
+            latest_consistent_day.year, latest_consistent_day.month, latest_consistent_day.day,
+            window_end_hour, window_end_minute, 59, tzinfo=timezone.utc,
+        ).timestamp() * 1000),
+        "hours_utc": sorted({(s * slot_minutes) // 60 for s in productive_slots}),
+        "worst_hour_utc": worst_hour,
+    }
+    confidence = max(40, min(90, round(
+        50
+        + (1 - max(pre_ratio, post_ratio) / _COMPRESSED_WINDOW_EDGE_RATIO) * 20
+        + (consistent_days / total_days) * 20
+    )))
+    detail = (
+        f"Productive window compressed to {window_minutes // 60}h{window_minutes % 60:02d}m "
+        f"({label(window_start)}-{label(window_end)} UTC), with an abrupt (not gradual) edge on both "
+        f"sides — bordering slots run {round(max(pre_ratio, post_ratio) * 100)}% or less of this "
+        f"window's own peak ({round(peak_typical)}W). Held on {consistent_days} of {total_days} "
+        f"clear-enough day(s) in the last {days}d — consistent with a fixed obstruction that only "
+        f"clears a narrow sun-angle gap each day, not ordinary dawn/dusk taper or passing cloud cover."
+    )
+    return True, detail, confidence, window
+
+
+def verify_shading_dip_now(unit_key, subject_text, ceiling_days=21):
+    """
+    Pre-capture re-check for the shading-snapshot scheduler
+    (work_tool.shading_snapshots): is this trailer showing a REAL dip
+    against its own hour-of-day history RIGHT NOW, before spending a
+    camera fetch on it?
+
+    Used to pin to a single fixed hour — whatever detect_solar_shading's
+    worst_hour_utc happened to be the moment "Schedule Snapshot" ran — and
+    compare one live point against just that hour's own typical. That
+    broke down badly: a retry doesn't fire until the FOLLOWING day (see
+    shading_snapshots.next_occurrence_following_day), so by the 2nd or 3rd
+    attempt the fixed hour can be well stale. Caught live, 2026-09-16
+    (MU8087, 42% confidence): the fixed hour (4pm MST) had drifted nearly
+    4 hours from where the trailer's own graph showed an obvious, real dip
+    the same day (~noon-1pm MST) — a small tolerance window around the
+    fixed hour wouldn't have caught that either.
+
+    Now ignores which hour was originally detected entirely: it looks at
+    EVERY hour today already has a reading for, keeps only the ones this
+    trailer's own history says are genuinely productive
+    (_SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS), and checks whichever one is
+    currently showing the deepest deficit against its own typical. A dip
+    gets found wherever it's actually happening right now, not just where
+    it was a day or two ago.
+
+    Returns (is_dip, detail, current_watts, typical_watts, worst_hour_utc)
+    for whichever hour that turned out to be — the caller needs
+    worst_hour_utc to judge whether that hour is close enough to right
+    now to be worth a camera fetch at all (see
+    shading_snapshots.retarget_task: a real dip found several hours away
+    from the current moment is real evidence, but a photo taken NOW
+    wouldn't show it). is_dip is None on a data problem (no credentials,
+    no VRM site, no usable history, or no productive hour with a current
+    reading yet) — never treated as "dip confirmed."
+    """
+    id_user, victron_token, cred_error = _vrm_credentials()
+    if cred_error:
+        return None, cred_error, None, None, None
+    site_id, installation_name, _last_seen, _tz, site_error = _resolve_vrm_site(
+        unit_key, subject_text, id_user, victron_token
+    )
+    if site_error:
+        return None, site_error, None, None, None
+
+    ceiling_points = _vrm_pv_history_points(site_id, victron_token, ceiling_days)
+    if not ceiling_points:
+        return None, "No solar-power history available to verify against", None, None, None
+    typical_by_hour = _vrm_pv_typical_by_hour(ceiling_points)
+
+    recent_points = _vrm_pv_history_points(site_id, victron_token, days=1)
+    if not recent_points:
+        return None, "No current solar-power reading available", None, None, None
+
+    # Newest reading per hour today has data for — hourly granularity
+    # means at most one usable point per hour anyway, but a duplicate/
+    # backfilled point shouldn't let an older one win.
+    newest_by_hour = {}
+    for t, v in recent_points:
+        hour = datetime.utcfromtimestamp(t / 1000).hour
+        if hour not in newest_by_hour or t > newest_by_hour[hour][0]:
+            newest_by_hour[hour] = (t, v)
+
+    # Deepest-ratio productive hour wins — this is deliberately NOT an
+    # average or a "does any hour dip" boolean: the whole point is to
+    # surface the single worst hour today has data for, the same way a
+    # tech scanning the graph by eye would zero in on the deepest dip.
+    candidates = []
+    for hour, (_t, value) in newest_by_hour.items():
+        typical = typical_by_hour.get(hour, 0)
+        if typical < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
+            continue
+        candidates.append((value / typical, hour, value, typical))
+    if not candidates:
+        return None, (
+            "No productive hour in this trailer's own history has a current "
+            "reading yet"
+        ), None, None, None
+
+    ratio, worst_hour, current_value, typical = min(candidates, key=lambda c: c[0])
+    is_dip = current_value < typical * _SHADE_VERIFY_DEFICIT_RATIO
+    ratio_pct = round(ratio * 100)
+    detail = (
+        f"Deepest current reading: {round(current_value)}W at {worst_hour}:00 UTC vs that hour's "
+        f"typical {round(typical)}W ({ratio_pct}%) — {'dip confirmed' if is_dip else 'no dip right now'}"
+    )
+    return is_dip, detail, round(current_value), round(typical), worst_hour
+
+
+# How far (in minutes of day) the newest reading is allowed to sit from
+# the finding's own window_end before this stops being a meaningful check
+# at all — a crash relative to a few hours ago is trivially true every
+# single night, so this only fires near the window's expected edge, not
+# at arbitrary times of day.
+_COMPRESSED_WINDOW_VERIFY_TOLERANCE_MINUTES = 90
+# How far back "the recent peak" looks, in ms — has to comfortably span
+# back past the window's actual start on a normal day (windows checked so
+# far ran 1-4 hours), so the comparison has something real to work with,
+# not just the tail end of the crash itself.
+_COMPRESSED_WINDOW_VERIFY_LOOKBACK_MS = 4 * 3600 * 1000
+def verify_compressed_window_dip_now(
+    unit_key, subject_text, window_start_minutes_utc, window_end_minutes_utc, days=2
+):
+    """
+    Sibling of verify_shading_dip_now, for a COMPRESSED_WINDOW_V1-sourced
+    snapshot task — needed because the plain function's whole-HOUR
+    productive-hour gate doesn't work here. A compressed window's border
+    sits at a precise minute (e.g. 19:30), not a whole hour; rounding to
+    "hour 19" blends in whatever part of that hour was still inside the
+    productive window, which can make a real, ongoing obstruction read as
+    "not a productive hour" or "no dip" even while it's actively
+    happening.
+
+    Deliberately does NOT check a fixed slot the way that first sounds
+    like it should — caught live (RD3096/MU7022, 2026-09-15): the
+    detected window's own edge (from a 21-day aggregate) sat at 19:15
+    UTC, but on the specific day checked, production actually ran strong
+    to 19:40 and didn't crash until 19:55 — a real obstruction's exact
+    edge drifts a bit day to day (the sun's own angle keeps moving,
+    especially this close to the equinox), so a fixed slot pinned to the
+    aggregate's edge can land on the wrong side of THIS day's actual
+    cutoff and misread "no dip" during a still-obstructed stretch. Instead
+    this compares the newest reading against this trailer's own recent
+    peak (_COMPRESSED_WINDOW_VERIFY_LOOKBACK_MS back) — robust to that
+    drift by construction, since it doesn't care exactly when the crash
+    happens, only whether one did. window_end_minutes_utc still gates
+    WHEN this check is meaningful at all (see
+    _COMPRESSED_WINDOW_VERIFY_TOLERANCE_MINUTES) — without that, "output
+    crashed since a few hours ago" is trivially true every single night.
+
+    Returns (is_dip, detail, current_watts, reference_peak_watts). is_dip
+    is None on a data problem — never treated as "dip confirmed."
     """
     id_user, victron_token, cred_error = _vrm_credentials()
     if cred_error:
@@ -1048,32 +1563,50 @@ def verify_shading_dip_now(unit_key, subject_text, hour_utc, ceiling_days=21):
     if site_error:
         return None, site_error, None, None
 
-    ceiling_points = _vrm_pv_history_points(site_id, victron_token, ceiling_days)
-    if not ceiling_points:
+    points = _vrm_pv_history_points(site_id, victron_token, days, interval="15mins")
+    if not points:
         return None, "No solar-power history available to verify against", None, None
-    typical_by_hour = _vrm_pv_typical_by_hour(ceiling_points)
-    typical = typical_by_hour.get(hour_utc, 0)
-    if typical < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
-        return None, f"Hour {hour_utc}:00 (UTC) isn't a productive hour in this trailer's own history", None, round(typical)
+    points = sorted(points)
+    newest_t, newest_value = points[-1]
 
-    recent_points = _vrm_pv_history_points(site_id, victron_token, days=1)
-    if not recent_points:
-        return None, "No current solar-power reading available", None, round(typical)
-    # Prefer a reading whose OWN hour is the one being checked — the
-    # scheduler's fetch can land a little early or late relative to the
-    # scheduled minute; falling back to the single newest point overall
-    # only if nothing landed in the target hour yet.
-    same_hour_points = [
-        (t, v) for t, v in recent_points if datetime.utcfromtimestamp(t / 1000).hour == hour_utc
-    ]
-    newest_t, newest_value = max(same_hour_points or recent_points, key=lambda p: p[0])
-    is_dip = newest_value < typical * _SHADE_DEFICIT_RATIO
-    ratio_pct = round(newest_value / typical * 100) if typical else 0
+    newest_dt = datetime.utcfromtimestamp(newest_t / 1000)
+    newest_minute_of_day = newest_dt.hour * 60 + newest_dt.minute
+    raw_distance = abs(newest_minute_of_day - (window_end_minutes_utc or 0))
+    edge_distance = min(raw_distance, 1440 - raw_distance)  # wrap around midnight
+    if edge_distance > _COMPRESSED_WINDOW_VERIFY_TOLERANCE_MINUTES:
+        return None, (
+            f"Latest reading ({newest_dt.strftime('%H:%M')} UTC) isn't near this window's expected "
+            f"edge yet — nothing to verify at this specific moment"
+        ), round(newest_value), None
+
+    lookback_cutoff = newest_t - _COMPRESSED_WINDOW_VERIFY_LOOKBACK_MS
+    recent_peak = max((v for t, v in points if t >= lookback_cutoff), default=0)
+    if recent_peak < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
+        return None, "No usable recent peak to compare the current reading against", round(newest_value), round(recent_peak)
+
+    ratio = (newest_value / recent_peak) if recent_peak else 0
+    is_dip = ratio <= _COMPRESSED_WINDOW_DAILY_EDGE_RATIO
+    lookback_hours = _COMPRESSED_WINDOW_VERIFY_LOOKBACK_MS // 3600000
     detail = (
-        f"Current reading {round(newest_value)}W vs this hour's typical {round(typical)}W "
-        f"({ratio_pct}%) — {'dip confirmed' if is_dip else 'no dip right now'}"
+        f"Current reading {round(newest_value)}W vs the recent peak {round(recent_peak)}W in the last "
+        f"{lookback_hours}h ({round(ratio * 100)}%) — "
+        f"{'still consistent with the obstruction' if is_dip else 'obstruction seems to have cleared right now'}"
     )
-    return is_dip, detail, round(newest_value), round(typical)
+    return is_dip, detail, round(newest_value), round(recent_peak)
+
+
+# Minimum watts a charge reading must clear its solar basis by, on top of
+# the percentage margin, before it counts as AC. Found live, 2026-10-05 —
+# RD3543/MU8030: a near-empty battery (0%) took 13W while same-instant solar
+# read 8W. 13/8 clears a 15% margin easily, and the ratio-based confidence
+# even scored it 92% "plugged in", while VRM's own dashboard showed the
+# inverter/charger Off, no grid, 102W of solar only. At single-digit watts a
+# few watts of timing/rounding jitter between readings is a huge ratio; a
+# real AC charger pushes hundreds of watts, so a small absolute gap is noise.
+_AC_SPIKE_MIN_EXCESS_W = 50
+# Excess (W) at which the inference reaches its 92% confidence cap; below it
+# confidence scales down with the gap in watts as well as the ratio.
+_AC_SPIKE_FULL_CONFIDENCE_EXCESS_W = 300
 
 
 def _vrm_pv_ceiling_and_recent_spike(
@@ -1161,7 +1694,7 @@ def _vrm_pv_ceiling_and_recent_spike(
             params=[
                 ("type", "custom"), ("start", end - recent_hours * 3600), ("end", end),
                 ("interval", "15mins"), ("attributeCodes[]", "bc"), ("attributeCodes[]", "bv"),
-                ("attributeCodes[]", "PVP"),
+                ("attributeCodes[]", "PVP"), ("attributeCodes[]", "ScW"),
             ],
             timeout=30,
         )
@@ -1178,6 +1711,24 @@ def _vrm_pv_ceiling_and_recent_spike(
     }
     pvp_by_t = {
         p[0]: p[1] for p in (recent_records.get("PVP") or [])
+        if isinstance(p, list) and p[1] is not None
+    }
+    # This trailer's own onboard solar charge controller (where it has
+    # one), not the generic panel-power attribute above — the two don't
+    # always agree at a given instant. Verified live, 2026-09-21, against
+    # every fallback-eligible installation fleet-wide: of 32 units the
+    # ceiling/spike check flagged "AC-fed," 24 had a ScW reading at that
+    # SAME instant that alone covered the flagged charge power — PVP was
+    # the outlier at that point, not evidence of anything electrical (see
+    # MU8019: PVP read 20W at a point where ScW read 37.7W and the battery
+    # took 34W, on a trailer whose real AC charger had been off/stale for
+    # 9.8 days; neighboring points had PVP and ScW tracking within a watt
+    # or two of each other). Taking the higher of the two at each instant
+    # closes that gap without weakening a genuine AC catch — if AC really
+    # is charging beyond what solar (by either reading) can explain, both
+    # stay low together, same as before.
+    scw_by_t = {
+        p[0]: p[1] for p in (recent_records.get("ScW") or [])
         if isinstance(p, list) and p[1] is not None
     }
     bc_points = [p for p in bc_series if isinstance(p, list) and p[1] is not None]
@@ -1203,14 +1754,20 @@ def _vrm_pv_ceiling_and_recent_spike(
             continue
         power = current * voltage
         same_instant_pv = pvp_by_t.get(t)
-        if same_instant_pv is not None:
-            local_ceiling = same_instant_pv
+        same_instant_sc = scw_by_t.get(t)
+        same_instant_candidates = [v for v in (same_instant_pv, same_instant_sc) if v is not None]
+        if same_instant_candidates:
+            local_ceiling = max(same_instant_candidates)
             is_same_instant = True
         else:
             hour = datetime.utcfromtimestamp(t / 1000).hour
             local_ceiling = ceiling_by_hour.get(hour, flat_ceiling)
             is_same_instant = False
-        if power > local_ceiling * margin and (peak_power is None or power > peak_power):
+        clears_basis = (
+            power > local_ceiling * margin
+            and power - local_ceiling >= _AC_SPIKE_MIN_EXCESS_W
+        )
+        if clears_basis and (peak_power is None or power > peak_power):
             peak_power, peak_time, peak_ceiling = power, t, local_ceiling
             peak_is_same_instant = is_same_instant
 
@@ -1236,7 +1793,12 @@ def _vrm_pv_ceiling_and_recent_spike(
     # what a direct charger-state match earns, and floored above pure
     # guessing.
     excess_ratio = peak_power / peak_ceiling if peak_ceiling else 1.0
-    confidence = max(60, min(92, round(50 + (excess_ratio - 1) * 100)))
+    ratio_confidence = round(50 + (excess_ratio - 1) * 100)
+    # ...and with how many watts it cleared it by: a big ratio on tiny
+    # numbers (see _AC_SPIKE_MIN_EXCESS_W) is weak evidence.
+    excess_w = peak_power - peak_ceiling
+    watts_confidence = round(60 + 32 * min(1.0, excess_w / _AC_SPIKE_FULL_CONFIDENCE_EXCESS_W))
+    confidence = max(60, min(92, ratio_confidence, watts_confidence))
     basis = (
         f"the {round(peak_ceiling)}W its solar was actually producing at that same moment"
         if peak_is_same_instant else
@@ -1491,6 +2053,123 @@ def _vrm_soc_points(site_id, victron_token, hours, end=None):
     return points or None
 
 
+# UNPLUGGED_V3: a battery with NO charger hardware at all
+# (no_charger_hardware — _vrm_pv_ceiling_and_recent_spike's own inference
+# can't always resolve this either, since a cloudy day gives no solar
+# spike to compare against a genuinely unplugged battery) still leaves one
+# signal neither of those checks reads: whether the day-to-day PATTERN
+# itself looks externally maintained. A trailer running on solar+battery
+# alone cycles with the sun — SOC climbs through the day and drains
+# overnight/on a cloudy stretch, a real swing every day. A trailer
+# plugged into something that tops it off (AC, a generator, shore power)
+# instead sits pinned near its ceiling with only a thin day-to-day band,
+# because the charger corrects any dip before it can show up as a swing.
+# So a long run of consistently thin daily bands is itself evidence of
+# external power, with no charger device needed to say so directly — and
+# a sudden widening after that run is the same signature in reverse:
+# whatever was topping it off stopped. Caught live, 2026-09-16 (MU9049):
+# SOC pinned ~95-100% for weeks, then visibly sagged into a real daily
+# swing for several days — exactly the shape a disconnection leaves, on a
+# unit with nothing else (no charger telemetry, no AC-sized spike to
+# catch) that would have flagged it.
+_SOC_BAND_FLAT_MAX_PCT = 5.0
+# How many EARLIER days (before the recent window checked below) are
+# needed to call a "consistently thin" baseline real, not a coincidence of
+# a few quiet days.
+_SOC_BAND_MIN_HISTORY_DAYS = 7
+# What fraction of those earlier days has to actually be thin for the
+# baseline to count as "this trailer normally looks externally
+# maintained" at all — not every day needs to be dead flat (a service
+# visit, a brief cloud-driven sag), just most of them.
+_SOC_BAND_MIN_FLAT_DAY_FRACTION = 0.80
+# How many of the MOST RECENT days get checked against that baseline for
+# "still thin" (plugged_in) vs "widened" (recently_unplugged).
+_SOC_BAND_RECENT_DAYS = 2
+# A day needs at least this many SOC points to call its own min/max band
+# real rather than an artifact of one or two sparse readings.
+_SOC_BAND_MIN_POINTS_PER_DAY = 4
+
+
+def _soc_daily_bands(soc_points):
+    """
+    {date: (min_soc, max_soc, point_count)} from (timestamp_ms, soc_pct)
+    points, bucketed by UTC calendar day. Pure logic, no network — split
+    out for testing the same way _find_shading_dip_run is.
+    """
+    by_day = {}
+    for t, v in soc_points:
+        day = datetime.utcfromtimestamp(t / 1000).date()
+        lo, hi, count = by_day.get(day, (v, v, 0))
+        by_day[day] = (min(lo, v), max(hi, v), count + 1)
+    return by_day
+
+
+def _soc_daily_band_verdict(by_day):
+    """
+    Pure logic half of _vrm_soc_daily_band_status — given {date: (min, max,
+    count)}, decides "plugged_in" / "recently_unplugged" / "inconclusive".
+    See _SOC_BAND_FLAT_MAX_PCT's own comment for the reasoning. Split out
+    for the same testability reason as _soc_daily_bands.
+
+    Returns (status, detail).
+    """
+    complete_days = sorted(
+        day for day, (_lo, _hi, count) in by_day.items()
+        if count >= _SOC_BAND_MIN_POINTS_PER_DAY
+    )
+    needed = _SOC_BAND_MIN_HISTORY_DAYS + _SOC_BAND_RECENT_DAYS
+    if len(complete_days) < needed:
+        return "inconclusive", (
+            f"Only {len(complete_days)} day(s) with enough SOC history to judge — need at least {needed}"
+        )
+
+    baseline_days = complete_days[:-_SOC_BAND_RECENT_DAYS]
+    recent_days = complete_days[-_SOC_BAND_RECENT_DAYS:]
+    baseline_flat = [
+        day for day in baseline_days
+        if (by_day[day][1] - by_day[day][0]) <= _SOC_BAND_FLAT_MAX_PCT
+    ]
+    flat_fraction = len(baseline_flat) / len(baseline_days)
+    if flat_fraction < _SOC_BAND_MIN_FLAT_DAY_FRACTION:
+        return "inconclusive", (
+            f"Only {len(baseline_flat)} of {len(baseline_days)} earlier day(s) show a thin "
+            f"(<= {_SOC_BAND_FLAT_MAX_PCT:.0f}%) daily SOC band — this trailer doesn't look "
+            f"externally maintained to begin with"
+        )
+
+    recent_bands = [round(by_day[day][1] - by_day[day][0], 1) for day in recent_days]
+    bands_text = ", ".join(f"{b}%" for b in recent_bands)
+    if all(band <= _SOC_BAND_FLAT_MAX_PCT for band in recent_bands):
+        return "plugged_in", (
+            f"SOC band held thin ({bands_text}) the last {_SOC_BAND_RECENT_DAYS} day(s), same as "
+            f"{len(baseline_flat)} of {len(baseline_days)} earlier day(s) — consistent with an "
+            f"external charger keeping it topped off"
+        )
+    return "recently_unplugged", (
+        f"SOC band widened to {bands_text} the last {_SOC_BAND_RECENT_DAYS} day(s) after "
+        f"{len(baseline_flat)} of {len(baseline_days)} earlier day(s) held thin "
+        f"(<= {_SOC_BAND_FLAT_MAX_PCT:.0f}%) — whatever was keeping this trailer topped off "
+        f"looks like it stopped"
+    )
+
+
+def _vrm_soc_daily_band_status(site_id, victron_token, days=21):
+    """
+    Network half of UNPLUGGED_V3 — see _SOC_BAND_FLAT_MAX_PCT's own
+    comment. Meant as a LAST-RESORT signal for a no_charger_hardware unit
+    the direct reading and _vrm_pv_ceiling_and_recent_spike both couldn't
+    resolve; a battery with real charger telemetry or a clear AC-sized
+    spike never needs this. Returns (status, detail) — see
+    _soc_daily_band_verdict for the possible status values. status is
+    None (data problem — no usable SOC history at all) on a fetch
+    failure, never treated as a verdict either way.
+    """
+    soc_points = _vrm_soc_points(site_id, victron_token, days * 24)
+    if not soc_points:
+        return None, "No SOC history available to check for a daily band pattern"
+    return _soc_daily_band_verdict(_soc_daily_bands(soc_points))
+
+
 def _soc_trend_for_fault_cross_check(site_id, victron_token, soc_now, end=None):
     """
     Network half of the UNPLUGGED_V2 cross-check: fetches the SOC point
@@ -1639,6 +2318,7 @@ def _vrm_power_snapshot_for_site(site_id, installation_name, vrm_last_seen_secon
     # adds evidence on top of what's already known, never overrides a
     # confident direct reading.
     fallback_has_data = True
+    charger_silent = False  # set below when a long-silent charger is treated as absent
     if ac_power_status in ("no_charger_hardware", "uncertain", "stale"):
         inferred_status, inferred_detail, inferred_confidence, fallback_has_data = (
             _vrm_pv_ceiling_and_recent_spike(site_id, victron_token)
@@ -1675,13 +2355,37 @@ def _vrm_power_snapshot_for_site(site_id, installation_name, vrm_last_seen_secon
             # having reported at all — the battery's own solar-only
             # behavior (checked above, no AC-sized spike) is the real,
             # current evidence, same as a true no_charger_hardware case.
+            # Only the LABEL says otherwise (charger_silent, below): it's a
+            # charger that stopped reporting, not a trailer without one.
             ac_power_status = "no_charger_hardware"
+            charger_silent = True
         else:
             # The fallback DID have current battery-current data and found
             # no AC-sized draw — real (if soft) evidence the trailer
             # probably isn't drawing extra power right now even though the
             # charger sub-device itself has gone quiet recently.
             ac_power_status = "uncertain"
+
+    # UNPLUGGED_V3: last resort for a no_charger_hardware unit neither the
+    # direct charger reading nor the same-instant/ceiling spike check
+    # above could resolve — see _vrm_soc_daily_band_status's own
+    # docstring. Deliberately scoped to no_charger_hardware only (not
+    # "uncertain"/"stale" too): those have a charger device that's just
+    # being ambiguous right now, a different situation from a trailer
+    # with no charger telemetry at all to ever read directly. Only
+    # changes anything when the SOC-band evidence is unambiguous — see
+    # its own thresholds; anything murkier ("inconclusive") leaves
+    # ac_power_status exactly as already computed above.
+    if ac_power_status == "no_charger_hardware":
+        band_status, band_detail = _vrm_soc_daily_band_status(site_id, victron_token)
+        if band_status == "plugged_in":
+            ac_power_status = "present"
+            ac_power_confidence = 65
+            ac_power_detail = band_detail
+        elif band_status == "recently_unplugged":
+            ac_power_status = "not_detected"
+            ac_power_confidence = 65
+            ac_power_detail = band_detail
 
     ac_power_labels = {
         "present": "plugged in",
@@ -1691,6 +2395,14 @@ def _vrm_power_snapshot_for_site(site_id, installation_name, vrm_last_seen_secon
         "unknown": "power state unknown — no current VRM data",
     }
     ac_power_label = ac_power_labels.get(ac_power_status, ac_power_status)
+    # Treated exactly like no_charger_hardware above, but there IS a charger
+    # — it just hasn't reported in longer than the disconnected cutoff
+    # (RD3543/MU8030, 2026-10-05: last seen 18.7 days ago, state Off). Saying
+    # "no AC charger on this trailer" there was wrong.
+    if ac_power_status == "no_charger_hardware" and charger_silent:
+        ac_power_label = (
+            f"AC charger not reporting (last seen {_format_age(charger_age_seconds)} ago)"
+        )
 
     # A confident-looking direct verdict built on aging (not yet "stale")
     # data still deserves a hedge in the text an operator actually reads —
@@ -1780,6 +2492,10 @@ def unit_shading_status(unit, subject=""):
     6-37% of what the SAME trailer produced in those SAME hours on other
     days — see detect_solar_shading for the mechanism and its one real
     blind spot (a broadly overcast day looks the same on telemetry alone).
+    When that check comes back clear, detect_compressed_daylight_window
+    gets a second look — it catches the shape detect_solar_shading can't:
+    a trailer whose whole day compresses into one short, hard-edged window
+    (see COMPRESSED_WINDOW_V1).
 
     Read-only against VRM, same as every other check in this module — one
     installations lookup plus two /stats calls (a multi-day ceiling window,
@@ -1813,6 +2529,35 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
     """
     vrm_freshness = _vrm_freshness_tier(vrm_last_seen_seconds_ago)
     found, detail, confidence, window = detect_solar_shading(site_id, victron_token)
+    # detect_solar_shading only sees a DIP against a hour-of-day baseline —
+    # it's structurally blind to a trailer whose entire day compresses into
+    # a short, hard-edged window (see COMPRESSED_WINDOW_V1), since there's
+    # no healthy baseline left for those hours to dip against. Only worth
+    # the extra VRM round trip when the plain check came back genuinely
+    # clear — "unknown" (no data at all) would just fail the same way
+    # again, and "found" already has an answer.
+    #
+    # `source` rides along into the returned dict AND into whatever
+    # snapshot task gets scheduled off this finding — the two detectors'
+    # windows mean fundamentally different things at the MINUTE level (a
+    # dip window is itself the shaded stretch; a compressed window's edges
+    # are precise 15-minute cutoffs, not whole hours), and re-verifying a
+    # compressed-window finding with the plain dip check's whole-hour
+    # rounding blends in part of the still-productive window, reading a
+    # real, ongoing obstruction as "not a productive hour" / "no dip" (see
+    # verify_compressed_window_dip_now — caught live, RD3096/MU7022,
+    # 2026-09-15, still visibly dipping on its own graph while every
+    # scheduled attempt failed this way).
+    source = "dip"
+    if found is False:
+        compressed_found, compressed_detail, compressed_confidence, compressed_window = (
+            detect_compressed_daylight_window(site_id, victron_token)
+        )
+        if compressed_found:
+            found, detail, confidence, window = (
+                compressed_found, compressed_detail, compressed_confidence, compressed_window
+            )
+            source = "compressed_window"
     window_label = None
     if window:
         # Arizona (MST), not each installation's own local time or plain
@@ -1855,6 +2600,18 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
     # confirm either way, not a confirmed problem).
     ui_status = {"shaded": "fail", "clear": "ok", "unknown": "warn"}.get(status, "warn")
 
+    # Only meaningful (and only ever set) for a compressed_window finding —
+    # the precise minute-of-day border a snapshot task needs to verify
+    # against later (see verify_compressed_window_dip_now); a dip-sourced
+    # finding has no equivalent concept and leaves these None.
+    window_start_minutes_utc = None
+    window_end_minutes_utc = None
+    if window and source == "compressed_window":
+        start_dt = datetime.utcfromtimestamp(window["start_ts_ms"] / 1000)
+        end_dt = datetime.utcfromtimestamp(window["end_ts_ms"] / 1000)
+        window_start_minutes_utc = start_dt.hour * 60 + start_dt.minute
+        window_end_minutes_utc = end_dt.hour * 60 + end_dt.minute
+
     return {
         "unit": unit_key,
         "installation_name": installation_name,
@@ -1869,6 +2626,14 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
         # touched — what a scheduled snapshot should aim for (see
         # work_tool.shading_snapshots).
         "shading_worst_hour_utc": window["worst_hour_utc"] if window else None,
+        # "dip" (detect_solar_shading) or "compressed_window"
+        # (detect_compressed_daylight_window) — which detector actually
+        # produced this finding, since re-verifying one needs different
+        # logic than the other (see verify_shading_dip_now vs
+        # verify_compressed_window_dip_now).
+        "shading_source": source,
+        "shading_window_start_minutes_utc": window_start_minutes_utc,
+        "shading_window_end_minutes_utc": window_end_minutes_utc,
         "installation_timezone": timezone_name,
         "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
         "vrm_freshness": vrm_freshness,
@@ -2455,9 +3220,22 @@ def _dead_panel_status_for_site(unit_key, installation_name, vrm_last_seen_secon
     # flagged "dead panel" with a 14-day recent peak of 11W and 0W were
     # both actually VRM-disconnected for 3.5+ and 10+ days respectively —
     # not a panel failure, just no data to measure one. Don't let a
-    # confident hardware verdict stand on stale evidence; downgrade to
-    # "unknown" instead, same principle as _vrm_power_snapshot's "unknown".
-    if found and vrm_freshness in ("stale", "disconnected"):
+    # confident hardware verdict stand on stale evidence.
+    #
+    # Only "disconnected" (>_VRM_STALE_SEC, a full day+ of silence) fully
+    # suppresses the verdict to "unknown" — at that point there's truly no
+    # current data to trust a low reading against. "stale" (_VRM_AGING_SEC
+    # to _VRM_STALE_SEC, i.e. 2-24h old) is a lighter caveat, not a full
+    # blackout: detect_dead_panel's own comparison is already built on a
+    # trailing WEEK of history, not just the single latest sample, so one
+    # stale reading shouldn't erase an otherwise-confirmed shortfall.
+    # Caught live (2026-09-15): MU8024 — the exact unit this codebase's own
+    # DEAD_PANEL_V2 guard-4 threshold was calibrated against as a
+    # ground-truthed confirmed case just two days earlier — flipped from
+    # CONFIRMED dead_panel to fully suppressed "unknown" the moment its VRM
+    # freshness crossed into "stale", with nothing about the panel itself
+    # having changed. That's the false negative this split closes.
+    if found and vrm_freshness == "disconnected":
         found = None
         detail = (
             f"VRM data for this site is {vrm_freshness} ({_format_age(vrm_last_seen_seconds_ago)} old) — "
@@ -2465,6 +3243,14 @@ def _dead_panel_status_for_site(unit_key, installation_name, vrm_last_seen_secon
             f"dead panel; {detail}"
         )
         confidence = None
+    elif found and vrm_freshness == "stale":
+        detail += (
+            f" Caveat: VRM data for this site is stale ({_format_age(vrm_last_seen_seconds_ago)} old) — "
+            f"treat with some caution, though this comparison is built on a trailing week of history, "
+            f"not just the latest reading."
+        )
+        if confidence is not None:
+            confidence = max(30, confidence - 20)
 
     if found is None:
         status = "unknown"
@@ -2610,9 +3396,25 @@ def unit_battery_weather_outlook(unit, subject=""):
         return None, f"Invalid unit: {unit}"
     subject_text = str(subject or "").strip()
 
-    snapshot, error = _vrm_power_snapshot(unit_key, subject_text)
-    if error:
-        return None, error
+    snapshot, vrm_error = _vrm_power_snapshot(unit_key, subject_text)
+    if snapshot is None:
+        # No VRM installation for this trailer (or VRM itself is
+        # unreachable) used to fail the whole request — but the forecast
+        # half below is GPS-only, same as the plain weather glyph, and
+        # doesn't need VRM at all. Show that half anyway instead of
+        # hard-failing over a VRM-only problem; vrm_error still surfaces
+        # via soc_error, same as any other "couldn't read SOC" case.
+        snapshot = {
+            "installation_name": None,
+            "battery_soc_percent": None,
+            "soc_error": vrm_error,
+            "ac_power_status": "unknown",
+            "ac_power_label": "power state unknown — no current VRM data",
+            "ac_power_detail": None,
+            "ac_power_confidence": None,
+            "vrm_freshness": None,
+            "vrm_last_seen_seconds_ago": None,
+        }
     installation_name = snapshot["installation_name"]
     battery_soc_percent = snapshot["battery_soc_percent"]
     soc_error = snapshot["soc_error"]
@@ -2692,6 +3494,12 @@ def unit_battery_weather_outlook(unit, subject=""):
         "battery_soc_percent": battery_soc_percent,
         "soc_error": soc_error,
         "location": location_label,
+        # Where the forecast was actually taken — the site's (or trailer's)
+        # own GPS, which can be far from the ticket's region code (an "LAX"
+        # site out in the Coachella Valley). Shown in the forecast tooltip.
+        "location_lat": lat,
+        "location_lon": lon,
+        "location_source": coord_source,
         "forecast": forecast,
         "cloudy_days": cloudy_days,
         "forecast_days": total_days,
@@ -2704,6 +3512,56 @@ def unit_battery_weather_outlook(unit, subject=""):
         "vrm_last_seen_seconds_ago": snapshot["vrm_last_seen_seconds_ago"],
         "vrm_freshness": vrm_freshness,
         "status": status,
+        "summary": summary,
+    }, None
+def unit_weather_forecast(unit, subject=""):
+    """
+    Multi-day cloud outlook for a unit's location — no VRM call at all.
+    Andrew's own request, 2026-09-29: unit_battery_weather_outlook above
+    always pays for a VRM installations+diagnostics lookup up front, even
+    though its forecast half is GPS-only (_resolve_unit_weather_coords is
+    ERP site/trailer address geocoding, not VRM) and never needed VRM to
+    begin with — wasted latency, and a hard dependency on VRM being up,
+    for a tech who only wants to know what the sky's doing. Same
+    coordinate resolution and Open-Meteo call as that function's forecast
+    half, just without ever touching VRM. Returns (info, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit)
+    if not unit_key:
+        return None, f"Invalid unit: {unit}"
+    subject_text = str(subject or "").strip()
+
+    lat, lon, coord_source, _site_id, site_name, trailer, coord_error = (
+        _resolve_unit_weather_coords(unit_key, subject_text)
+    )
+    if coord_source == "site":
+        location_label = site_name or unit_key
+    elif coord_source == "trailer":
+        location_label = trailer or unit_key
+    else:
+        location_label = unit_key
+
+    forecast = None
+    weather_error = None
+    if lat is not None:
+        forecast, weather_error = _fetch_open_meteo_daily_outlook(lat, lon)
+    else:
+        weather_error = coord_error or "No GPS on site address or trailer"
+
+    cloudy_days = sum(1 for day in (forecast or []) if day.get("cloudy"))
+    total_days = len(forecast or [])
+    if forecast:
+        summary = f"{unit_key} — {cloudy_days}/{total_days} cloudy day(s) ahead at {location_label}"
+    else:
+        summary = f"{unit_key} — forecast unavailable" + (f": {weather_error}" if weather_error else "")
+
+    return {
+        "unit": unit_key,
+        "location": location_label,
+        "forecast": forecast,
+        "cloudy_days": cloudy_days,
+        "forecast_days": total_days,
+        "weather_error": weather_error,
         "summary": summary,
     }, None
 # Weather forecasts, for the fleet-wide pass below, are shared across
@@ -2837,6 +3695,9 @@ def fleet_battery_outlook_status(max_workers=10):
             "vrm_freshness": vrm_freshness,
             "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
             "location": location_label,
+            "location_lat": lat,
+            "location_lon": lon,
+            "location_source": coord_source,
             "forecast": forecast,
             "cloudy_days": cloudy_days,
             "forecast_days": total_days,
@@ -2853,6 +3714,64 @@ def fleet_battery_outlook_status(max_workers=10):
 # One VRM attribute code per chart the UI offers. VRM's own single-letter/
 # short codes (bv, bs, ...) aren't something a NOC tech should have to know,
 # so the UI only ever sees these keys and labels.
+def _vrm_daily_kwh_points(site_id, victron_token, days):
+    """
+    Daily kWh totals — VRM's own "Installation data / System overview"
+    widget data, a separate request from the custom/attributeCodes stats
+    calls the rest of this module uses: VRM's type=kwh mode returns
+    pre-aggregated per-day totals directly, keyed by whichever attribute
+    the installation actually has (checked live, 2026-09-16, MU9049: a
+    solar-only site returns it under both "Pb" and "kwh" with identical
+    values; this takes whichever key is present rather than assuming one
+    name). Returns a list of (timestamp_ms, kwh) points, or None on
+    failure/no data — never raises.
+    """
+    end = int(time.time())
+    try:
+        response = requests.get(
+            f"https://vrmapi.victronenergy.com/v2/installations/{site_id}/stats",
+            headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
+            params=[("type", "kwh"), ("start", end - days * 86400), ("end", end), ("interval", "days")],
+            timeout=30,
+        )
+        payload = response.json()
+    except requests.RequestException:
+        return None
+    if not payload.get("success"):
+        return None
+    records = payload.get("records") or {}
+    series = records.get("kwh") or next(iter(records.values()), None) or []
+    points = [(p[0], p[1]) for p in series if isinstance(p, list) and p[1] is not None]
+    return points or None
+
+
+def _daily_overview_rows(kwh_points, soc_points):
+    """
+    Pure logic: merges per-day Solar kWh totals with per-day SOC min/max
+    bands into one row per calendar day — the same two series VRM's own
+    "System overview" widget charts together (Solar bars, Battery % band).
+    Reuses _soc_daily_bands' own bucketing rather than a separate
+    implementation — every caller here already has both series pulled
+    from the same time window, so this is pure merging, no new data.
+    """
+    by_day = {}
+    for t, v in kwh_points or []:
+        day = datetime.utcfromtimestamp(t / 1000).date()
+        by_day.setdefault(day, {})["solar_kwh"] = round(v, 2)
+    for day, (lo, hi, _count) in _soc_daily_bands(soc_points or []).items():
+        by_day.setdefault(day, {})["soc_min"] = round(lo, 1)
+        by_day.setdefault(day, {})["soc_max"] = round(hi, 1)
+    return [
+        {
+            "date": day.isoformat(),
+            "solar_kwh": by_day[day].get("solar_kwh"),
+            "soc_min": by_day[day].get("soc_min"),
+            "soc_max": by_day[day].get("soc_max"),
+        }
+        for day in sorted(by_day)
+    ]
+
+
 BATTERY_HISTORY_METRICS = {
     "voltage": {"code": "bv", "label": "Battery Voltage", "unit": "V"},
     "soc": {"code": "bs", "label": "Battery SOC", "unit": "%"},
@@ -2932,12 +3851,25 @@ def unit_battery_history(unit, hours=24, subject=""):
             "latest": values[-1] if values else None,
         }
 
+    # "System overview" panel — VRM's own daily Solar-bars/Battery-band
+    # widget, built from the SOC points already fetched above (no extra
+    # call) plus one more request for the pre-aggregated daily kWh totals
+    # (see _vrm_daily_kwh_points — a genuinely different VRM stats mode,
+    # can't ride along on the attributeCodes request above). Soft-fails to
+    # an empty list rather than erroring the whole graphs response — every
+    # other panel here is still useful without it.
+    daily_days = max(1, -(-hours // 24))
+    kwh_points = _vrm_daily_kwh_points(site_id, victron_token, daily_days)
+    soc_point_tuples = [(p["t"], p["v"]) for p in charts.get("soc", {}).get("points") or []]
+    daily_overview = _daily_overview_rows(kwh_points, soc_point_tuples)
+
     return {
         "unit": unit_key,
         "installation_name": installation_name,
         "hours": hours,
         "interval": interval,
         "charts": charts,
+        "daily_overview": daily_overview,
         "vrm_last_seen_seconds_ago": vrm_last_seen_seconds_ago,
         "vrm_freshness": _vrm_freshness_tier(vrm_last_seen_seconds_ago),
     }, None

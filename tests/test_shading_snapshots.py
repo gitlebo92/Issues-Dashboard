@@ -55,6 +55,22 @@ class NextOccurrenceFollowingDay(unittest.TestCase):
         self.assertEqual(datetime.utcfromtimestamp(result).hour, 1)
 
 
+class NextOccurrenceAtOrAfter(unittest.TestCase):
+    def test_lands_today_when_the_hour_hasnt_passed_yet(self):
+        # now is 2025-09-12, ~21:40 UTC; hour 23 hasn't happened yet today —
+        # unlike next_occurrence_following_day, this must NOT wait for
+        # tomorrow (see record_attempt_failure's new_peak_hour_utc: a
+        # freshly-found retarget hour still ahead today shouldn't make a
+        # tech wait an extra day for it).
+        result = shading_snapshots.next_occurrence_at_or_after(23, now=1_757_713_200)
+        self.assertEqual(datetime.utcfromtimestamp(result), datetime(2025, 9, 12, 23, 0, 0))
+
+    def test_lands_tomorrow_when_the_hour_already_passed_today(self):
+        # Same now as above (~21:40 UTC); hour 10 already happened today.
+        result = shading_snapshots.next_occurrence_at_or_after(10, now=1_757_713_200)
+        self.assertEqual(datetime.utcfromtimestamp(result), datetime(2025, 9, 13, 10, 0, 0))
+
+
 class TaskLifecycle(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -131,6 +147,57 @@ class TaskLifecycle(unittest.TestCase):
         task = shading_snapshots.get_task(task_id)
         self.assertEqual(task["status"], "exhausted")
         self.assertEqual(task["attempts_used"], 2)
+
+    def test_new_peak_hour_utc_retargets_instead_of_a_plain_retry(self):
+        # Live regression, RD3365/MU7034, 2026-09-16: scheduled for 7am off
+        # a detection that (correctly, at the time) found that hour worst,
+        # but the trailer's real dip was around noon by the time an
+        # attempt actually ran. A plain retry would just check 7am again;
+        # retargeting updates peak_hour_utc so the NEXT attempt aims at
+        # the hour that's actually dipping.
+        now = time.time()
+        task_id, _, first_attempt = shading_snapshots.schedule_task(
+            "RD3365", "", "fisheye", 7, attempts_total=3, now=now,
+        )
+        shading_snapshots.record_attempt_failure(
+            task_id, "found, but not near enough to now", now=first_attempt, new_peak_hour_utc=12,
+        )
+        task = shading_snapshots.get_task(task_id)
+        self.assertEqual(task["status"], "pending")
+        self.assertEqual(task["attempts_used"], 1)
+        self.assertEqual(task["peak_hour_utc"], 12)
+
+    def test_force_exhaust_skips_straight_to_exhausted_with_attempts_remaining(self):
+        # COMPRESSED_WINDOW_V1 fix: a classic dip-mode task whose target
+        # hour no longer reads as productive is a dead end no retry can
+        # fix — force_exhaust lets the caller stop it immediately rather
+        # than burning through the rest of attempts_total identically.
+        now = time.time()
+        task_id, _, attempt_at = shading_snapshots.schedule_task(
+            "RD1", "", "fisheye", 12, attempts_total=3, now=now,
+        )
+        shading_snapshots.record_attempt_failure(
+            task_id, "Hour 12:00 (UTC) isn't a productive hour", now=attempt_at, force_exhaust=True,
+        )
+        task = shading_snapshots.get_task(task_id)
+        self.assertEqual(task["status"], "exhausted")
+        self.assertEqual(task["attempts_used"], 1)  # only the one real attempt, not all 3
+
+    def test_verify_mode_and_window_minutes_are_stored_and_default_to_dip(self):
+        dip_id, _, _ = shading_snapshots.schedule_task("RD1", "", "fisheye", 12)
+        dip_task = shading_snapshots.get_task(dip_id)
+        self.assertEqual(dip_task["verify_mode"], "dip")
+        self.assertIsNone(dip_task["window_start_minutes_utc"])
+        self.assertIsNone(dip_task["window_end_minutes_utc"])
+
+        cw_id, _, _ = shading_snapshots.schedule_task(
+            "RD2", "", "fisheye", 19,
+            verify_mode="compressed_window", window_start_minutes_utc=945, window_end_minutes_utc=1155,
+        )
+        cw_task = shading_snapshots.get_task(cw_id)
+        self.assertEqual(cw_task["verify_mode"], "compressed_window")
+        self.assertEqual(cw_task["window_start_minutes_utc"], 945)
+        self.assertEqual(cw_task["window_end_minutes_utc"], 1155)
 
     def test_captured_task_saves_image_and_is_readable_back(self):
         task_id, _, attempt_at = shading_snapshots.schedule_task("RD1", "", "fisheye", 12)

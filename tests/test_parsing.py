@@ -70,6 +70,55 @@ class GenericCameraOutageSubject(unittest.TestCase):
         self.assertFalse(work_tool._is_generic_camera_outage_subject(""))
         self.assertFalse(work_tool._is_generic_camera_outage_subject(None))
 
+    def test_no_date_field_still_generic(self):
+        # Live regression, RD3067(MU9034), 2026-09-22: this subject has no
+        # date segment at all — "Camera Outage" goes straight to
+        # Customer-Site. The old "must be a bare date" rule treated that as
+        # a named camera, so camera_targets stayed empty and the ticket
+        # fell through to the generic connectivity check, landing in Up
+        # Steady (false_positives) instead of Camera outage.
+        self.assertTrue(work_tool._is_generic_camera_outage_subject(
+            "LAX - RD3067(MU9034) - Camera Outage - Simplehuman-Simplehuman - Carson"
+        ))
+
+    def test_named_device_attached_is_not_generic(self):
+        # Live regression, FD1040, 2026-09-16: "Camera Outage
+        # MzdUsedBldg-C02-Rear-W down" names one specific camera by its
+        # own site-local label, just not in the c1-4/fisheye pattern
+        # _camera_targets_from_subject recognizes. Treating this as
+        # "generic" (no camera named) expanded one real ticket into 5
+        # near-duplicate rows, one per camera target, instead of the one
+        # it actually was.
+        self.assertFalse(work_tool._is_generic_camera_outage_subject(
+            "HOU - FD1040 - Camera Outage MzdUsedBldg-C02-Rear-W down - "
+            "Coast Buick GMC Mazda-GMC Cadillac 10133"
+        ))
+
+
+class IsCameraViewTicket(unittest.TestCase):
+    def test_dirty_camera_lens_with_no_erp_subtype(self):
+        # Caught live: "OAK-RD3534(MU4058)-Dirty Camera Lens-09/21/26-
+        # Cobalt Builders-Prineville Apartments" came through with no
+        # issue_subtype set (UNDIAGNOSED), so the CAMERA_VIEW_ISSUE_SUBTYPES
+        # ("dirty cameras") check never fired, and the subject-text fallback
+        # didn't recognize "Dirty Camera Lens" either — it ran full outage
+        # validation instead of routing to Camera View.
+        self.assertTrue(work_tool._is_camera_view_ticket(
+            "", "",
+            "OAK-RD3534(MU4058)-Dirty Camera Lens-09/21/26-Cobalt Builders-"
+            "Prineville Apartments",
+        ))
+
+    def test_blurry_and_dark_subject_fallbacks(self):
+        self.assertTrue(work_tool._is_camera_view_ticket("", "", "Blurry Camera on RD3534"))
+        self.assertTrue(work_tool._is_camera_view_ticket("", "", "Dark Views - RD3534"))
+
+    def test_known_subtype_still_matches_regardless_of_subject(self):
+        self.assertTrue(work_tool._is_camera_view_ticket("", "Dirty Cameras", "Router Down"))
+
+    def test_unrelated_subject_does_not_match(self):
+        self.assertFalse(work_tool._is_camera_view_ticket("", "", "Router Down"))
+
 
 class RegionCodeFromSubject(unittest.TestCase):
     def test_parses_each_supported_region(self):
@@ -369,6 +418,57 @@ class IssuesReportMiscellaneousDiscards(unittest.TestCase):
         discarded = result[-1]
         self.assertEqual(len(discarded), 1)
         self.assertEqual(discarded[0]["issue_id"], "ISS-5")
+
+
+class SiteSearchFallbacks(unittest.TestCase):
+    """
+    _find_erp_site_by_subject_fallbacks with ERP's Site search faked by an
+    in-memory list. Regression for RD3248(MU9030) (2026-10-05): its Site is
+    named by an EA code, and the company in the title is the Site's customer.
+    """
+
+    SITES = [
+        {"site_id": "66979", "site_name": "EA-240479 - Houston, Tx (Westheimer)", "status": "Inactive",
+         "region": "HOU", "customer": "Prodiconn Solutions, Inc"},
+        {"site_id": "60001", "site_name": "Fresno Switch Yard", "status": "Active",
+         "region": "OAK", "customer": "City of Fresno"},
+        {"site_id": "60002", "site_name": "Big Co - Dallas", "status": "Active", "region": "DAL", "customer": "Big Co Holdings"},
+        {"site_id": "60003", "site_name": "Big Co - Houston", "status": "Active", "region": "HOU", "customer": "Big Co Holdings"},
+    ]
+
+    def _fake_search(self, filters, limit=20):
+        field, op, value = filters[0]
+        needle = value.strip("%").lower()
+        rows = [
+            s for s in self.SITES
+            if (s.get(field, "").lower() == needle if op == "=" else needle in s.get(field, "").lower())
+        ]
+        return rows[:limit], None
+
+    def _find(self, subject):
+        from unittest import mock
+        with mock.patch.object(work_tool._core, "_search_erp_sites", side_effect=self._fake_search):
+            return work_tool._core._find_erp_site_by_subject_fallbacks(subject)
+
+    def test_site_code_in_title(self):
+        site, _ = self._find("HOU: Deployment Prep - RD3248(MU9030) - 10/5 Prodiconn Solutions, Inc - "
+                             "EA-240479 - (Prodiconn Parking Lot)")
+        self.assertEqual(site["site_id"], "66979")
+
+    def test_customer_name_in_title(self):
+        site, _ = self._find("HOU: Deployment Prep - RD3248(MU9030) - 10/5 Prodiconn Solutions, Inc - "
+                             "(Prodiconn Parking Lot)")
+        self.assertEqual(site["site_id"], "66979")
+
+    def test_region_breaks_a_customer_tie(self):
+        site, _ = self._find("HOU - RD3001(MU1001) - Unit Outage Full - Big Co Holdings")
+        self.assertEqual(site["site_id"], "60003")
+
+    def test_lone_generic_word_never_partial_matches(self):
+        # "Switch" is a partial of "Fresno Switch Yard" — must not resolve.
+        site, error = self._find("OAK - RD9999(MU9999) - Unit Outage Partial - Switch")
+        self.assertIsNone(site)
+        self.assertIn('site name = "Switch"', error)
 
 
 if __name__ == "__main__":

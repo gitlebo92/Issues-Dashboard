@@ -8,6 +8,7 @@
             --accent-hover: #5ee5f7;
             --accent-soft: #8fe9f8;
             --bg-deepest: #000000;
+            --bg-deepest-rgb: 0, 0, 0;
             --bg-panel: #0d1316;
             --bg-sunken: #06090b;
             --border: #1c2a30;
@@ -34,6 +35,61 @@
         }
         h1, h2 { margin-bottom: 8px; }
         .status { color: var(--text-muted); margin-bottom: 12px; }
+        .status.is-error { color: var(--danger); font-weight: 600; }
+
+        /* ---- Toasts ---------------------------------------------------
+           Minimal port of the main Issues Dashboard's toast (see
+           static/issues_results.css) — this page used window.alert()
+           instead, which blocks the whole tab until dismissed. Only the
+           error variant is needed here today; extend if a non-error use
+           shows up. */
+        .toast-stack {
+            position: fixed;
+            right: 16px;
+            bottom: 16px;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: min(420px, calc(100vw - 32px));
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--danger);
+            border-radius: var(--radius);
+            padding: 10px 34px 10px 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            box-shadow: 0 6px 20px rgba(var(--bg-deepest-rgb), 0.45);
+            position: relative;
+            word-break: break-word;
+            white-space: pre-line;
+            animation: toast-in 140ms ease-out;
+        }
+        .toast .toast-close {
+            position: absolute;
+            top: 4px;
+            right: 6px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 2px 4px;
+        }
+        .toast .toast-close:hover { color: var(--text); }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .toast { animation: none; }
+        }
         .app-nav {
             display: flex;
             align-items: center;
@@ -364,6 +420,8 @@
 </head>
 <body>
 
+    <div class="toast-stack" id="toast_stack"></div>
+
     <nav class="app-nav" aria-label="Primary">
         <a class="nav-brand" href="/">Issues Dashboard</a>
         <a class="nav-link" href="/recovery_email">Recovery Email Check</a>
@@ -655,6 +713,47 @@
             }
             consoleLines.push(line);
             renderConsole(true);
+        }
+
+        // Minimal port of the main dashboard's toast (see
+        // static/issues_results.css / issues_results.js) — replaces
+        // window.alert(), which blocks the whole tab until dismissed and
+        // is painful mid-stream. Errors here auto-dismiss after 5s if
+        // nobody hovers over them, matching the main dashboard's current
+        // toast behavior (moving the mouse onto one counts as "seen" and
+        // leaves it up) — every message this shows is already written to
+        // the console pane and the status line too, so losing an unread
+        // one costs nothing.
+        const TOAST_ERROR_AUTO_DISMISS_MS = 5000;
+        const toastStackEl = document.getElementById("toast_stack");
+        function notifyError(message) {
+            const text = String(message == null ? "" : message).trim();
+            if (!text || !toastStackEl) {
+                return null;
+            }
+            const toast = document.createElement("div");
+            toast.className = "toast is-error";
+            toast.textContent = text;
+            const close = document.createElement("button");
+            close.type = "button";
+            close.className = "toast-close";
+            close.setAttribute("aria-label", "Dismiss");
+            close.textContent = "×";
+            close.addEventListener("click", function () {
+                toast.remove();
+            });
+            toast.appendChild(close);
+            toastStackEl.appendChild(toast);
+            let hovered = false;
+            toast.addEventListener("mouseenter", function () {
+                hovered = true;
+            });
+            window.setTimeout(function () {
+                if (!hovered) {
+                    toast.remove();
+                }
+            }, TOAST_ERROR_AUTO_DISMISS_MS);
+            return toast;
         }
 
         function applyListFilters() {
@@ -1127,16 +1226,14 @@
 
         function launchUnitCameras(unit, target, allTargets) {
             if (!unit) {
-                window.alert("Open cameras failed: No unit");
+                notifyError("Open cameras failed: No unit");
                 return;
             }
             if (target === "all") {
                 const launchUrl = "/issues/cameras-launch/" + encodeURIComponent(unit);
                 const win = openBlankTab(launchUrl);
                 if (!win) {
-                    window.alert(
-                        "Pop-up blocked. Allow pop-ups for this site to open cameras."
-                    );
+                    notifyError("Pop-up blocked. Allow pop-ups for this site to open cameras.");
                     return;
                 }
                 const count = (allTargets || []).length;
@@ -1153,9 +1250,7 @@
                 + encodeURIComponent(target);
             const win = openBlankTab(url);
             if (!win) {
-                window.alert(
-                    "Pop-up blocked. Allow pop-ups for this site to open cameras."
-                );
+                notifyError("Pop-up blocked. Allow pop-ups for this site to open cameras.");
                 return;
             }
             logLine("Opened camera " + target + " for " + unit);
@@ -1317,7 +1412,7 @@
                             statusEl.textContent = label + " complete for " + entry.unit;
                         })
                         .catch(function (error) {
-                            window.alert(label + " failed: " + (error.message || error));
+                            notifyError(label + " failed: " + (error.message || error));
                         })
                         .finally(function () {
                             validateBtn.disabled = false;
@@ -1547,10 +1642,21 @@
             applyListFilters();
         }
 
+        let recoveryCheckFailed = false;
         source.onmessage = function (event) {
             const data = JSON.parse(event.data);
             if (data.type === "log") {
                 logLine(data.line);
+                // _run_recovery_email_check publishes exactly this prefix
+                // when the report couldn't be read at all (wrong file,
+                // missing column) and falls back to empty results —
+                // previously that read as a fully up-to-date fleet with
+                // nothing but a scrolling console line to say otherwise.
+                if (String(data.line || "").indexOf("ERROR:") === 0) {
+                    recoveryCheckFailed = true;
+                    statusEl.textContent = data.line;
+                    statusEl.classList.add("is-error");
+                }
             } else if (data.type === "done") {
                 const r = data.results || {};
                 fillList("needs_recovery_email", r.needs_recovery_email, "is-warning");
@@ -1558,7 +1664,13 @@
                 fillList("potential_false_positive", r.potential_false_positive, "is-multi");
                 fillList("pending_recovery", r.pending_recovery, "is-info");
                 fillList("email_status_up_to_date", r.email_status_up_to_date, "is-up");
-                statusEl.textContent = "Validation complete.";
+                // Don't stomp the error message above with a generic
+                // "complete" — the done event right after ERROR still
+                // fires (with empty results), same as the main dashboard's
+                // own fallback-on-failure shape.
+                if (!recoveryCheckFailed) {
+                    statusEl.textContent = "Validation complete.";
+                }
                 applyListFilters();
                 source.close();
             }

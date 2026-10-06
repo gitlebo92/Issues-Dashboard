@@ -138,7 +138,7 @@ def history(unit, days=30, limit=200):
             conn = _connect()
             rows = conn.execute(
                 "SELECT ts, kind, category, led, healthy, detail FROM unit_events"
-                " WHERE unit = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+                " WHERE unit = ? AND ts >= ? ORDER BY ts DESC, id DESC LIMIT ?",
                 (unit, _since_ts(days), int(limit)),
             ).fetchall()
         return [
@@ -165,11 +165,19 @@ def flap_summary(unit, days=7):
     "transitions" counts healthy <-> unhealthy flips in chronological order,
     which is what distinguishes a unit that is simply down (one transition,
     still down) from one that keeps bouncing (many).
+
+    "timeline" is the same query's raw (ts, healthy) rows, chronological —
+    free (already fetched for the transitions count above), and what the
+    Flap Report's per-unit status bar renders instead of just the bare
+    counts, so a tech can see AT A GLANCE whether the flapping is one
+    recent burst or spread evenly across the whole window, not just that
+    it happened N times somewhere in there.
     """
     unit = str(unit or "").strip().upper()
     empty = {
         "unit": unit, "days": days, "checks": 0, "down_checks": 0,
         "transitions": 0, "last_seen": None, "currently_healthy": None,
+        "timeline": [],
     }
     if not unit:
         return empty
@@ -177,7 +185,7 @@ def flap_summary(unit, days=7):
         with _DB_LOCK:
             conn = _connect()
             rows = conn.execute(
-                "SELECT ts, healthy FROM unit_events WHERE unit = ? AND ts >= ? ORDER BY ts ASC",
+                "SELECT ts, healthy FROM unit_events WHERE unit = ? AND ts >= ? ORDER BY ts ASC, id ASC",
                 (unit, _since_ts(days)),
             ).fetchall()
     except Exception as exc:
@@ -205,6 +213,7 @@ def flap_summary(unit, days=7):
         "transitions": transitions,
         "last_seen": datetime.fromtimestamp(last["ts"]).strftime("%Y-%m-%d %H:%M:%S"),
         "currently_healthy": bool(last["healthy"]),
+        "timeline": [{"ts": row["ts"], "healthy": bool(row["healthy"])} for row in rows],
     }
 
 

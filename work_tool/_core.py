@@ -7,6 +7,7 @@ cut safely without being able to run the app - see the notes in CLAUDE.md.
 
 import time
 import requests
+import hashlib
 import csv
 import os
 import sys
@@ -23,6 +24,8 @@ import paramiko
 import threading
 import socket
 import uuid
+import queue
+from xml.etree import ElementTree
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
@@ -97,6 +100,13 @@ def scrypted_web_url(unit):
     if not tld or not unit_name:
         return ""
     return f"https://{unit_name}.{tld}/endpoint/@scrypted/core/public/#/"
+def scrypted_nvr_web_url(unit):
+    """Open Scrypted NVR at https://{unit}.{workTLD}/endpoint/@scrypted/nvr/public/#/."""
+    tld = work_tld()
+    unit_name = str(unit or "").strip()
+    if not tld or not unit_name:
+        return ""
+    return f"https://{unit_name}.{tld}/endpoint/@scrypted/nvr/public/#/"
 def scrypted_open_url(unit):
     """Return a Scrypted web UI URL when the unit has a Scrypted IP in the net sheet."""
     ensure_net_array()
@@ -110,6 +120,19 @@ def scrypted_open_url(unit):
     if url:
         return url
     return f"https://{scrypted_ip}:10443/endpoint/@scrypted/core/public/#/"
+def scrypted_open_nvr_url(unit):
+    """Return the Scrypted NVR web UI URL when the unit has a Scrypted IP in the net sheet."""
+    ensure_net_array()
+    row = ensure_unit_net_info(unit, needed_indexes=(12,))
+    if not row:
+        return ""
+    scrypted_ip = _host_only(row[12] if len(row) > 12 else "")
+    if not scrypted_ip:
+        return ""
+    url = scrypted_nvr_web_url(unit)
+    if url:
+        return url
+    return f"https://{scrypted_ip}:10443/endpoint/@scrypted/nvr/public/#/"
 SCRYPTED_NO_AUDIO_SUFFIXES = ("FISHEYE", "C1-180", "C2-180")
 SCRYPTED_NO_AUDIO_SETTING_KEY = "prebuffer:noAudio"
 def _scrypted_web_credentials():
@@ -307,12 +330,38 @@ def _store_site_id_cache(unit, subject, site_id):
     key = _site_id_cache_key(unit, subject)
     with _SITE_ID_CACHE_LOCK:
         _SITE_ID_CACHE[key] = (site, time.time() + _SITE_ID_CACHE_TTL_SEC)
-def resolve_dashboard_site_id(unit, subject=""):
-    """Resolve Site ID the same way Open Shield does, including project subjects."""
+def resolve_dashboard_site_id(unit, subject="", is_project=False):
+    """
+    Resolve Site ID the same way Open Shield does — but a project and a
+    ticket need opposite strategies here, confirmed with Andrew,
+    2026-09-24: a ticket's unit is almost always an existing, already-
+    deployed unit with a working ERP Component -> Site link, so unit-
+    based resolution (resolve_shield_site_id) is reliable and cheap
+    there. A project's title names the real customer/site, but its
+    Component often has no Site linked yet — verified live: RD3320
+    ("LAX: Deployment Prep...") and RD3208(MU6024) ("NOC Partial
+    Termination...") both hit "Component has no Site" under plain unit-
+    based resolution, same as an un-deployed "NOC Deployment" project
+    would (the one case this already special-cased before). So for a
+    project, name search against the title goes FIRST, falling back to
+    unit-based lookup only if no Site name match is found — not the
+    other way around.
+    """
     subject_text = str(subject or "").strip()
     cached, _ = _cached_site_id(unit, subject_text)
     if cached is not None:
         return cached, None
+    if is_project:
+        site, error = find_erp_site_by_project_subject(subject_text)
+        if not error:
+            site_id = str((site or {}).get("site_id") or "").strip()
+            if site_id:
+                _store_site_id_cache(unit, subject_text, site_id)
+                return site_id, None
+        # No usable name match (typo/abbreviated title, or the search
+        # itself errored) — fall back to the unit's own Component link
+        # rather than failing outright.
+        return resolve_shield_site_id(unit, subject_text)
     if _is_noc_deployment_project_subject(subject_text):
         site, error = find_erp_site_by_project_subject(subject_text)
         if error:
@@ -322,7 +371,42 @@ def resolve_dashboard_site_id(unit, subject=""):
             return "", "Matched Site has no id"
         _store_site_id_cache(unit, subject_text, site_id)
         return site_id, None
-    return resolve_shield_site_id(unit, subject_text)
+    site_id, error = resolve_shield_site_id(unit, subject_text)
+    if site_id or not subject_text:
+        return site_id, error
+    return _site_id_fallback_for_ticket(unit, subject_text, error)
+def _site_id_fallback_for_ticket(unit, subject_text, first_error):
+    """
+    A ticket whose subject's trailer has no Site on its Component
+    ("Component SC-MU9008 has no Site") — Andrew's request, 2026-10-03:
+    fall back instead of failing. Verified live on RD3339(MU9008): the
+    ticket names MU9008, which has no Site, but ERP's own parent-component
+    link for RD3339 points at a trailer that does, and the title's last
+    segment ("Boschma Dairy") matches the same Site by name.
+
+      1. The unit's ERP parent component (what resolve_shield_site_id does
+         when there's no subject) — catches a trailer swapped since the
+         ticket was written.
+      2. A Site-name search on the ticket title, the same cascade projects
+         use (find_erp_site_by_project_subject).
+
+    Read-only. A hit is cached under the ticket's own key, so the next open
+    is instant. If both miss, the original error comes back with what else
+    was tried.
+    """
+    tried = []
+    site_id, error = resolve_shield_site_id(unit, "")
+    if site_id:
+        _store_site_id_cache(unit, subject_text, site_id)
+        return site_id, None
+    tried.append(f"unit's own ERP trailer link: {error}")
+    site, error = find_erp_site_by_project_subject(subject_text)
+    site_id = str((site or {}).get("site_id") or "").strip() if not error else ""
+    if site_id:
+        _store_site_id_cache(unit, subject_text, site_id)
+        return site_id, None
+    tried.append(f"Site name search on the ticket title: {error or 'no Site id'}")
+    return "", f"{first_error}. Also tried — " + "; ".join(tried)
 toolkit = zabbix_tool.Zabbix_Tool_Kit()
 username = os.getenv("username")
 idUser = os.getenv("idUser")
@@ -711,24 +795,25 @@ def stop_router_long_ping(job_id, reason="stopped"):
             "reason": job["stop_reason"],
         }
     return True, f"Long ping {job['stop_reason']}", info
-def start_router_long_ping(unit):
+def _start_long_ping(unit_key, ip, kind):
     """
-    Start `ping {router_ip} -t` for a unit.
-    Auto-cancels after 30 minutes. Returns (payload, error).
+    Start `ping {ip} -t` for a unit, tagged with kind ("router", "switch",
+    "nuc", "pve", "camera:<target>") so a long ping against one target on
+    a unit doesn't silently cancel an already-running one against a
+    different target on the same unit — only a second long ping of the
+    SAME kind on the SAME unit replaces the first (see the matching logic
+    below). Auto-cancels after 30 minutes. Returns (payload, error).
     """
     import uuid
-
-    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
-    if not unit_key:
-        return None, "Missing unit"
-    ip = router_ip_for_unit(unit_key)
-    if not ip:
-        return None, f"No router IP for {unit_key}"
 
     replace_ids = []
     with _long_ping_lock:
         for existing_id, existing in list(_long_ping_jobs.items()):
-            if existing.get("unit") == unit_key and not existing.get("stopped"):
+            if (
+                existing.get("unit") == unit_key
+                and existing.get("kind") == kind
+                and not existing.get("stopped")
+            ):
                 replace_ids.append(existing_id)
     for existing_id in replace_ids:
         stop_router_long_ping(existing_id, reason="replaced")
@@ -750,6 +835,7 @@ def start_router_long_ping(unit):
     job = {
         "job_id": job_id,
         "unit": unit_key,
+        "kind": kind,
         "ip": ip,
         "process": process,
         "started": time.time(),
@@ -772,8 +858,69 @@ def start_router_long_ping(unit):
         "job_id": job_id,
         "unit": unit_key,
         "ip": ip,
+        "kind": kind,
         "max_seconds": _LONG_PING_MAX_SEC,
     }, None
+def start_router_long_ping(unit):
+    """
+    Start `ping {router_ip} -t` for a unit.
+    Auto-cancels after 30 minutes. Returns (payload, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    ip = router_ip_for_unit(unit_key)
+    if not ip:
+        return None, f"No router IP for {unit_key}"
+    return _start_long_ping(unit_key, ip, "router")
+def start_nuc_long_ping(unit):
+    """
+    Start `ping {NUC_ip} -t` for a unit.
+    Auto-cancels after 30 minutes. Returns (payload, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    row = ensure_unit_net_info(unit_key, needed_indexes=(3,))
+    ip = _host_only(row[3]) if row and len(row) > 3 else ""
+    if not ip:
+        return None, f"No NUC IP for {unit_key}"
+    return _start_long_ping(unit_key, ip, "nuc")
+def start_pve_long_ping(unit):
+    """
+    Start `ping {PVE_ip} -t` for a unit.
+    Auto-cancels after 30 minutes. Returns (payload, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    row = ensure_unit_net_info(unit_key, needed_indexes=(11,))
+    ip = _host_only(row[11]) if row and len(row) > 11 else ""
+    if not ip:
+        return None, f"No PVE IP for {unit_key}"
+    return _start_long_ping(unit_key, ip, "pve")
+def start_camera_long_ping(unit, target):
+    """
+    Start `ping {camera_ip} -t` for one of a unit's cameras (target: e.g.
+    "fisheye", "c1", "c2" — see list_unit_cameras).
+    Auto-cancels after 30 minutes. Returns (payload, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit_key)
+    if error:
+        return None, error
+    target_key = str(target or "").strip().lower()
+    camera = next((c for c in (cameras or []) if c.get("target") == target_key), None)
+    if not camera or not camera.get("host"):
+        return None, f"No {target_key or 'matching'} camera configured for {unit_key}"
+    payload, error = _start_long_ping(unit_key, camera["host"], f"camera:{target_key}")
+    if error:
+        return None, error
+    payload["target"] = target_key
+    payload["label"] = camera.get("label", target_key)
+    return payload, None
 def iter_router_long_ping_output(job_id):
     """Yield stdout lines from a long ping job until it exits or is stopped."""
     job_key = str(job_id or "").strip()
@@ -1312,9 +1459,14 @@ def ping_camera(unit, target):
     row = ensure_unit_net_info(unit, needed_indexes=(column,))
     if not row or len(row) <= column or not str(row[column]).strip():
         return None
-    host = str(row[column]).strip()
-    if target == "fisheye":
-        host = _host_only(host)
+    # Every camera column can carry "IP:PORT" (verified live, 2026-09-25,
+    # RD3080: columns 5-9 were all "IP:port", e.g. "10.191.4.246:11080"),
+    # not just fisheye's — this used to strip the port for fisheye only,
+    # so Windows `ping` got handed the literal "IP:PORT" string for every
+    # other camera and failed outright, reporting camera1-4 "down" across
+    # every unit whose netsheet cameras carry a port at all, regardless of
+    # whether the camera was actually reachable.
+    host = _host_only(str(row[column]).strip())
     return _ping_host(host)
 def ping_switch(unit):
     row = ensure_unit_net_info(unit, needed_indexes=(2,))
@@ -1495,17 +1647,31 @@ def is_acrd_unit(unit):
     if n is not None and n > 3300:
         return False
     return not _rd_has_mu_parent(code)
+def is_tippy_unit(unit):
+    """
+    "Tippy" units are an RD/FD head paired with an MU6### trailer
+    (confirmed with Andrew, 2026-09-29) — unlike ACRD, these DO have an
+    MU parent in ERP, but the camera count is the same shape anyway:
+    fisheye + Camera 1–3, never Camera 4.
+    """
+    code = _normalize_netsheet_unit(unit)
+    if not code or not (code.startswith("RD") or code.startswith("FD")):
+        return False
+    mu_code = _erp_parent_mu_code(code)
+    digits = re.sub(r"\D", "", mu_code or "")
+    return bool(digits) and 6000 <= int(digits) <= 6999
 def open_camera_targets_for_unit(unit):
     """Open Cameras targets for a unit.
 
     - Units above 3300: fisheye + C1/C2 only (C3/C4 duplicate C1/C2 in netsheet).
     - ACRD (RD/FD with no MU parent in ERP): fisheye + C1–C3 only (never C4).
+    - Tippy (RD/FD paired with an MU6### trailer): same fisheye + C1–C3, never C4.
     - Otherwise: all configured camera endpoints.
     """
     n = unit_number(unit)
     if n is not None and n > 3300:
         return HIGH_UNIT_OPEN_CAMERA_TARGETS
-    if is_acrd_unit(unit):
+    if is_acrd_unit(unit) or is_tippy_unit(unit):
         return ACRD_OPEN_CAMERA_TARGETS
     return frozenset(CAMERA_ENDPOINTS.keys())
 def in_potential_stale_vpn_range(unit):
@@ -1566,10 +1732,20 @@ def _looks_like_sudo_password_prompt(text):
         if "[sudo] password" in lower and lower.endswith(":"):
             return True
     return False
-def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_prompts=25):
+def _iter_remote_pty_command(client, command, password, timeout=300, max_sudo_prompts=25):
     """
-    Run a remote command on a PTY and feed sudo passwords whenever prompted.
-    Deploy scripts often invoke nested sudo calls that each need a password.
+    Generator half of _run_remote_pty_command: runs a remote command on a
+    PTY, feeding sudo passwords whenever prompted (deploy scripts often
+    invoke nested sudo calls that each need one), but YIELDS output as it
+    arrives instead of collecting it all before returning — for a caller
+    that wants to stream a slow remote command live (see
+    stream_update_unit_patch_version) rather than stare at a blank
+    console for however long the whole thing takes.
+
+    Yields plain str chunks of output, and — as its last item — a
+    ("__exit__", exit_status) tuple once the command actually finishes.
+    Callers that want the old all-at-once behavior should drain this via
+    _run_remote_pty_command below rather than duplicating this loop.
     """
     transport = client.get_transport()
     if transport is None:
@@ -1579,7 +1755,6 @@ def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_pro
     channel.get_pty(width=200, height=50)
     channel.exec_command(command)
 
-    chunks = []
     pending = ""
     password_sent = 0
     deadline = time.monotonic() + timeout
@@ -1602,23 +1777,29 @@ def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_pro
         if channel.recv_ready():
             got_data = True
             data = channel.recv(65535).decode("utf-8", errors="replace")
-            chunks.append(data)
             pending = (pending + data)[-800:]
             maybe_send_password()
+            yield data
         if channel.exit_status_ready():
             while channel.recv_ready():
-                chunks.append(
-                    channel.recv(65535).decode("utf-8", errors="replace")
-                )
+                yield channel.recv(65535).decode("utf-8", errors="replace")
             break
         if not got_data:
             time.sleep(0.15)
-
-    if not channel.exit_status_ready():
+    else:
         channel.close()
         raise TimeoutError(f"Remote command timed out after {timeout}s")
 
-    exit_status = channel.recv_exit_status()
+    yield ("__exit__", channel.recv_exit_status())
+def _run_remote_pty_command(client, command, password, timeout=300, max_sudo_prompts=25):
+    """Blocking wrapper over _iter_remote_pty_command — same signature/return shape as before it was split out."""
+    chunks = []
+    exit_status = None
+    for item in _iter_remote_pty_command(client, command, password, timeout, max_sudo_prompts):
+        if isinstance(item, tuple):
+            exit_status = item[1]
+        else:
+            chunks.append(item)
     return "".join(chunks), exit_status
 def _parse_patch_version(raw):
     text = str(raw or "").strip()
@@ -1751,6 +1932,65 @@ def update_unit_patch_version(unit):
             client.close()
         except Exception:
             pass
+def stream_update_unit_patch_version(unit):
+    """
+    Same SSH+PTY patch-install command as update_unit_patch_version, but
+    yields output live as it arrives instead of collecting all of it
+    before returning. Andrew's own request, 2026-09-17, after RD3421's
+    patch update failed with nothing to look at until the whole thing
+    either finished or hit the 300s timeout — the install script can run
+    for minutes with real intermediate output (package downloads,
+    service restarts) that a tech watching it fail live would want to
+    see as it happens, not just a final all-at-once dump.
+
+    Yields plain text chunks, ending with one final "Patch update
+    finished OK/FAILED for <unit> (exit N)" line once the command
+    completes. Never raises into the caller — any connection/SSH/timeout
+    error is yielded as a line instead, same "readable sentence, not a
+    bare exception" convention the rest of this module uses.
+    """
+    row, host, error = _scrypted_ssh_target(unit)
+    if error:
+        yield f"{error}\n"
+        return
+    username, password = _scrypted_ssh_credentials()
+    install_cmd = (os.getenv("install") or "").strip().strip('"').strip("'")
+    if not username or not password:
+        yield "scryptuserssh/scryptpass are not set in .env\n"
+        return
+    if not install_cmd:
+        yield "install is not set in .env\n"
+        return
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    yield f"Connecting to {unit} ({host})...\n"
+    try:
+        client.connect(hostname=host, port=22, username=username, password=password, timeout=20)
+    except Exception as exc:
+        yield f"SSH connect to {host} failed: {exc}\n"
+        return
+    yield "Connected — running install command...\n"
+    update_command = f"sudo -S bash -c {shlex.quote(install_cmd)}"
+    exit_status = None
+    try:
+        for item in _iter_remote_pty_command(client, update_command, password, timeout=300):
+            if isinstance(item, tuple):
+                exit_status = item[1]
+            elif item:
+                yield item
+    except Exception as exc:
+        yield f"\nUpdate error: {exc}\n"
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    if exit_status is None:
+        yield f"\nPatch update ended without a clear exit status for {unit}\n"
+    elif exit_status == 0:
+        yield f"\nPatch update finished OK for {unit} (exit 0)\n"
+    else:
+        yield f"\nPatch update FAILED for {unit} (exit {exit_status})\n"
 def check_patch_version(unit):
     info, error = get_unit_patch_version(unit)
     if error:
@@ -2559,7 +2799,11 @@ def _unit_device_info(unit):
     has_scrypted = bool(scrypted_ip)
     platform_url = f"https://{scrypted_ip}:5000/system/" if has_platform and scrypted_ip else ""
     scrypted_url = scrypted_open_url(unit) if has_scrypted else ""
-    return switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url, has_scrypted, scrypted_url
+    scrypted_nvr_url = scrypted_open_nvr_url(unit) if has_scrypted else ""
+    return (
+        switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url,
+        has_scrypted, scrypted_url, scrypted_nvr_url,
+    )
 def unit_context_for_ui(unit):
     """Build device context for ad-hoc unit tools (netsheet backfill included)."""
     raw = str(unit or "").strip().upper()
@@ -2584,6 +2828,7 @@ def unit_context_for_ui(unit):
         platform_url,
         has_scrypted,
         scrypted_url,
+        scrypted_nvr_url,
     ) = _unit_device_info(unit_key)
     # No ticket here, so no subject to parse "RD####(MU####)" out of —
     # _vrm_info_from_subject("") would fall back to searching VRM by the RD
@@ -2610,6 +2855,7 @@ def unit_context_for_ui(unit):
         "platform_url": platform_url,
         "has_scrypted": has_scrypted,
         "scrypted_url": scrypted_url,
+        "scrypted_nvr_url": scrypted_nvr_url,
         "compute_label": compute_host_label(unit_key),
         "vrm_mu": vrm_mu,
         "vrm_url": vrm_url,
@@ -3159,7 +3405,20 @@ def _camera_port_open(host, port, timeout=2.0):
     except OSError:
         return False
 def _resolve_camera_port(host, port):
-    """Netsheet cells often omit the port; fall back to the other common web port."""
+    """
+    Netsheet cells often omit the port; fall back to the other common web
+    port. Only ever caches a port _camera_port_open actually confirmed
+    open — a probe that hits a camera mid-reboot or during a brief network
+    blip, with every candidate failing, must not get cached as if it were
+    a real answer: that would stick for the life of the process, silently
+    feeding every later caller (including the test-email loop) a guess
+    that was never verified, long after the camera is reachable again.
+    Caught live: RD3500 and RD3444's fisheye each refused a test-email RPC
+    call once, in an otherwise-healthy run — this cache is why. On a
+    total miss, this returns the original, still-unverified guess (so the
+    CURRENT caller can still try it) but leaves the cache empty, so the
+    NEXT call re-probes fresh instead of trusting that guess forever.
+    """
     if not host or not port:
         return port
     key = f"{host}:{port}"
@@ -3167,15 +3426,13 @@ def _resolve_camera_port(host, port):
         cached = _camera_port_cache.get(key)
     if cached:
         return cached
-    resolved = port
     extras = [item for item in (80, 10080) if item != port]
     for candidate in [port] + extras:
         if _camera_port_open(host, candidate):
-            resolved = candidate
-            break
-    with _camera_port_lock:
-        _camera_port_cache[key] = resolved
-    return resolved
+            with _camera_port_lock:
+                _camera_port_cache[key] = candidate
+            return candidate
+    return port
 def _camera_host_port(value, target):
     """Parse host and port from a netsheet camera cell."""
     text = (value or "").strip()
@@ -3224,6 +3481,48 @@ def list_unit_cameras(unit):
     # filled 2x2; alone on the bottom row when the count is odd).
     cameras.sort(key=lambda item: 1 if item.get("target") == "fisheye" else 0)
     return cameras, None
+def unit_camera_outage_ping_check(unit):
+    """
+    Ping-sweep this unit's configured cameras — a follow-up the "camera
+    outage" glyph runs once it's already showing (SNUC-Watch's "Camera
+    image buffer... remained below X% for N minutes" Zabbix finding), to
+    try naming which specific camera explains it. A camera whose capture
+    pipeline has stalled is usually also unreachable at the network
+    level, so a plain ping is a cheap, read-only way to point at one —
+    but it's a soft signal, not a diagnosis: the alert can be real with
+    every camera still answering fine (a Scrypted-side stall, not a
+    network one), so this only ever ADDS a name when it actually finds
+    one; a clean sweep is not reported as "checked, nothing wrong."
+
+    Runs the sweep concurrently (a handful of cameras at most, each a
+    couple pings) — read-only, no different from any other camera ping
+    already in this module.
+
+    Returns (info, error). info: {"unit", "down_cameras": [{"target",
+    "label", "host"}, ...]} — down_cameras is empty (not an error) when
+    every camera answered.
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit_key)
+    if error:
+        return None, error
+    if not cameras:
+        return {"unit": unit_key, "down_cameras": []}, None
+
+    def _check(camera):
+        _code, output = _ping_host(camera["host"], max_echoes=2, timeout_ms=800)
+        return camera, _ping_reachable(output)
+
+    down_cameras = []
+    with ThreadPoolExecutor(max_workers=min(5, len(cameras))) as pool:
+        for camera, reachable in pool.map(_check, cameras):
+            if not reachable:
+                down_cameras.append({
+                    "target": camera["target"], "label": camera["label"], "host": camera["host"],
+                })
+    return {"unit": unit_key, "down_cameras": down_cameras}, None
 def camera_login_info(unit, target):
     """Return camera web UI launch info (Flask Digest proxy URL)."""
     load_dotenv(env_path)
@@ -3441,13 +3740,31 @@ def _inject_camera_worker_prelude(content, content_type, path, proxy_prefix, cam
     )
     return (prelude + text).encode("utf-8")
 def camera_snapshot(unit, target, channel=1, timeout=20):
-    """Return (jpeg_bytes, error) for one camera using the authenticated proxy path."""
+    """Return (jpeg_bytes, error) for one camera using the authenticated proxy path.
+
+    Vendor-aware: Dahua's cgi-bin/snapshot.cgi 404s on a Hikvision camera
+    (verified live, 2026-09-23, MU1034) — Hikvision serves its snapshot at
+    a completely different ISAPI path instead. Each of this app's camera
+    "targets" is its own single-lens device at its own IP (not an NVR with
+    multiple lenses behind one IP), so the ISAPI channel is always
+    "<channel>01" (channel 1's main stream — verified both "101" and the
+    plain "1" work on that device; "101" is the documented ISAPI form).
+    """
+    info, error = camera_login_info(unit, target)
+    if error:
+        return None, error
+    if info.get("vendor") == "hikvision":
+        subpath = f"ISAPI/Streaming/channels/{int(channel)}01/picture"
+        query_string = b""
+    else:
+        subpath = "cgi-bin/snapshot.cgi"
+        query_string = f"channel={int(channel)}".encode()
     status, _headers, content, error = proxy_camera_http(
         unit,
         target,
-        "cgi-bin/snapshot.cgi",
+        subpath,
         "GET",
-        query_string=f"channel={int(channel)}".encode(),
+        query_string=query_string,
         timeout=timeout,
     )
     if error:
@@ -3459,6 +3776,862 @@ def camera_snapshot(unit, target, channel=1, timeout=20):
     if not content.startswith(b"\xff\xd8"):
         return None, "Camera returned a non-image response"
     return content, None
+_ptz_channel_cache = {}
+_ptz_channel_cache_lock = threading.Lock()
+_PTZ_CHANNEL_CACHE_TTL_SEC = 300
+def _parse_ptz_status_field(content, field):
+    """Pull one `status.Field=value` line out of a Dahua PTZ CGI's plain-text response."""
+    if not content:
+        return None
+    match = re.search(
+        re.escape(field) + r"=([^\r\n]*)",
+        content.decode("utf-8", errors="replace"),
+    )
+    return match.group(1).strip() if match else None
+def _ptz_channel_for_camera(unit, target, timeout=10):
+    """
+    Which HTTP channel of this camera exposes real Dahua PTZ control, if
+    any — 1, or None (not PTZ-capable). Only ever called for a NUC unit
+    (<3300) now — a single-channel PTZ camera on channel 1 (verified
+    live, RD3231). A PVE/Scrypted unit (>=3300) pairs a fixed 180 on
+    channel 1 with a real PTZ on channel 2 of the same IP (verified
+    live, RD3319/RD3419), but the sky-snapshot caller deliberately never
+    probes that PTZ at all — see _camera_sky_snapshot_impl's own comment
+    on why a 3300+ ("Defender") unit always uses the 180 instead,
+    regardless of PTZ capability. `getStatus` returning real `status.`
+    fields is what distinguishes a real PTZ channel from the camera's
+    plain `Bad Request!` on a channel it doesn't have. Cached briefly
+    since this is itself a network call.
+
+    Returns (channel_or_None, unreachable_error). `unreachable_error` is
+    only set when the camera never answered at all (connect timeout/
+    refused, not just "no PTZ here") — `proxy_camera_http` reports that
+    as status=None. Caught live, 2026-09-23 (RD3342 fisheye, camera
+    offline): a dead camera used to burn a full connect timeout probing
+    a channel here and then a SECOND one in the sky-snapshot fallback
+    below, 2x the wait a plain snapshot needed to report the same
+    failure — signaling "don't bother with the fallback either" avoids
+    that second timeout.
+    """
+    cache_key = (unit, target)
+    now = time.time()
+    with _ptz_channel_cache_lock:
+        cached = _ptz_channel_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0], None
+    channel = 1
+    result = None
+    unreachable_error = None
+    status, _headers, content, error = proxy_camera_http(
+        unit, target, "cgi-bin/ptz.cgi", "GET",
+        query_string=f"action=getStatus&channel={channel}".encode(),
+        timeout=timeout,
+    )
+    if not error and status == 200 and content and b"status.PresetID" in content:
+        result = channel
+    elif error and status is None:
+        unreachable_error = error
+    with _ptz_channel_cache_lock:
+        _ptz_channel_cache[cache_key] = (result, now + _PTZ_CHANNEL_CACHE_TTL_SEC)
+    return result, unreachable_error
+_hikvision_ptz_cache = {}
+_hikvision_ptz_cache_lock = threading.Lock()
+_HIKVISION_PTZ_CACHE_TTL_SEC = 300
+# Hikvision continuous-move speed for the sky tilt — NOT the same scale as
+# Dahua's tilt_speed param (that one's a small 1-8-ish Dahua arg2; Hikvision's
+# ContinuousPanTiltSpace is -100..100). Picked from a live timed test,
+# 2026-09-24 (MU1034/camera2): speed 40 moved elevation by roughly 150-160
+# hundredths of a degree per second — comparable pace to the Dahua tilt.
+_HIKVISION_PTZ_TILT_SPEED = 40
+def _parse_hikvision_ptz_position(content):
+    """Pull (elevation, azimuth, zoom) out of a channels/<ch>/status ISAPI
+    response, or None if the fields aren't there — that's how a fixed
+    (non-PTZ) Hikvision camera answers the same path a PTZ one reports
+    real AbsoluteHigh coordinates on."""
+    if not content:
+        return None
+    text = content.decode("utf-8", errors="replace")
+    elevation = re.search(r"<elevation>(-?\d+)</elevation>", text)
+    azimuth = re.search(r"<azimuth>(-?\d+)</azimuth>", text)
+    zoom = re.search(r"<absoluteZoom>(-?\d+)</absoluteZoom>", text)
+    if not (elevation and azimuth and zoom):
+        return None
+    return int(elevation.group(1)), int(azimuth.group(1)), int(zoom.group(1))
+def _hikvision_ptz_position(unit, target, timeout=10):
+    """
+    Whether this Hikvision camera is PTZ-capable, and its current absolute
+    position if so — analogous to _ptz_channel_for_camera's Dahua probe,
+    but simpler: this app's camera "targets" are one lens per IP (see
+    camera_snapshot's own docstring), so there's no per-channel ambiguity
+    to resolve, only "does channel 1 answer with real coordinates."
+
+    Returns (elevation, azimuth, zoom) or None (not PTZ-capable / camera
+    answered but with no PTZ fields), plus unreachable_error (only set on
+    a connection-level failure — see _ptz_channel_for_camera's own note on
+    why that shouldn't be retried with a second full-timeout attempt).
+    Position itself is NOT cached (it's live state, changes on every
+    move) — only whether this camera has PTZ at all.
+    """
+    cache_key = (unit, target)
+    now = time.time()
+    with _hikvision_ptz_cache_lock:
+        cached = _hikvision_ptz_cache.get(cache_key)
+    has_ptz = cached[0] if cached and cached[1] > now else None
+    if cached and cached[1] > now and not has_ptz:
+        return None, None
+    status, _headers, content, error = proxy_camera_http(
+        unit, target, "ISAPI/PTZCtrl/channels/1/status", "GET", timeout=timeout,
+    )
+    if error and status is None:
+        return None, error
+    position = _parse_hikvision_ptz_position(content) if status == 200 else None
+    with _hikvision_ptz_cache_lock:
+        _hikvision_ptz_cache[cache_key] = (position is not None, now + _HIKVISION_PTZ_CACHE_TTL_SEC)
+    return position, None
+def _hikvision_sky_snapshot(unit, target, tilt_seconds, timeout):
+    """
+    Hikvision counterpart to the Dahua tilt/snapshot/restore sequence in
+    _camera_sky_snapshot_impl. Uses ISAPI continuous move (not Dahua's
+    cgi-bin/ptz.cgi — confirmed live, 2026-09-24, MU1034: that path 404s
+    on every Hikvision camera, which is why Hikvision units never tilted
+    before this) and an ABSOLUTE move back to the exact position read
+    before tilting, not a preset — Hikvision's PTZStatus carries no
+    PresetID field to trust the way Dahua's does, but unlike Dahua's own
+    firmware (where read-side and write-side coordinates didn't agree,
+    see camera_sky_snapshot's docstring), a live round-trip test on this
+    hardware restored to the exact original elevation/azimuth/zoom, so
+    absolute-move-back is verified safe here.
+
+    Sign convention verified live, 2026-09-24 (MU1034/camera2) — twice.
+    The first pass trusted the numeric elevation field alone (negative
+    tilt increased it) and shipped with that as "up," but the actual
+    photo showed the camera had tilted toward the ground, not the sky —
+    caught live when it visually pointed at customer's siding instead of
+    the mountains. Redone comparing actual snapshot images: POSITIVE
+    tilt is what points the lens at sky/mountains on this hardware, even
+    though it DECREASES the elevation field. Trust the photo, not the
+    coordinate's sign.
+    """
+    position, unreachable_error = _hikvision_ptz_position(unit, target, timeout=timeout)
+    if position is None:
+        if unreachable_error:
+            return None, False, True, unreachable_error
+        content, error = camera_snapshot(unit, target, channel=1, timeout=timeout)
+        return content, False, True, error
+    elevation, azimuth, zoom = position
+
+    _status, _headers, _content, start_error = proxy_camera_http(
+        unit, target, "ISAPI/PTZCtrl/channels/1/continuous", "PUT",
+        body=f"<PTZData><pan>0</pan><tilt>{_HIKVISION_PTZ_TILT_SPEED}</tilt><zoom>0</zoom></PTZData>".encode(),
+        headers={"Content-Type": "application/xml"}, timeout=timeout,
+    )
+    if start_error:
+        return None, False, True, start_error
+    time.sleep(tilt_seconds)
+    proxy_camera_http(
+        unit, target, "ISAPI/PTZCtrl/channels/1/continuous", "PUT",
+        body=b"<PTZData><pan>0</pan><tilt>0</tilt><zoom>0</zoom></PTZData>",
+        headers={"Content-Type": "application/xml"}, timeout=timeout,
+    )
+    time.sleep(0.5)
+    image, snap_error = camera_snapshot(unit, target, channel=1, timeout=timeout)
+    restore_status, _rh, _rc, restore_error = proxy_camera_http(
+        unit, target, "ISAPI/PTZCtrl/channels/1/absolute", "PUT",
+        body=(
+            f"<PTZData><AbsoluteHigh><elevation>{elevation}</elevation>"
+            f"<azimuth>{azimuth}</azimuth><absoluteZoom>{zoom}</absoluteZoom>"
+            f"</AbsoluteHigh></PTZData>"
+        ).encode(),
+        headers={"Content-Type": "application/xml"}, timeout=timeout,
+    )
+    was_restored = False
+    if not restore_error and restore_status == 200:
+        time.sleep(1.5)
+        confirm_position, _confirm_error = _hikvision_ptz_position(unit, target, timeout=timeout)
+        if confirm_position is not None:
+            c_elev, c_azim, c_zoom = confirm_position
+            was_restored = abs(c_elev - elevation) <= 5 and abs(c_azim - azimuth) <= 5 and abs(c_zoom - zoom) <= 2
+    if snap_error:
+        return None, True, was_restored, snap_error
+    return image, True, was_restored, None
+_ptz_sky_snapshot_locks = {}
+_ptz_sky_snapshot_locks_guard = threading.Lock()
+def camera_sky_snapshot(unit, target, tilt_seconds=2.5, tilt_speed=4, timeout=20):
+    """
+    For a PTZ-capable camera: tilt up toward the sky, snapshot, then
+    return to wherever it started — for visually checking cloud cover
+    against a weather-driven alert (Battery Outlook, Power vs Cell)
+    without driving out. Falls back to a plain in-place snapshot for a
+    camera with no PTZ channel (fisheye, a unit with none at all, or a
+    3300+ "Defender" unit — see _camera_sky_snapshot_impl's own comment
+    on why those deliberately skip a PTZ that's actually there).
+
+    Uses a CONTINUOUS "Up" move + native GotoPreset for the return trip,
+    not an absolute PositionABS move to captured coordinates — verified
+    live, 2026-09-22 (RD3231): the read-side position getStatus reports
+    and the write-side units PositionABS's own arg1/arg2 expect do NOT
+    match on this firmware (a move to what should have been ~190°/45°
+    landed at 355°/0° instead), so trusting that math to fly a return
+    trip is not safe. GotoPreset needs no coordinate math at all — every
+    PTZ camera in the fleet sits parked on a saved preset when idle
+    (confirmed with Andrew, 2026-09-22), defaulting to preset 1 on the
+    rare one that somehow isn't. On RD3231 specifically, "Up" was also
+    seen to self-limit at level/horizon (tilt landing exactly at 0.0°,
+    not negative) — but that limit is NOT universal, and it's a hard
+    position cap, not a function of how long "Up" is held: caught live,
+    2026-09-29 (RD3122), the same default rotated that camera's housing
+    into frame (most of the shot just the underside of the hood), and
+    cutting tilt_seconds all the way from 2.5 down to 0.8 changed
+    NOTHING — RD3122 reached its own (much steeper) self-limit almost
+    instantly either way, same as RD3231 reaches its own more useful one
+    quickly. Reverted to 2.5 accordingly (no downside to the original
+    value once duration was ruled out as the lever). Fixing RD3122
+    itself would need a fundamentally different approach — polling the
+    live tilt position during the move and stopping at an angle
+    threshold, not a blind timed pulse — not something attempted here.
+
+    Returns (jpeg_bytes, was_tilted, was_restored, error). was_restored is
+    always True on the non-PTZ fallback path (nothing moved, nothing to
+    restore) — it's only meaningful when was_tilted is True, and even then
+    it's VERIFIED, not just trusted from the GotoPreset command's own "OK"
+    response: that only confirms the move was accepted, not that the
+    camera actually got there, so a follow-up getStatus checks the real
+    PresetID before this is called a success. Caught live, 2026-09-23: the
+    restore call's result used to be discarded entirely, so a failed
+    restore reported full success with the camera silently left tilted.
+
+    Locked per (unit, target): a double-click, two open tabs, or firing
+    this from both the command menu and the Graphs modal on the same
+    camera used to be able to interleave two independent tilt/restore
+    sequences against the same physical hardware — caught live,
+    2026-09-23, since one full cycle measured ~26s, plenty of window to
+    double-fire. A non-blocking lock refuses the second call outright
+    instead of queuing or racing it.
+    """
+    lock_key = (str(unit or "").strip().upper(), str(target or "").strip().lower())
+    with _ptz_sky_snapshot_locks_guard:
+        lock = _ptz_sky_snapshot_locks.setdefault(lock_key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return None, False, False, (
+            f"A 360/sky snapshot is already in progress for {unit}'s {target} camera — wait for it to finish"
+        )
+    try:
+        return _camera_sky_snapshot_impl(unit, target, tilt_seconds, tilt_speed, timeout)
+    finally:
+        lock.release()
+def _camera_sky_snapshot_impl(unit, target, tilt_seconds, tilt_speed, timeout):
+    info, login_error = camera_login_info(unit, target)
+    if login_error:
+        return None, False, True, login_error
+    if info.get("vendor") == "hikvision":
+        return _hikvision_sky_snapshot(unit, target, tilt_seconds, timeout)
+    if uses_pve(unit):
+        # 3300+ units pair a fixed 180 (channel 1) with a real PTZ
+        # (channel 2) on the same IP for BOTH camera1 and camera2 — this
+        # is the "2 PTZ + 2 180" shape Andrew calls a Defender unit, not
+        # an exception. Confirmed live, 2026-09-29 (RD3319/RD3419): the
+        # PTZ channel on these is routinely pointed at active construction
+        # work (zoomed in, tracking), not a general area view, so tilting
+        # it for a routine weather check both interrupts that and (being
+        # zoomed in) wouldn't show much sky anyway even if the tilt itself
+        # worked perfectly. The 180 is the right channel for this
+        # regardless of PTZ capability, so skip the probe/tilt/restore
+        # dance entirely here rather than only falling back to it when no
+        # PTZ is found.
+        content, error = camera_snapshot(unit, target, channel=1, timeout=timeout)
+        return content, False, True, error
+    channel, unreachable_error = _ptz_channel_for_camera(unit, target, timeout=timeout)
+    if channel is None:
+        if unreachable_error:
+            # Camera never answered the PTZ probe at all — a plain
+            # snapshot would hit the same dead host again, not a
+            # different failure mode, so don't pay for a third timeout.
+            return None, False, True, unreachable_error
+        content, error = camera_snapshot(unit, target, channel=1, timeout=timeout)
+        return content, False, True, error
+
+    status, _headers, status_content, error = proxy_camera_http(
+        unit, target, "cgi-bin/ptz.cgi", "GET",
+        query_string=f"action=getStatus&channel={channel}".encode(), timeout=timeout,
+    )
+    if error or status != 200:
+        return None, False, True, error or f"PTZ status returned HTTP {status}"
+    preset_id = _parse_ptz_status_field(status_content, "status.PresetID")
+    if not preset_id or preset_id == "0":
+        preset_id = "1"
+
+    _status, _headers, _content, start_error = proxy_camera_http(
+        unit, target, "cgi-bin/ptz.cgi", "GET",
+        query_string=f"action=start&channel={channel}&code=Up&arg1=0&arg2={tilt_speed}&arg3=0".encode(),
+        timeout=timeout,
+    )
+    if start_error:
+        return None, False, True, start_error
+    time.sleep(tilt_seconds)
+    proxy_camera_http(
+        unit, target, "cgi-bin/ptz.cgi", "GET",
+        query_string=f"action=stop&channel={channel}&code=Up&arg1=0&arg2=0&arg3=0".encode(),
+        timeout=timeout,
+    )
+    # MoveStatus can still read "Moving" for a moment after stop() returns.
+    time.sleep(0.5)
+    image, snap_error = camera_snapshot(unit, target, channel=channel, timeout=timeout)
+    # Always try to restore, even if the snapshot itself failed — leaving a
+    # live security camera stuck mid-tilt is worse than a missing photo.
+    restore_status, _rh, _rc, restore_error = proxy_camera_http(
+        unit, target, "cgi-bin/ptz.cgi", "GET",
+        query_string=f"action=start&channel={channel}&code=GotoPreset&arg1=0&arg2={preset_id}&arg3=0".encode(),
+        timeout=timeout,
+    )
+    was_restored = False
+    if not restore_error and restore_status == 200:
+        time.sleep(1.5)
+        confirm_status, _ch, confirm_content, confirm_error = proxy_camera_http(
+            unit, target, "cgi-bin/ptz.cgi", "GET",
+            query_string=f"action=getStatus&channel={channel}".encode(), timeout=timeout,
+        )
+        if not confirm_error and confirm_status == 200:
+            was_restored = _parse_ptz_status_field(confirm_content, "status.PresetID") == preset_id
+    if snap_error:
+        return None, True, was_restored, snap_error
+    return image, True, was_restored, None
+def _dahua_rpc_call(host, port, username, password, method, params=None, timeout=20):
+    """
+    One authenticated Dahua JSON-RPC call (session created and discarded
+    per call — this is an ad-hoc action, not a persistent UI session).
+    Two-step MD5 challenge-response login against /RPC2_Login, then the
+    real call against /RPC2. This is the interface the camera's OWN web
+    UI uses for actions like "Test" email — the legacy CGI
+    (configManager.cgi) has no equivalent action for those.
+
+    Verified live, 2026-09-17, against RD3500's fisheye: captured a real
+    browser login (DevTools Network tab, RPC2_Login) and confirmed this
+    exact formula reproduces the real hashed password Dahua's own web UI
+    sent for the same realm/random/password. The one wrinkle no public
+    write-up of this handshake mentions is that the resulting MD5 hex
+    must be UPPERCASE — a lowercase hash is silently rejected as "User or
+    password not valid" with nothing to suggest the credentials
+    themselves (and the rest of the formula) were actually fine.
+
+    Returns (rpc_response_dict, error). error is set (and the first
+    element None) on a transport failure, a rejected login, or an
+    error/falsy "result" from the method call itself.
+    """
+    base = f"http://{host}:{port}"
+    session = requests.Session()
+    try:
+        challenge = session.post(
+            f"{base}/RPC2_Login",
+            json={
+                "method": "global.login",
+                "params": {"userName": username, "password": "", "clientType": "Web3.0"},
+                "id": 1,
+            },
+            timeout=timeout,
+        ).json()
+    except requests.exceptions.RequestException as exc:
+        return None, f"Dahua RPC login failed: {exc}"
+    challenge_params = challenge.get("params") or {}
+    realm = challenge_params.get("realm")
+    random_str = challenge_params.get("random")
+    session_id = challenge.get("session")
+    if not realm or not random_str or not session_id:
+        return None, f"Dahua RPC login did not return a login challenge: {challenge}"
+
+    def _md5_upper(text):
+        return hashlib.md5(text.encode("utf-8")).hexdigest().upper()
+
+    hash1 = _md5_upper(f"{username}:{realm}:{password}")
+    hashed_password = _md5_upper(f"{username}:{random_str}:{hash1}")
+    try:
+        login_resp = session.post(
+            f"{base}/RPC2_Login",
+            json={
+                "method": "global.login",
+                "params": {"userName": username, "password": hashed_password, "clientType": "Web3.0"},
+                "id": 2,
+                "session": session_id,
+            },
+            timeout=timeout,
+        ).json()
+    except requests.exceptions.RequestException as exc:
+        return None, f"Dahua RPC login failed: {exc}"
+    if not login_resp.get("result"):
+        message = (login_resp.get("error") or {}).get("message") or "login rejected"
+        return None, f"Dahua RPC login failed: {message}"
+    # Some firmware rotates the session id on a successful login — the
+    # response's own "session" is the one later calls must use, not the
+    # challenge step's. Caught live, 2026-09-17 (RD3500's Camera 1/2,
+    # while the same unit's Fisheye happened to keep the challenge
+    # session valid): reusing the challenge session unconditionally
+    # worked by coincidence on devices that don't rotate it, and failed
+    # with "Invalid session in request data!" the moment one did.
+    session_id = login_resp.get("session") or session_id
+
+    try:
+        call_resp = session.post(
+            f"{base}/RPC2",
+            json={"method": method, "params": params, "id": 3, "session": session_id},
+            timeout=timeout,
+        ).json()
+    except requests.exceptions.RequestException as exc:
+        return None, f"Dahua RPC call failed: {exc}"
+    if not call_resp.get("result"):
+        message = (call_resp.get("error") or {}).get("message") or f"{method} failed"
+        return None, message
+    return call_resp, None
+# Every Hikvision ISAPI response actually declares xmlns
+# "http://www.std-cgi.com/ver20/XMLSchema" (confirmed live off a real
+# camera's own /ISAPI/System/Network/mailing response — the vendor's own
+# doc examples use the "hikvision.com" domain this used to have, but the
+# device itself doesn't) — that mismatch silently failed every namespaced
+# .find() below (ElementTree requires an exact URI match), so
+# _hikvision_mailing_test_body always built its request from a NOT-FOUND
+# <mailing> element, sending an empty <mailingTestDescription> the camera
+# correctly rejected as malformed (HTTP 400, "badParameters") — read by
+# camera_send_test_email as a generic, code-less failure. Root cause of
+# "Hikvision test email failed: unknown error (code )" on every Hikvision
+# unit (caught live, MU1031, 2026-09-21) — nothing to do with is_hikvision_
+# unit's own detection, which was already correct.
+_HIKVISION_XML_NS = "{http://www.std-cgi.com/ver20/XMLSchema}"
+def _hikvision_xml_text(parent, tag, default=""):
+    if parent is None:
+        return default
+    el = parent.find(_HIKVISION_XML_NS + tag)
+    if el is None or el.text is None:
+        return default
+    return el.text
+def _hikvision_mailing_test_body(mailing_el):
+    """
+    Build the <mailingTestDescription> XML body Hikvision's own web UI
+    sends for its Email "Test" action — captured live off a real browser
+    session, 2026-09-17 (MU1008). Not a bare trigger like Dahua's: it
+    re-sends a flattened copy of the sender/SMTP/receiver fields the
+    device already has configured (see /ISAPI/System/Network/mailing's
+    own response shape, which this mirrors), with only the receivers
+    that actually have an email address set — the device's own response
+    left the two blank receiver slots out of what it considers "test
+    this," so this does too.
+    """
+    ns = _HIKVISION_XML_NS
+    sender = mailing_el.find(ns + "sender")
+    smtp = sender.find(ns + "smtp") if sender is not None else None
+
+    root = ElementTree.Element("mailingTestDescription")
+
+    def add(tag, text):
+        el = ElementTree.SubElement(root, tag)
+        el.text = text
+
+    add("sendName", _hikvision_xml_text(sender, "name"))
+    add("sendEmailAddress", _hikvision_xml_text(sender, "emailAddress"))
+    addressing = _hikvision_xml_text(smtp, "addressingFormatType", "ipaddress")
+    add("addressingFormatType", addressing)
+    if addressing == "hostname":
+        add("hostName", _hikvision_xml_text(smtp, "hostName"))
+    else:
+        add("ipAddress", _hikvision_xml_text(smtp, "ipAddress"))
+    add("portNo", _hikvision_xml_text(smtp, "portNo", "25"))
+    add("enableAuthorization", _hikvision_xml_text(smtp, "enableAuthorization", "false"))
+
+    receiver_list_el = ElementTree.SubElement(root, "receiverList")
+    for receiver in mailing_el.findall(f"{ns}receiverList/{ns}receiver"):
+        email = _hikvision_xml_text(receiver, "emailAddress")
+        if not email:
+            continue
+        receiver_el = ElementTree.SubElement(receiver_list_el, "receiver")
+        ElementTree.SubElement(receiver_el, "id").text = _hikvision_xml_text(receiver, "id")
+        ElementTree.SubElement(receiver_el, "name").text = _hikvision_xml_text(receiver, "name")
+        ElementTree.SubElement(receiver_el, "emailAddress").text = email
+
+    return b'<?xml version="1.0" encoding="utf-8"?>' + ElementTree.tostring(root, encoding="utf-8")
+def _hikvision_send_test_email(host, port, username, password, timeout=25):
+    """
+    Hikvision half of camera_send_test_email. Two calls: GET the
+    device's own current mailing config (so the test body reflects
+    whatever is ACTUALLY configured, not a guess), then POST that
+    flattened into /ISAPI/System/Network/mailing/test.
+
+    The `security=1&iv=<random>` query string on the test call is NOT
+    encryption despite the name — the request body Hikvision's own web
+    UI sends alongside it is plain readable XML (confirmed live), and an
+    arbitrary freshly-generated random hex value for `iv` was accepted
+    (errorCode 0) the same as whatever value the real browser session
+    used. Reads as an anti-replay token the device checks for
+    presence/shape, not a value it validates the derivation of.
+
+    Returns (detail, error).
+    """
+    auth = HTTPDigestAuth(username, password)
+    config_url = f"http://{host}:{port}/ISAPI/System/Network/mailing"
+    try:
+        config_resp = requests.get(config_url, auth=auth, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        return None, f"Hikvision mailing config fetch failed: {exc}"
+    if config_resp.status_code != 200:
+        return None, f"Hikvision mailing config fetch returned HTTP {config_resp.status_code}"
+    try:
+        list_root = ElementTree.fromstring(config_resp.content)
+    except ElementTree.ParseError as exc:
+        return None, f"Hikvision mailing config response was not valid XML: {exc}"
+    mailing_el = list_root.find(_HIKVISION_XML_NS + "mailing")
+    if mailing_el is None:
+        mailing_el = list_root
+    body = _hikvision_mailing_test_body(mailing_el)
+
+    test_url = f"http://{host}:{port}/ISAPI/System/Network/mailing/test?security=1&iv=" + uuid.uuid4().hex
+    try:
+        test_resp = requests.post(
+            test_url, auth=auth, data=body,
+            headers={"Content-Type": "application/xml"}, timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        return None, f"Hikvision test-email request failed: {exc}"
+    try:
+        result_root = ElementTree.fromstring(test_resp.content)
+    except ElementTree.ParseError:
+        return None, f"Hikvision test-email response was not valid XML (HTTP {test_resp.status_code})"
+    error_code = result_root.findtext(_HIKVISION_XML_NS + "errorCode", "")
+    error_desc = result_root.findtext(_HIKVISION_XML_NS + "errorDescription", "unknown error")
+    if error_code != "0":
+        return None, f"Hikvision test email failed: {error_desc} (code {error_code})"
+    return error_desc, None
+def camera_send_test_email(unit, target):
+    """
+    Trigger the camera's own "send a test email" action against its
+    already-configured SMTP settings (Settings > Network > Email > Test
+    in the camera's web UI) — confirms delivery actually works end to
+    end, not just that the settings are saved and look right.
+
+    Dahua: netApp.sendTestMail over the JSON-RPC interface (see
+    _dahua_rpc_call) — captured live off a real browser session, params
+    is null, no arguments needed. Verified against both a ~3500-range
+    unit and an older ~3100-range one (RD3132) — same call, same login
+    handshake, no firmware-generation branching needed so far.
+
+    Hikvision: POST to /ISAPI/System/Network/mailing/test (see
+    _hikvision_send_test_email) — also captured live off a real browser
+    session (MU1008).
+
+    Both were verified this way deliberately, not guessed — a wrong
+    guess at a device command either fails silently or, worse (Dahua's
+    RPC login specifically), costs an attempt against a real lockout
+    counter.
+
+    Returns (message, error).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    cameras, error = list_unit_cameras(unit_key)
+    if error:
+        return None, error
+    camera = next((item for item in cameras if item.get("target") == target), None)
+    if not camera:
+        return None, f"No {target} configured for {unit_key}"
+
+    load_dotenv(env_path)
+    username = (os.getenv("fishuser") or "").strip().strip('"').strip("'")
+    password = (os.getenv("fishpass") or "").strip().strip('"').strip("'")
+    if not username or not password:
+        return None, "fishuser/fishpass not set in .env"
+
+    if is_hikvision_unit(unit_key, cameras):
+        _detail, error = _hikvision_send_test_email(
+            camera["host"], camera["port"], username, password,
+        )
+    else:
+        _result, error = _dahua_rpc_call(
+            camera["host"], camera["port"], username, password, "netApp.sendTestMail",
+        )
+    if error:
+        return None, f"Test email failed for {unit_key} {camera['label']}: {error}"
+    return f"Test email sent from {unit_key} {camera['label']} ({camera['host']}) — check the configured recipient inbox", None
+def _dahua_camera_email_sender(host, port, username, password):
+    """
+    The camera's own configured SMTP sender (Settings > Network > Email —
+    the same page camera_send_test_email's "Test" button lives on), read
+    via configManager.getConfig instead of triggering an actual test
+    send. Verified live, 2026-09-18 (RD3123, Camera 1): the field is
+    SendAddress (what the web UI's "Sender" box shows), with UserName as
+    a fallback (same value in practice) — response envelope is
+    {"params": {"table": {...}}}.
+
+    Returns (sender_string, error) — e.g. ("S1811@sc-rd3123.sites.sentracam.com", None).
+    """
+    call_resp, error = _dahua_rpc_call(
+        host, port, username, password, "configManager.getConfig", {"name": "Email"},
+    )
+    if error:
+        return None, error
+    table = ((call_resp or {}).get("params") or {}).get("table") or (call_resp or {}).get("table") or {}
+    sender = str(table.get("SendAddress") or table.get("UserName") or "").strip()
+    if not sender:
+        return None, "No SendAddress/UserName in this camera's Email config"
+    return sender, None
+def _camera_room_code(sender):
+    """Everything before '@' in a camera's configured email Sender — e.g. "SC000852@sites.sentracam.net" -> "SC000852"."""
+    sender = str(sender or "").strip()
+    return sender.split("@", 1)[0] if "@" in sender else sender
+def _infer_ptz_room_code(base_room):
+    """
+    A PTZ channel shares its 180 sibling's IP (it's channel 2 of the same
+    physical device) and has no SMTP config of its own to read — its
+    room is always the 180 camera's own room number + 1. Andrew's own
+    mapping, verified live 2026-09-18 (RD3556: Fisheye SC000852, C1-180
+    SC000853 — C1-PTZ inferred SC000854, C2-PTZ inferred SC000856; also
+    re-confirmed live against RD3431 and RD3351 the same day). Preserves
+    the original zero-padding width.
+    """
+    match = re.match(r"^(.*?)(\d+)$", str(base_room or ""))
+    if not match:
+        return None
+    prefix, digits = match.group(1), match.group(2)
+    return f"{prefix}{str(int(digits) + 1).zfill(len(digits))}"
+def camera_rooms(unit):
+    """
+    Each Dahua camera's configured "room" — everything before '@' in its
+    own SMTP Sender (Settings > Network > Email), the field installers
+    set per physical location. Dahua only, same scope as
+    camera_send_test_email — Hikvision isn't wired up.
+
+    A Scrypted unit (3300+) pairs a "180" camera with a "PTZ" sibling
+    that shares its IP (PTZ is just channel 2 of the same device), so
+    there's nothing separate to read for the PTZ entry — its room is
+    inferred as the 180 camera's own room + 1 (see _infer_ptz_room_code).
+    Non-Scrypted units have one unique IP per camera target, each with
+    its own real Sender to read — no inference anywhere.
+
+    Returns (rows, error). Each row: {target, label, room, source}
+    where source is "read", "inferred", or "error" (room is None, with
+    an "error" key, for that last one — the rest of the unit's rows
+    still come back rather than failing the whole call).
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit_key)
+    if error:
+        return None, error
+    if not cameras:
+        return None, f"No cameras configured for {unit_key}"
+    if is_hikvision_unit(unit_key, cameras):
+        return None, "Camera rooms only supports Dahua units so far"
+
+    load_dotenv(env_path)
+    username = (os.getenv("fishuser") or "").strip().strip('"').strip("'")
+    password = (os.getenv("fishpass") or "").strip().strip('"').strip("'")
+    if not username or not password:
+        return None, "fishuser/fishpass not set in .env"
+
+    is_scrypted = uses_pve(unit_key)
+    # Relabel the two 180 cameras to match their PTZ sibling's naming
+    # when this unit actually has PTZ pairs — "Camera 1"/"Camera 2"
+    # otherwise, same as everywhere else that reads list_unit_cameras.
+    scrypted_labels = {"camera1": "C1-180", "camera2": "C2-180"}
+
+    rows = []
+    rooms_by_target = {}
+    for camera in cameras:
+        target = camera["target"]
+        label = scrypted_labels.get(target, camera["label"]) if is_scrypted else camera["label"]
+        sender, cam_error = _dahua_camera_email_sender(
+            camera["host"], camera["port"], username, password,
+        )
+        if cam_error:
+            rows.append({
+                "target": target, "label": label, "room": None,
+                "source": "error", "error": cam_error,
+            })
+            continue
+        room = _camera_room_code(sender)
+        rooms_by_target[target] = room
+        rows.append({"target": target, "label": label, "room": room, "source": "read"})
+
+    if is_scrypted:
+        for base_target, ptz_target, ptz_label in (
+            ("camera1", "camera1-ptz", "C1-PTZ"),
+            ("camera2", "camera2-ptz", "C2-PTZ"),
+        ):
+            base_room = rooms_by_target.get(base_target)
+            if not base_room:
+                continue
+            inferred = _infer_ptz_room_code(base_room)
+            if inferred:
+                rows.append({
+                    "target": ptz_target, "label": ptz_label,
+                    "room": inferred, "source": "inferred",
+                })
+
+    return rows, None
+# "Test All Emails" — same shape as start_router_long_ping/
+# iter_router_long_ping_output/stop_router_long_ping above (one background
+# job a tech starts/stops from a single toggle button, streamed to the
+# console, with an auto-stop safety net), just driven by a timed loop
+# instead of tailing a live subprocess's stdout: there's no continuously-
+# producing process here, each "tick" is a handful of discrete HTTP calls,
+# so a background thread pushes its own output lines into a queue that the
+# streaming response reads from instead.
+_EMAIL_TEST_LOOP_INTERVAL_SEC = 30
+# Its own cap, not _LONG_PING_MAX_SEC — a forgotten-open Test All Emails
+# tab spams a real inbox every 30s, so it gets a shorter leash than the
+# Long Ping loops share (Andrew's own request, 2026-09-21).
+_EMAIL_TEST_LOOP_MAX_SEC = 10 * 60
+_email_test_loop_lock = threading.Lock()
+_email_test_loop_jobs = {}
+def stop_camera_test_email_loop(job_id, reason="stopped"):
+    """Stop a running test-email loop. Returns (ok, message, job_info)."""
+    job_key = str(job_id or "").strip()
+    with _email_test_loop_lock:
+        job = _email_test_loop_jobs.get(job_key)
+        if not job:
+            return False, "Test email loop job not found", None
+        if job.get("stopped"):
+            return True, f"Test email loop {job.get('stop_reason') or 'stopped'}", {
+                "job_id": job_key, "unit": job.get("unit"), "reason": job.get("stop_reason"),
+            }
+        timer = job.get("timer")
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            job["timer"] = None
+        job["stop_reason"] = reason or "stopped"
+        job["stopped"] = True
+        job["stop_event"].set()
+        info = {"job_id": job_key, "unit": job.get("unit"), "reason": job["stop_reason"]}
+    return True, f"Test email loop {job['stop_reason']}", info
+def start_camera_test_email_loop(unit):
+    """
+    Repeatedly send one test email per configured camera on `unit`, every
+    _EMAIL_TEST_LOOP_INTERVAL_SEC seconds, until stopped — or until
+    _EMAIL_TEST_LOOP_MAX_SEC trips, the same kind of safety net
+    start_router_long_ping uses (own shorter duration though — see
+    _EMAIL_TEST_LOOP_MAX_SEC), for the same reason: a forgotten-open
+    tab must not spam a real inbox forever. Only one running loop per
+    unit — starting a new one replaces (stops) any existing one, same as
+    the router long-ping job.
+
+    Returns (payload, error). payload: {job_id, unit, camera_count,
+    interval_seconds, max_seconds}.
+    """
+    unit_key = _normalize_netsheet_unit(unit) or str(unit or "").strip()
+    if not unit_key:
+        return None, "Missing unit"
+    cameras, error = list_unit_cameras(unit_key)
+    if error:
+        return None, error
+    # Fisheye used to be excluded here — its RPC call refused the
+    # connection live on RD3500 (2026-09-18) and again on RD3444
+    # (2026-09-21), each time in an otherwise-healthy run. Root cause
+    # turned out to be _resolve_camera_port caching an unverified port
+    # forever whenever a probe caught a camera during a brief blip — not
+    # anything specific to fisheye (see that function's own comment).
+    # Fixed there, so fisheye is back in the loop like every other camera.
+    if not cameras:
+        return None, f"No cameras configured for {unit_key}"
+
+    replace_ids = []
+    with _email_test_loop_lock:
+        for existing_id, existing in list(_email_test_loop_jobs.items()):
+            if existing.get("unit") == unit_key and not existing.get("stopped"):
+                replace_ids.append(existing_id)
+    for existing_id in replace_ids:
+        stop_camera_test_email_loop(existing_id, reason="replaced")
+
+    job_id = uuid.uuid4().hex
+    stop_event = threading.Event()
+    output_queue = queue.Queue()
+    job = {
+        "job_id": job_id,
+        "unit": unit_key,
+        "cameras": cameras,
+        "started": time.time(),
+        "stopped": False,
+        "stop_reason": "",
+        "stop_event": stop_event,
+        "queue": output_queue,
+        "timer": None,
+    }
+
+    def _run():
+        output_queue.put(
+            f"Test email loop started for {unit_key} — {len(cameras)} camera(s), every "
+            f"{_EMAIL_TEST_LOOP_INTERVAL_SEC}s (auto-stop after "
+            f"{_EMAIL_TEST_LOOP_MAX_SEC // 60} min) — check the configured recipient inbox\n"
+        )
+        cycle = 0
+        while not stop_event.is_set():
+            cycle += 1
+            output_queue.put(f"--- cycle {cycle} ---\n")
+            for camera in cameras:
+                if stop_event.is_set():
+                    break
+                try:
+                    _message, err = camera_send_test_email(unit_key, camera["target"])
+                except Exception as exc:
+                    err = str(exc)
+                # The "check the configured recipient inbox" reminder is in
+                # the start banner once already — repeating it on every
+                # line of every 30s cycle was pure noise (Andrew's own
+                # request, 2026-09-18).
+                output_queue.put(
+                    (f"{camera['label']}: sent ({camera['host']})\n") if not err
+                    else (f"{camera['label']}: FAILED — {err}\n")
+                )
+            if stop_event.wait(_EMAIL_TEST_LOOP_INTERVAL_SEC):
+                break
+        output_queue.put(None)
+
+    def _auto_stop(job_key=job_id):
+        stop_camera_test_email_loop(
+            job_key, reason=f"auto-cancelled after {_EMAIL_TEST_LOOP_MAX_SEC // 60} minutes"
+        )
+
+    timer = threading.Timer(_EMAIL_TEST_LOOP_MAX_SEC, _auto_stop)
+    timer.daemon = True
+    job["timer"] = timer
+    thread = threading.Thread(target=_run, daemon=True)
+    job["thread"] = thread
+
+    with _email_test_loop_lock:
+        _email_test_loop_jobs[job_id] = job
+    timer.start()
+    thread.start()
+
+    return {
+        "job_id": job_id,
+        "unit": unit_key,
+        "camera_count": len(cameras),
+        "interval_seconds": _EMAIL_TEST_LOOP_INTERVAL_SEC,
+        "max_seconds": _EMAIL_TEST_LOOP_MAX_SEC,
+    }, None
+def iter_camera_test_email_loop_output(job_id):
+    """Yield output lines from a running test-email loop until it stops (see start_camera_test_email_loop)."""
+    job_key = str(job_id or "").strip()
+    with _email_test_loop_lock:
+        job = _email_test_loop_jobs.get(job_key)
+        output_queue = job.get("queue") if job else None
+    if not job or output_queue is None:
+        yield f"Test email loop job {job_key} not found\n"
+        return
+    while True:
+        line = output_queue.get()
+        if line is None:
+            break
+        yield line
+    with _email_test_loop_lock:
+        current = _email_test_loop_jobs.get(job_key) or {}
+        reason = current.get("stop_reason") or "finished"
+        unit = current.get("unit") or ""
+        current["stopped"] = True
+        timer = current.get("timer")
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+            current["timer"] = None
+    yield f"Test email loop {reason} for {unit}\n"
 def cameras_launch_info(unit):
     """Build Open All Cameras launcher payload with proxy URLs."""
     cameras, error = list_unit_cameras(unit)
@@ -3800,8 +4973,34 @@ def _is_generic_camera_outage_subject(subject):
     through to the generic router/compute connectivity check instead of
     Camera Outage — the word "Camera" was in the subject, just never a
     specific number for _camera_targets_from_subject to find.
+
+    Only true when what follows "Camera Outage" is either nothing, or the
+    subject's normal dash-delimited field sequence (date/customer/site —
+    whichever fields this ticket happens to carry) resuming — the caller
+    treats "generic" as license to check EVERY camera target on the unit,
+    which is right when the subject really doesn't name one, but wrong
+    when it does. Caught live, 2026-09-16 (FD1040): "Camera Outage
+    MzdUsedBldg-C02-Rear-W down" names one specific camera by its own
+    site-local label, just not in the c1-4/fisheye pattern
+    _camera_targets_from_subject recognizes — treating that as "generic"
+    expanded one real ticket into 5 near-duplicate rows (one per camera)
+    instead of the one it actually was. The dash is the discriminator:
+    FD1040's embedded name is glued on with a space, no dash, while every
+    normal boilerplate field — a date (FD1020: "...Camera
+    Outage-09/17/26-...") or, when a ticket has no date field at all,
+    straight to Customer-Site (caught live, RD3067(MU9034): "...Camera
+    Outage - Simplehuman-Simplehuman - Carson" fell through to the
+    generic router/compute check and landed in Up Steady instead of
+    Camera outage) — is always dash-delimited.
     """
-    return bool(re.search(r"\bcamera\s+outage\b", str(subject or ""), re.IGNORECASE))
+    text = str(subject or "")
+    match = re.search(r"\bcamera\s+outage\b", text, re.IGNORECASE)
+    if not match:
+        return False
+    tail = text[match.end():]
+    if not tail.strip():
+        return True
+    return bool(re.match(r"\s*-", tail))
 def _is_nuc_down_issue_subtype(subtype):
     """Exact ERP Issue Subtype spelling/capitalization: Nuc Down."""
     return str(subtype or "") == "Nuc Down"
@@ -3811,7 +5010,19 @@ def _subject_implies_nuc_down(subject):
 def _is_forced_nuc_down(subtype="", subject=""):
     return _is_nuc_down_issue_subtype(subtype) or _subject_implies_nuc_down(subject)
 def _vrm_info_from_subject(subject, unit=""):
-    """VRM search for RD tickets only. Prefer MU from subject; else RD unit code."""
+    """
+    VRM search for RD tickets only. Prefer an MU already named in the
+    subject; else the unit's actual MU trailer from ERP
+    (_erp_parent_mu_code — the same cached Component.parent_component
+    lookup resolve_attached_mu_code uses elsewhere for this exact
+    reason); only falls back to the bare RD name if NEITHER finds one.
+    VRM installations are named after the trailer, not the head, so
+    searching by RD alone is wrong whenever the unit has one — which is
+    nearly always, and ALWAYS true for a 3300+ unit. Caught live,
+    2026-09-29 (RD3338's red 1% battery glyph): a subject with no MU
+    mentioned anywhere linked VRM straight to "RD3338" instead of
+    checking ERP for its attached MU first.
+    """
     text = str(subject or "")
     unit_name = str(unit or "").strip()
     has_rd = bool(re.search(r"\bRD\s*\d+", text, re.IGNORECASE))
@@ -3821,6 +5032,10 @@ def _vrm_info_from_subject(subject, unit=""):
     for mu_match in re.finditer(r"\bMU\s*(\d{4})\b", text, re.IGNORECASE):
         vrm_mu = mu_match.group(1)
         break
+    if not vrm_mu and re.match(r"^RD\d+", unit_name, re.IGNORECASE):
+        mu_code = _erp_parent_mu_code(unit_name)
+        if mu_code:
+            vrm_mu = mu_code[2:] if mu_code.upper().startswith("MU") else mu_code
     search = vrm_mu
     if not search:
         if re.match(r"^RD\d+", unit_name, re.IGNORECASE):
@@ -3843,6 +5058,15 @@ def _is_camera_view_subject(subject):
         r"\bcamera\s+adjustment\b",
         r"\bc[1-4]\b[^\r\n]*(?:shifted|adjustment)\b",
         r"\bcamera\s*[1-4]\b[^\r\n]*(?:shifted|adjustment)\b",
+        # Mirrors CAMERA_VIEW_ISSUE_SUBTYPES (dirty/blurry/dark) for tickets
+        # with no issue_subtype set at all — caught live: "OAK-RD3534
+        # (MU4058)-Dirty Camera Lens-..." came through UNDIAGNOSED (no ERP
+        # subtype), so the subtype check below never fired, and "Dirty
+        # Camera Lens" didn't match any of the patterns above either —
+        # it ran full outage validation instead of routing to Camera View.
+        r"\bdirty\s+camera",
+        r"\bblurry\s+camera",
+        r"\bdark\s+views?\b",
     )
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 CAMERA_VIEW_ISSUE_TYPES = frozenset({
@@ -3872,9 +5096,10 @@ def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
         issue_id = unit_issue_map.get(result_key, "")
         meta = unit_meta_map.get(result_key, {})
         unit = meta.get("unit") or result_key
-        switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url, has_scrypted, scrypted_url = (
-            _unit_device_info(unit)
-        )
+        (
+            switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url,
+            has_scrypted, scrypted_url, scrypted_nvr_url,
+        ) = _unit_device_info(unit)
         vrm_mu = meta.get("vrm_mu") or ""
         vrm_url = meta.get("vrm_url") or ""
         if not vrm_url:
@@ -3898,6 +5123,7 @@ def _with_ticket_links(units, unit_issue_map, unit_meta_map=None):
             "platform_url": platform_url,
             "has_scrypted": has_scrypted,
             "scrypted_url": scrypted_url,
+            "scrypted_nvr_url": scrypted_nvr_url,
             "compute_label": compute_host_label(unit),
             "is_speaker": bool(meta.get("is_speaker")),
             "speaker_up": meta.get("speaker_up"),
@@ -4327,6 +5553,7 @@ def build_prep_project_entries(project_records):
         has_pve = has_relay = has_platform = has_scrypted = False
         platform_url = ""
         scrypted_url = ""
+        scrypted_nvr_url = ""
         compute_label = "NUC"
         if unit:
             (
@@ -4339,6 +5566,7 @@ def build_prep_project_entries(project_records):
                 platform_url,
                 has_scrypted,
                 scrypted_url,
+                scrypted_nvr_url,
             ) = _unit_device_info(unit)
             compute_label = compute_host_label(unit)
         vrm_mu, vrm_url = _vrm_info_from_subject(subject, unit)
@@ -4364,6 +5592,7 @@ def build_prep_project_entries(project_records):
             "platform_url": platform_url,
             "has_scrypted": has_scrypted,
             "scrypted_url": scrypted_url,
+            "scrypted_nvr_url": scrypted_nvr_url,
             "compute_label": compute_label,
             "vrm_mu": vrm_mu,
             "vrm_url": vrm_url,
@@ -4785,7 +6014,21 @@ def _site_name_candidates_from_project_subject(subject):
         candidates.append(text)
 
     if parts:
-        add_candidate(parts[-1])
+        last = parts[-1]
+        # The title's trailing segment is usually "<site name> (<street
+        # address>)" — verified live, 2026-09-28 (RD3572, "... Layton
+        # Construction Company - Revelry (965 East University Drive)"):
+        # ERP's real Site name is the bare "Revelry", but the un-stripped
+        # candidate ("Revelry (965 East University Drive)") never matches
+        # anything, in ERP's Site table, so both the exact and fuzzy
+        # passes below come back empty and Open Site 404s on a Component
+        # that (for a fresh NOC Deployment) has no Site link of its own
+        # yet either. Tried first — an address rarely collides with
+        # another site's real name, so stripping it is safe to prefer.
+        stripped = re.sub(r"\s*\([^()]*\)\s*$", "", last).strip()
+        if stripped and stripped.casefold() != last.casefold():
+            add_candidate(stripped)
+        add_candidate(last)
     if len(parts) >= 2:
         add_candidate(" - ".join(parts[-2:]))
     add_candidate(rest)
@@ -4823,6 +6066,109 @@ def _search_erp_sites(filters, limit=20):
     if not isinstance(rows, list):
         return None, "ERP Site response did not contain a data list"
     return [_normalize_erp_site(row) for row in rows if isinstance(row, dict)], None
+# A site code like "EA-240479" — ERP names some sites by it
+# ("EA-240479 - Houston, Tx (Westheimer)") rather than by anything else in
+# the title.
+_SUBJECT_SITE_CODE_RE = re.compile(r"\b([A-Z]{1,5}-\d{4,})\b")
+_SUBJECT_UNIT_TOKEN_RE = re.compile(r"\b(?:RD|FD|MU|SC-)\s*\d", re.IGNORECASE)
+_SUBJECT_WORK_WORDS = (
+    "deployment", "termination", "relocation", "outage", "prep", "noc ",
+    "issue", "request", "complaint", "maintenance",
+)
+
+
+def _pick_one_site(rows, region, prefer_status):
+    """Narrow site rows to one: by the title's region code, then status."""
+    rows = list(rows or [])
+    if len(rows) > 1 and region:
+        in_region = [r for r in rows if str(r.get("region") or "").upper() == region]
+        if in_region:
+            rows = in_region
+    prefer = str(prefer_status or "").strip().lower()
+    if len(rows) > 1 and prefer:
+        preferred = [r for r in rows if str(r.get("status") or "").strip().lower() == prefer]
+        if preferred:
+            rows = preferred
+    return rows[0] if len(rows) == 1 else None, rows
+
+
+def _find_erp_site_by_subject_fallbacks(subject, prefer_status=None):
+    """
+    Last-resort Site search when no Site is NAMED like the title — Andrew's
+    request, 2026-10-05: "it should fall back on searching for site". Found
+    live on RD3248(MU9030), "HOU: Deployment Prep - RD3248(MU9030) - 10/5
+    Prodiconn Solutions, Inc - EA-240479 - (Prodiconn Parking Lot)": no Site
+    is named "Prodiconn" anything; the Site (66979) is named "EA-240479 -
+    Houston, Tx (Westheimer)", and "Prodiconn Solutions, Inc" is its
+    customer. Tried in order, each only accepted when it lands on ONE Site
+    (ties broken by the title's region code, then prefer_status):
+      1. the title's segments with brackets stripped ("(Prodiconn Parking
+         Lot)" -> "Prodiconn Parking Lot"), exact then partial site name,
+      2. any site code in the title (EA-240479) inside a site name,
+      3. a title segment as the Site's customer (Prodiconn Solutions, Inc).
+    Read-only. Returns (site_row, error) — error says what was tried.
+    """
+    subject = str(subject or "").strip()
+    region_match = re.match(r"^\s*([A-Z]{2,5})\s*[:\-]", subject)
+    region = region_match.group(1).upper() if region_match else ""
+    segments = []
+    for part in subject.split(" - "):
+        text = part.strip().strip("()[]").strip()
+        text = re.sub(r"^\d{1,2}/\d{1,2}(?:/\d{2,4})?\s+", "", text)  # "10/5 Prodiconn..." -> "Prodiconn..."
+        text = re.sub(r"^[A-Z]{2,5}\s*:\s*", "", text)                 # "HOU: Deployment Prep"
+        if (
+            len(text) >= 4
+            and not _SUBJECT_UNIT_TOKEN_RE.search(text)
+            and not any(word in text.lower() for word in _SUBJECT_WORK_WORDS)
+            and text not in segments
+        ):
+            segments.append(text)
+    tried = []
+    ambiguous = []
+
+    def try_filter(label, filters):
+        rows, error = _search_erp_sites(filters, limit=25)
+        if error:
+            tried.append(f"{label} (search failed: {error})")
+            return None
+        site, narrowed = _pick_one_site(rows, region, prefer_status)
+        if site:
+            return site
+        if len(narrowed) > 1:
+            ambiguous.append(
+                f"{label} matched {len(narrowed)} Sites: "
+                + "; ".join(f"{r.get('site_id')} ({r.get('site_name') or '?'})" for r in narrowed[:5])
+            )
+        tried.append(label)
+        return None
+
+    def specific(text):
+        # Partial ("like") matches only on name-like segments — a lone
+        # generic word ("Switch", "Watch") could otherwise land on one
+        # unrelated Site once region narrowing leaves a single row.
+        return len(text) >= 8 and len(text.split()) >= 2
+
+    for text in segments:
+        site = try_filter(f'site name = "{text}"', [["site_name", "=", text]])
+        if site:
+            return site, None
+        if specific(text):
+            site = try_filter(f'site name like "{text}"', [["site_name", "like", f"%{text}%"]])
+            if site:
+                return site, None
+    for code in dict.fromkeys(_SUBJECT_SITE_CODE_RE.findall(subject)):
+        site = try_filter(f'site code "{code}"', [["site_name", "like", f"%{code}%"]])
+        if site:
+            return site, None
+    for text in segments:
+        if specific(text):
+            site = try_filter(f'customer "{text}"', [["customer", "like", f"%{text}%"]])
+            if site:
+                return site, None
+    detail = "; ".join(ambiguous) if ambiguous else ", ".join(tried)
+    return None, detail or "nothing searchable in the title"
+
+
 def find_erp_site_by_project_subject(subject, prefer_status=None):
     """Resolve a Site from a project title using the planned name cascade."""
     subject = str(subject or "").strip()
@@ -4860,8 +6206,12 @@ def find_erp_site_by_project_subject(subject, prefer_status=None):
                 matches.append(row)
 
     if not matches:
+        site, fallback_error = _find_erp_site_by_subject_fallbacks(subject, prefer_status)
+        if site:
+            return site, None
         return None, (
             "No Site found for candidates: " + ", ".join(candidates)
+            + (f". Also tried: {fallback_error}" if fallback_error else "")
         )
 
     prefer = str(prefer_status or "").strip().lower()
@@ -5565,9 +6915,10 @@ def validate_project_records(project_records):
             category = category or "truly_down"
         else:
             led_status = _connectivity_category_led(category) or "red"
-        switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url, has_scrypted, scrypted_url = (
-            _unit_device_info(unit)
-        )
+        (
+            switch_url, fisheye_ip, pve_ip, has_pve, has_relay, has_platform, platform_url,
+            has_scrypted, scrypted_url, scrypted_nvr_url,
+        ) = _unit_device_info(unit)
         vrm_mu, vrm_url = _vrm_info_from_subject(subject, unit)
         entries.append({
             "unit": unit,
@@ -5590,6 +6941,7 @@ def validate_project_records(project_records):
             "platform_url": platform_url,
             "has_scrypted": has_scrypted,
             "scrypted_url": scrypted_url,
+            "scrypted_nvr_url": scrypted_nvr_url,
             "compute_label": compute_host_label(unit),
             "vrm_mu": vrm_mu,
             "vrm_url": vrm_url,
@@ -6414,6 +7766,7 @@ def validate_issue_records(issue_records):
             site_by_issue[issue_id] = site
     temp_path = ""
     result = None
+    errors = []
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -6433,13 +7786,21 @@ def validate_issue_records(issue_records):
                     issue.get("issue_subtype", ""),
                     issue.get("status", ""),
                 ])
-        result = validate_issues_report(temp_path)
+        result = validate_issues_report(temp_path, errors=errors)
     finally:
         if temp_path:
             try:
                 os.remove(temp_path)
             except OSError:
                 pass
+    if errors:
+        # The web path's caller (_run_issues_validation) has real,
+        # already-correct handling for an exception here — it logs an
+        # ERROR line and falls back to empty results rather than silently
+        # publishing a "done" event that LOOKS like a clean, empty fleet.
+        # Raising is what routes this failure into that existing handling
+        # instead of past it.
+        raise RuntimeError(errors[0])
     if site_by_issue and isinstance(result, tuple):
         for bucket in result:
             if not isinstance(bucket, list):
@@ -6457,7 +7818,19 @@ def validate_issue_records(issue_records):
                 if unit:
                     _store_site_id_cache(unit, subject, site)
     return result
-def validate_issues_report(issue_path=None):
+def validate_issues_report(issue_path=None, errors=None):
+    """
+    errors: optional list a caller passes in to learn about a failure
+    without changing this function's return shape — every existing caller
+    (the CLI's own menu option, and every test) relies on this being a
+    plain tuple ending in discarded_tickets (result[-1]), so a failure
+    signal can't just be appended as one more element without breaking
+    that everywhere. Pass a list and check it after calling; None (the
+    default) keeps the old fire-and-forget behavior exactly as it was.
+    New buckets (like footage_request_tickets) are safe to insert
+    anywhere BEFORE discarded_tickets — nothing here indexes by fixed
+    position except result[-1] itself.
+    """
     if issue_path is None:
         issue_path = os.path.join(os.path.expanduser("~"), "Downloads", "Issue.csv")
     issue_items = []
@@ -6476,6 +7849,7 @@ def validate_issues_report(issue_path=None):
     monitoring_hours_tickets = []
     termination_tickets = []
     relocation_tickets = []
+    footage_request_tickets = []
     discarded_tickets = []
     has_type_subtype = False
     id_col = 0
@@ -6556,12 +7930,64 @@ def validate_issues_report(issue_path=None):
                     })
                     continue
                 if "footage" in subject_lower or issue_type.lower() == "footage request":
-                    print(f"Discarding Footage Request ticket: {subject_cell}")
-                    discarded_tickets.append({
+                    print(f"Footage Request ticket (no validation): {subject_cell}")
+                    ensure_net_array()
+                    unit = _match_unit_from_subject(subject_cell)
+                    switch_url = fisheye_ip = pve_ip = platform_url = ""
+                    has_pve = has_relay = has_platform = has_scrypted = False
+                    scrypted_url = ""
+                    scrypted_nvr_url = ""
+                    compute_label = "NUC"
+                    if unit:
+                        (
+                            switch_url,
+                            fisheye_ip,
+                            pve_ip,
+                            has_pve,
+                            has_relay,
+                            has_platform,
+                            platform_url,
+                            has_scrypted,
+                            scrypted_url,
+                            scrypted_nvr_url,
+                        ) = _unit_device_info(unit)
+                        compute_label = compute_host_label(unit)
+                    vrm_mu, vrm_url = _vrm_info_from_subject(subject_cell, unit)
+                    footage_request_tickets.append({
+                        "unit": unit,
                         "issue_id": issue_id,
                         "url": _issue_ticket_url(issue_id),
+                        "issue_type": issue_type,
+                        "outage_type": outage_type,
+                        "issue_subtype": issue_subtype,
                         "subject": subject_cell,
-                        "reason": "Footage Request",
+                        "undiagnosed": undiagnosed,
+                        "switch_url": switch_url,
+                        "fisheye_ip": fisheye_ip,
+                        "pve_ip": pve_ip,
+                        "has_pve": has_pve,
+                        "has_relay": has_relay,
+                        "has_platform": has_platform,
+                        "platform_url": platform_url,
+                        "has_scrypted": has_scrypted,
+                        "scrypted_url": scrypted_url,
+                        "scrypted_nvr_url": scrypted_nvr_url,
+                        "compute_label": compute_label,
+                        "is_speaker": False,
+                        "speaker_up": None,
+                        "is_camera": False,
+                        "camera_target": "",
+                        "camera_label": "",
+                        "camera_up": None,
+                        "is_panel_issue": False,
+                        "panel_fisheye_up": None,
+                        "is_camera_view": False,
+                        "camera_view_status": None,
+                        "vrm_mu": vrm_mu,
+                        "vrm_url": vrm_url,
+                        "erp_status": erp_status,
+                        "hold_kind": "",
+                        "led_status": None,
                     })
                     continue
                 if "unit swap" in issue_subtype.lower():
@@ -6703,6 +8129,7 @@ def validate_issues_report(issue_path=None):
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
                     scrypted_url = ""
+                    scrypted_nvr_url = ""
                     compute_label = "NUC"
                     if unit:
                         (
@@ -6715,6 +8142,7 @@ def validate_issues_report(issue_path=None):
                             platform_url,
                             has_scrypted,
                             scrypted_url,
+                            scrypted_nvr_url,
                         ) = _unit_device_info(unit)
                         compute_label = compute_host_label(unit)
                     vrm_mu, vrm_url = _vrm_info_from_subject(subject_cell, unit)
@@ -6736,6 +8164,7 @@ def validate_issues_report(issue_path=None):
                         "platform_url": platform_url,
                         "has_scrypted": has_scrypted,
                         "scrypted_url": scrypted_url,
+                        "scrypted_nvr_url": scrypted_nvr_url,
                         "compute_label": compute_label,
                         "is_speaker": False,
                         "speaker_up": None,
@@ -6761,6 +8190,7 @@ def validate_issues_report(issue_path=None):
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
                     scrypted_url = ""
+                    scrypted_nvr_url = ""
                     compute_label = "NUC"
                     if unit:
                         (
@@ -6773,6 +8203,7 @@ def validate_issues_report(issue_path=None):
                             platform_url,
                             has_scrypted,
                             scrypted_url,
+                            scrypted_nvr_url,
                         ) = _unit_device_info(unit)
                         compute_label = compute_host_label(unit)
                     vrm_mu, vrm_url = _vrm_info_from_subject(subject_cell, unit)
@@ -6794,6 +8225,7 @@ def validate_issues_report(issue_path=None):
                         "platform_url": platform_url,
                         "has_scrypted": has_scrypted,
                         "scrypted_url": scrypted_url,
+                        "scrypted_nvr_url": scrypted_nvr_url,
                         "compute_label": compute_label,
                         "is_speaker": False,
                         "speaker_up": None,
@@ -6819,6 +8251,7 @@ def validate_issues_report(issue_path=None):
                     switch_url = fisheye_ip = pve_ip = platform_url = ""
                     has_pve = has_relay = has_platform = has_scrypted = False
                     scrypted_url = ""
+                    scrypted_nvr_url = ""
                     compute_label = "NUC"
                     if unit:
                         (
@@ -6831,6 +8264,7 @@ def validate_issues_report(issue_path=None):
                             platform_url,
                             has_scrypted,
                             scrypted_url,
+                            scrypted_nvr_url,
                         ) = _unit_device_info(unit)
                         compute_label = compute_host_label(unit)
                     vrm_mu, vrm_url = _vrm_info_from_subject(subject_cell, unit)
@@ -6852,6 +8286,7 @@ def validate_issues_report(issue_path=None):
                         "platform_url": platform_url,
                         "has_scrypted": has_scrypted,
                         "scrypted_url": scrypted_url,
+                        "scrypted_nvr_url": scrypted_nvr_url,
                         "compute_label": compute_label,
                         "is_speaker": False,
                         "speaker_up": None,
@@ -6918,6 +8353,7 @@ def validate_issues_report(issue_path=None):
                     issue_type, issue_subtype, subject_cell
                 )
                 camera_targets = _camera_targets_from_subject(subject_cell)
+                camera_targets_generic = False
                 if not camera_targets and _is_generic_camera_outage_subject(subject_cell):
                     # No specific camera named — check every camera endpoint
                     # this unit has (ping_camera itself already fails soft,
@@ -6925,8 +8361,11 @@ def validate_issues_report(issue_path=None):
                     # same as an explicitly-named camera on a unit that
                     # doesn't have it), rather than silently falling through
                     # to the generic router/compute check and never
-                    # mentioning cameras at all.
+                    # mentioning cameras at all. Narrowed to the unit's real
+                    # cameras (open_camera_targets_for_unit) once the unit is
+                    # known, below — an ACRD unit never has Camera 4.
                     camera_targets = list(CAMERA_ENDPOINTS.keys())
+                    camera_targets_generic = True
                 has_head_unit = bool(
                     re.search(r"\b(?:RD|FD)\s*\d+", subject_cell, re.IGNORECASE)
                 )
@@ -6973,6 +8412,7 @@ def validate_issues_report(issue_path=None):
                         "is_scrypted_outage": is_scrypted_outage,
                         "is_nuc_down": is_nuc_down,
                         "camera_targets": camera_targets,
+                        "camera_targets_generic": camera_targets_generic,
                         "is_panel_issue": is_panel_issue,
                         "panel_fisheye_up": None,
                         "is_camera_view": is_camera_view,
@@ -6990,8 +8430,6 @@ def validate_issues_report(issue_path=None):
 
                 for net_row in candidate_rows:
                     unit = net_row[0]
-                    if ticket_matched:
-                        break
                     _register_ticket_unit(unit)
                     if ticket_matched:
                         break
@@ -7012,7 +8450,15 @@ def validate_issues_report(issue_path=None):
                         "reason": "No matching unit in net sheet",
                     })
     except Exception as e:
+        # Caught live, 2026-09-23: this used to return 14 empty lists with
+        # no distinct error signal at all — a genuinely malformed ERP
+        # export (bad row, unexpected None, a column ERP renamed) rendered
+        # as "0 tickets everywhere," visually identical to a real all-clear
+        # fleet. A caller that cares passes `errors` (see validate_issue_records)
+        # and can tell the two apart; everyone else sees no change at all.
         print(f'Task failed: {e}')
+        if errors is not None:
+            errors.append(f"Ticket classification failed: {e}")
         return [], [], [], [], [], [], [], [], [], [], [], [], [], []
 
     print(
@@ -7113,6 +8559,12 @@ def validate_issues_report(issue_path=None):
             speaker_outage.append(result_key)
             continue
         camera_targets = unit_meta_map.get(result_key, {}).get("camera_targets") or []
+        if camera_targets and unit_meta_map.get(result_key, {}).get("camera_targets_generic"):
+            # Generic fan-out ("Camera Outage" with no camera named) — narrow
+            # to the cameras this unit actually has, so e.g. an ACRD unit
+            # never gets a synthetic Camera 4 row it can't possibly have.
+            allowed = open_camera_targets_for_unit(unit)
+            camera_targets = [t for t in camera_targets if t in allowed]
         if camera_targets:
             for target in camera_targets:
                 camera_key = f"{result_key}::{target}"
@@ -7217,9 +8669,13 @@ def validate_issues_report(issue_path=None):
     relocation_tickets.sort(
         key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or "", item.get("issue_id") or "")
     )
+    footage_request_tickets.sort(
+        key=lambda item: (0 if item.get("undiagnosed") else 1, item.get("unit") or "", item.get("issue_id") or "")
+    )
     _print_linked_units("Monitoring Hours:", monitoring_hours_tickets)
     _print_linked_units("Termination:", termination_tickets)
     _print_linked_units("Relocation:", relocation_tickets)
+    _print_linked_units("Footage Request:", footage_request_tickets)
     print(f"Miscellaneous tickets: {len(discarded_tickets)}")
     for item in discarded_tickets:
         print(
@@ -7241,6 +8697,7 @@ def validate_issues_report(issue_path=None):
         monitoring_hours_tickets,
         termination_tickets,
         relocation_tickets,
+        footage_request_tickets,
         discarded_tickets,
     )
 def ping_speaker_status(unit):
@@ -7597,11 +9054,65 @@ def unit_history_entries(unit, days=30, limit=200):
     }, None
 def fleet_flap_report(days=7, min_transitions=3):
     """Units flapping most in the window — the fleet-wide view."""
+    units = unit_history.fleet_flappers(days=days, min_transitions=min_transitions)
+    # Pair each flapper with its RD head or MU trailer so the report can
+    # show "RD3381(MU7038)" instead of a bare code that leaves a tech
+    # guessing which one this actually is — same RD####(MU####) display
+    # convention the fleet weather/shading reports already use. MU units go
+    # through the bulk ERP reverse lookup (one request for however many
+    # showed up here, not the whole fleet); RD/FD units go through the
+    # forward per-unit lookup, already cached 5 minutes per unit
+    # (_erp_parent_mu_code), so refreshing this report again right after
+    # costs nothing extra. This report is only ever loaded on demand (Reports
+    # panel / its own Refresh button), never by a scheduler, so the per-unit
+    # ERP round trips are bounded by however many units are actually
+    # flapping right now, not the fleet size.
+    mu_units = [row["unit"] for row in units if row["unit"].upper().startswith("MU")]
+    mu_to_heads = {}
+    if mu_units:
+        mu_to_heads, crosswalk_error = _erp_heads_for_mu_trailers(mu_units)
+        mu_to_heads = mu_to_heads or {}
+        if crosswalk_error:
+            print(f"fleet_flap_report: ERP head crosswalk failed: {crosswalk_error}")
+    for row in units:
+        unit = row["unit"].upper()
+        if unit.startswith("MU"):
+            row["head_units"] = mu_to_heads.get(unit, [])
+            row["mu_trailer"] = ""
+        else:
+            row["head_units"] = []
+            row["mu_trailer"] = _erp_parent_mu_code(unit)
     return {
         "days": days,
         "min_transitions": min_transitions,
-        "units": unit_history.fleet_flappers(days=days, min_transitions=min_transitions),
+        "units": units,
     }, None
+def _escalate_led_if_unit_fully_down(unit, output, fields):
+    """
+    Shared by camera/panel/speaker-outage revalidation (and scrypted_outage,
+    below): the ticket's own single endpoint (camera/fisheye/speaker/
+    scrypted) being down can't tell if router+compute have SINCE also gone
+    down — this ticket's own list name promises a narrower problem than
+    that. Originally caught for scrypted_outage (Andrew, 2026-09-18: keep
+    the ticket filed where it is, don't jump it to Down Full, just make
+    the LED tell the truth) — the same gap existed for its three siblings,
+    which never checked past their own one endpoint at all.
+
+    Mutates `fields` in place with led_status/compute_label when the whole
+    unit is confirmed down (router AND compute both unreachable); leaves
+    it untouched otherwise, so a caller that already set its own default
+    led_status (e.g. scrypted_outage's "yellow") only gets overridden when
+    there's real evidence for something worse. Returns the combined
+    output text for the caller to pass along.
+    """
+    _code, router_output = _safe_ping_result(ping_router(unit))
+    router_up = _ping_reachable(router_output)
+    compute_up, compute_label, compute_output, compute_error = ping_compute_status(unit)
+    combined = "\n".join(part for part in (output, router_output, compute_output) if part)
+    if not compute_error and not router_up and not compute_up:
+        fields["led_status"] = "red"
+        fields["compute_label"] = compute_label
+    return combined
 def revalidate_list_entry(list_id, item):
     """Run the list-specific check for one ticket and return its destination list."""
     unit = str((item or {}).get("unit") or "").strip()
@@ -7654,30 +9165,49 @@ def revalidate_list_entry(list_id, item):
                 "compute_label": compute_host_label(unit),
             }
             return "nuc_down", fields, output, None
-        fields = {"led_status": "green" if scrypted_up else "yellow"}
-        category = "false_positives" if scrypted_up else "scrypted_outage"
-        if category == "false_positives":
-            fields["led_status"] = "green"
-        return category, fields, output, None
+        if not scrypted_up:
+            # This list's own name is "router+PVE up, Scrypted down" — a
+            # ping of Scrypted alone can never notice if router/compute
+            # have SINCE also gone down, so a unit that escalated to a
+            # full outage kept showing yellow here forever, even though a
+            # fresh Revalidate had all the data needed to know better.
+            # Andrew's own request, 2026-09-18: keep it filed under
+            # Scrypted outage (don't jump it to Down Full), just make the
+            # LED tell the truth. See _escalate_led_if_unit_fully_down,
+            # which this same check now also backs for camera/panel/
+            # speaker-outage revalidation below.
+            fields = {"led_status": "yellow"}
+            combined_output = _escalate_led_if_unit_fully_down(unit, output, fields)
+            return "scrypted_outage", fields, combined_output, None
+        return "false_positives", {"led_status": "green"}, output, None
 
     if list_id == "speaker_outage":
         speaker_up, output, error = ping_speaker_status(unit)
         if error:
             return None, {}, output, error
-        return "speaker_outage", {"speaker_up": speaker_up}, output, None
+        fields = {"speaker_up": speaker_up}
+        if not speaker_up:
+            output = _escalate_led_if_unit_fully_down(unit, output, fields)
+        return "speaker_outage", fields, output, None
 
     if list_id == "camera_outage":
         target = str((item or {}).get("camera_target") or "").strip()
         camera_up, output, error = ping_camera_status(unit, target)
         if error:
             return None, {}, output, error
-        return "camera_outage", {"camera_up": camera_up}, output, None
+        fields = {"camera_up": camera_up}
+        if not camera_up:
+            output = _escalate_led_if_unit_fully_down(unit, output, fields)
+        return "camera_outage", fields, output, None
 
     if list_id == "panel_issues":
         fisheye_up, output, error = ping_camera_status(unit, "fisheye")
         if error:
             return None, {}, output, error
-        return "panel_issues", {"panel_fisheye_up": fisheye_up}, output, None
+        fields = {"panel_fisheye_up": fisheye_up}
+        if not fisheye_up:
+            output = _escalate_led_if_unit_fully_down(unit, output, fields)
+        return "panel_issues", fields, output, None
 
     if list_id == "camera_view":
         result, error = validate_camera_view_status(unit)
@@ -7902,6 +9432,204 @@ def _parse_art_parameters_form(html_text):
     parser = _FormParser()
     parser.feed(html_text or "")
     return parser.fields
+def _art_login_session():
+    """
+    Shared ART login flow — same CSRF/login dance download_art_noc_outage_report
+    already does for report 153, split out so get_art_site_contacts (report
+    152) doesn't need its own copy. Returns (session, error); session is a
+    fresh, already-authenticated requests.Session on success.
+    """
+    username = (os.getenv("myemail") or "").strip()
+    password = os.getenv("mypass") or ""
+    if not username or not password:
+        return None, "myemail/mypass are not set in .env"
+    session = requests.Session()
+    session.headers.update({"User-Agent": "work_tool-art/1.0"})
+    try:
+        login_page = session.get("https://art.sentracam.com/art/login", timeout=30)
+        csrf_match = re.search(r'name="_csrf"\s+value="([^"]+)"', login_page.text or "")
+        if not csrf_match:
+            return None, "ART login page missing CSRF token"
+        login_resp = session.post(
+            "https://art.sentracam.com/art/login",
+            data={"username": username, "password": password, "_csrf": csrf_match.group(1)},
+            timeout=30,
+            allow_redirects=True,
+        )
+        title_match = re.search(r"<title>(.*?)</title>", login_resp.text or "", re.I | re.S)
+        title_text = (title_match.group(1) if title_match else "").strip()
+        if "login" in title_text.lower() and 'name="password"' in (login_resp.text or ""):
+            return None, "ART login failed — check myemail/mypass"
+    except requests.exceptions.RequestException as exc:
+        return None, f"ART login request failed: {exc}"
+    return session, None
+def _art_report_rows(session, report_id):
+    """
+    Run an ART report by id through the htmlDataTable format (ART's native
+    xlsx export fails server-side — see download_art_noc_outage_report) and
+    return its parsed rows, header row first. Shared by every ART report
+    pull that goes through _art_login_session.
+    """
+    report_url = f"https://art.sentracam.com/art/selectReportParameters?reportId={report_id}"
+    try:
+        params_page = session.get(report_url, timeout=30)
+        if params_page.status_code != 200:
+            return None, f"ART report page HTTP {params_page.status_code}"
+        fields = _parse_art_parameters_form(params_page.text)
+        if not fields.get("reportId"):
+            return None, "ART parameters form missing reportId (login or permissions?)"
+        fields["reportFormat"] = "htmlDataTable"
+        run_resp = session.post(
+            "https://art.sentracam.com/art/runReport",
+            data=fields,
+            files={},
+            headers={"Referer": report_url},
+            timeout=180,
+        )
+        if run_resp.status_code != 200:
+            return None, f"ART runReport HTTP {run_resp.status_code}"
+        if "Permission denied" in (run_resp.text or ""):
+            return None, "ART report failed: Permission denied on ART server"
+        if "An error occurred" in (run_resp.text or "") and "<table" not in (run_resp.text or "").lower():
+            return None, "ART runReport returned an error page"
+    except requests.exceptions.RequestException as exc:
+        return None, f"ART request failed: {exc}"
+    rows = _parse_html_table_rows(run_resp.text)
+    if not rows:
+        return None, "ART htmlDataTable returned no table rows"
+    return rows, None
+def get_art_site_contacts(unit, subject=""):
+    """
+    ART report 152 (NOC Outage Site Contacts) is every contact in the
+    company with no server-side filter — this pulls the whole thing (same
+    htmlDataTable trick as report 153) and filters it down to whichever
+    site this ticket's unit is actually on, so "Get site contacts" hands
+    back the handful of contacts that matter instead of the entire
+    company directory.
+
+    site_id comes from ERP via resolve_dashboard_site_id (the same
+    resolution "Open Site" already uses, cached), and matches against
+    ART's own "SiteID" column when the report has one — verified live,
+    2026-09-16 (RD3371, site 63604 "Roeding Park"): ART's SiteID values
+    are the exact same ERP Site docname, so this is an exact match, no
+    text-similarity guessing needed. Falls back to a fuzzy site_name
+    match only when no SiteID-shaped column exists (ART renamed/dropped
+    it) — a subject's own trailing site name is free-typed and
+    inconsistent (dashes with or without spaces, abbreviated names), so
+    ERP's Site record is the canonical spelling used for that fallback
+    too, not the ticket subject.
+
+    Column detection is by header name, not a fixed index — ART's
+    column order/labels aren't something this codebase controls, and a
+    fixed index would silently match the wrong column if ART ever
+    reorders them. If nothing usable is found at all, this fails with
+    the actual headers seen rather than guessing.
+
+    Returns (info, error). info: {"site_id", "site_name", "columns",
+    "site_column", "contacts", "to_emails", "cc_emails"} — contacts is a
+    list of {column: value} dicts, keeping every column ART returned (not
+    just name/email) since a tech reading this may want phone/role too
+    and it costs nothing to keep everything already fetched. to_emails/
+    cc_emails are deduped flat lists pulled from whichever columns ART
+    names for To/CC, for a one-click copy of just that role.
+    """
+    unit_name = str(unit or "").strip()
+    if not unit_name:
+        return None, "Missing unit"
+    subject_text = str(subject or "").strip()
+
+    # resolve_dashboard_site_id, not resolve_shield_site_id directly, so a
+    # ticket whose trailer has no Site still finds it through the same
+    # fallbacks "Open Site" uses (_site_id_fallback_for_ticket).
+    site_id, site_error = resolve_dashboard_site_id(unit_name, subject_text)
+    if site_error:
+        return None, site_error
+    site, doc_error = _fetch_erp_site_doc(site_id)
+    if doc_error:
+        return None, doc_error
+    site_name = (site.get("site_name") or "").strip()
+    if not site_name:
+        return None, f"Site {site_id} has no Site Name set in ERP"
+
+    session, error = _art_login_session()
+    if error:
+        return None, error
+    rows, error = _art_report_rows(session, 152)
+    if error:
+        return None, error
+
+    header = [str(cell).strip() for cell in rows[0]]
+    header_lower = [name.lower() for name in header]
+    # Prefer an exact "SiteID" column (allowing for a space/underscore
+    # variant) — "Site Name" would also match a bare "site" substring
+    # search, so this has to be checked BEFORE falling back to that.
+    id_col = next(
+        (i for i, name in enumerate(header_lower) if name in ("siteid", "site id", "site_id")),
+        None,
+    )
+    name_col = next(
+        (i for i, name in enumerate(header_lower) if "site" in name and "id" not in name),
+        None,
+    )
+    if id_col is None and name_col is None:
+        return None, (
+            "ART report 152 has no SiteID/Site Name column — got: " + ", ".join(header)
+        )
+
+    if id_col is not None:
+        match_col = id_col
+        needle_exact = str(site_id).strip().casefold()
+        def row_matches(cell_value):
+            return cell_value.strip().casefold() == needle_exact
+    else:
+        match_col = name_col
+        needle = site_name.casefold()
+        def row_matches(cell_value):
+            cell_needle = cell_value.strip().casefold()
+            return bool(cell_needle) and (needle in cell_needle or cell_needle in needle)
+
+    contacts = []
+    for row in rows[1:]:
+        if match_col >= len(row):
+            continue
+        if not row_matches(str(row[match_col] or "")):
+            continue
+        contacts.append({header[i]: (row[i] if i < len(row) else "") for i in range(len(header))})
+
+    # Split into To/CC email lists so the UI can offer one copy button per
+    # role instead of one combined blob — verified live, 2026-09-24
+    # (RD3231/Hyatt Place AZB): ART names these "TO: Contacts" and
+    # "TO: CC" (report 152's own headers, not this app's naming). Detected
+    # by substring like site_id/site_name above, not a fixed index, so a
+    # header rename doesn't silently break this — it just comes back
+    # empty and the UI disables that button rather than erroring.
+    cc_col = next((name for name in header if "cc" in name.lower()), None)
+    to_col = next(
+        (name for name in header if name != cc_col and "contact" in name.lower()),
+        None,
+    )
+    def _email_list(column):
+        if not column:
+            return []
+        seen = set()
+        emails = []
+        for contact in contacts:
+            for piece in str(contact.get(column) or "").split(","):
+                email = piece.strip()
+                if email and email.lower() not in seen:
+                    seen.add(email.lower())
+                    emails.append(email)
+        return emails
+
+    return {
+        "site_id": site_id,
+        "site_name": site_name,
+        "columns": header,
+        "site_column": header[match_col],
+        "contacts": contacts,
+        "to_emails": _email_list(to_col),
+        "cc_emails": _email_list(cc_col),
+    }, None
 def download_art_noc_outage_report(dest_path=None):
     """
     Login to ART and download report 153 (NOC outage / recovery email sheet).
@@ -8001,7 +9729,16 @@ def download_art_noc_outage_report(dest_path=None):
         return None, f"ART request failed: {exc}"
     except Exception as exc:
         return None, f"ART download failed: {exc}"
-def check_missing_recovery_emails(report_path=None):
+def check_missing_recovery_emails(report_path=None, errors=None):
+    """
+    errors: optional list a caller passes in to learn about a failure
+    without changing this function's return shape — the CLI menu option
+    that calls this unpacks a plain 5-tuple and every existing caller
+    expects exactly that, so a failure can't just change what's returned.
+    Pass a list and check it after calling; None (the default) keeps the
+    old fire-and-forget behavior exactly as it was. See
+    validate_issues_report's own errors= param for the same pattern.
+    """
     if report_path is None:
         cached = art_recovery_report_path()
         if os.path.isfile(cached):
@@ -8029,7 +9766,14 @@ def check_missing_recovery_emails(report_path=None):
     try:
         rows = _read_spreadsheet_rows(report_path)
     except Exception as e:
+        # Caught live, 2026-09-23: an unreadable/wrong-format upload used to
+        # render as 5 empty lists — visually identical to "the fleet is
+        # completely clean," the most dangerous failure mode for a
+        # monitoring tool. errors is how a caller that cares (see
+        # _run_recovery_email_check) tells the two apart.
         print(f'Task failed: {e}')
+        if errors is not None:
+            errors.append(f"Could not read recovery-email report: {e}")
         return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
 
     header_idx = None
@@ -8039,6 +9783,8 @@ def check_missing_recovery_emails(report_path=None):
             break
     if header_idx is None:
         print("Could not find 'Recovery Email' column header in report")
+        if errors is not None:
+            errors.append("Recovery-email report has no 'Recovery Email' column — wrong file, or ART changed its format")
         return needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date
 
     def _match_units_from_subject(subject):

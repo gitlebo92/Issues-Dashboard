@@ -106,6 +106,23 @@ def _connect():
             ON snapshot_tasks (status, next_attempt_at);
         """
     )
+    # verify_mode / window_start_minutes_utc / window_end_minutes_utc added
+    # 2026-09-15 for COMPRESSED_WINDOW_V1 support — a plain "dip"-mode task
+    # (every row that predates this) still verifies exactly as before;
+    # only a "compressed_window" task needs the two window columns at all.
+    # ALTER TABLE ADD COLUMN has no "IF NOT EXISTS" in SQLite, so this is
+    # guarded by catching the duplicate-column error instead — safe to run
+    # on every startup, first-run-after-upgrade or not.
+    for column_sql in (
+        "ALTER TABLE snapshot_tasks ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'dip'",
+        "ALTER TABLE snapshot_tasks ADD COLUMN window_start_minutes_utc INTEGER",
+        "ALTER TABLE snapshot_tasks ADD COLUMN window_end_minutes_utc INTEGER",
+    ):
+        try:
+            conn.execute(column_sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.commit()
     _CONN = conn
     return _CONN
@@ -129,7 +146,33 @@ def next_occurrence_following_day(hour_utc, now=None, days_ahead=1):
     return float(calendar.timegm(candidate.timetuple()))
 
 
-def schedule_task(unit, subject, camera_target, peak_hour_utc, attempts_total=DEFAULT_ATTEMPTS_TOTAL, now=None):
+def next_occurrence_at_or_after(hour_utc, now=None):
+    """
+    Epoch seconds for the next hour_utc:00 UTC at or after `now` — today's
+    occurrence if it hasn't happened yet, otherwise tomorrow's.
+
+    Used only when RETARGETING a task to a freshly-found hour (see
+    record_attempt_failure's new_peak_hour_utc): unlike the original
+    schedule, which always deliberately waits a full day (see this
+    module's own docstring on why), a fresh re-detection mid-run means the
+    freshly-found hour might still be ahead of us today, and there is no
+    reason to make a tech wait an extra day for an hour that hasn't even
+    happened yet.
+    """
+    now = now if now is not None else time.time()
+    now_date = datetime.utcfromtimestamp(now).date()
+    candidate = datetime(now_date.year, now_date.month, now_date.day, int(hour_utc) % 24, 0, 0)
+    candidate_ts = float(calendar.timegm(candidate.timetuple()))
+    if candidate_ts <= now:
+        candidate = candidate + timedelta(days=1)
+        candidate_ts = float(calendar.timegm(candidate.timetuple()))
+    return candidate_ts
+
+
+def schedule_task(
+    unit, subject, camera_target, peak_hour_utc, attempts_total=DEFAULT_ATTEMPTS_TOTAL, now=None,
+    verify_mode="dip", window_start_minutes_utc=None, window_end_minutes_utc=None,
+):
     """
     Create a snapshot task for `unit`, aimed at the next day's occurrence
     of peak_hour_utc. If a pending task already exists for this exact
@@ -137,6 +180,14 @@ def schedule_task(unit, subject, camera_target, peak_hour_utc, attempts_total=DE
     duplicate — chiefly for the bulk "schedule for every shaded unit"
     action, so re-running it doesn't pile up repeats for units still
     waiting on an earlier task.
+
+    verify_mode ("dip" or "compressed_window") tags which detector this
+    finding came from, so _run_due_shading_snapshot_tasks knows which of
+    work_tool.verify_shading_dip_now / verify_compressed_window_dip_now to
+    re-check with later — the two need different logic (see
+    verify_compressed_window_dip_now's own docstring). window_start/end_
+    minutes_utc only matter for "compressed_window" — the precise
+    minute-of-day border that mode verifies against, not a whole hour.
 
     Returns (task_id, created, next_attempt_at) or (None, False, None) on
     a storage error — never raises into the caller.
@@ -161,10 +212,12 @@ def schedule_task(unit, subject, camera_target, peak_hour_utc, attempts_total=DE
             cursor = conn.execute(
                 "INSERT INTO snapshot_tasks"
                 " (unit, subject, camera_target, peak_hour_utc, attempts_total, attempts_used,"
-                "  next_attempt_at, status, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, 0, ?, 'pending', ?, ?)",
+                "  next_attempt_at, status, created_at, updated_at, verify_mode,"
+                "  window_start_minutes_utc, window_end_minutes_utc)"
+                " VALUES (?, ?, ?, ?, ?, 0, ?, 'pending', ?, ?, ?, ?, ?)",
                 (unit, str(subject or ""), camera_target, int(peak_hour_utc), int(attempts_total),
-                 next_attempt_at, now, now),
+                 next_attempt_at, now, now, str(verify_mode or "dip"),
+                 window_start_minutes_utc, window_end_minutes_utc),
             )
             conn.commit()
             return cursor.lastrowid, True, next_attempt_at
@@ -190,12 +243,32 @@ def due_tasks(now=None, limit=100):
         return []
 
 
-def record_attempt_failure(task_id, note, now=None):
+def record_attempt_failure(task_id, note, now=None, force_exhaust=False, new_peak_hour_utc=None):
     """
     One attempt spent without a photo — the dip wasn't confirmed, the
     camera fetch failed, or VRM/ERP couldn't be reached this pass. Either
     reschedules for the following day (attempts remain) or marks the task
     exhausted. Never raises.
+
+    force_exhaust skips straight to "exhausted" regardless of attempts
+    remaining — for a failure that retrying can't fix (see
+    _run_due_shading_snapshot_tasks: a classic dip-mode task whose target
+    hour no longer reads as productive in this trailer's own history isn't
+    a transient miss, it's the same doomed check every remaining attempt
+    would repeat identically).
+
+    new_peak_hour_utc RETARGETS the task instead of a plain retry — for a
+    "dip" task whose fresh re-check (work_tool.weather.
+    verify_shading_dip_now) found a real dip, just not near enough to
+    RIGHT NOW to be worth a camera fetch (a photo taken now wouldn't show
+    it). Caught live, 2026-09-16 (RD3365/MU7034): scheduled for 7am off a
+    detection that (correctly, at the time) found that hour worst, but the
+    trailer's own graph shows its actual dip around noon — a plain retry
+    would just check 7am again forever. When given, peak_hour_utc updates
+    to the freshly-found hour and next_attempt_at uses
+    next_occurrence_at_or_after (today if that hour hasn't passed yet,
+    unlike the original schedule's deliberate one-day wait) instead of
+    next_occurrence_following_day.
     """
     now = now if now is not None else time.time()
     try:
@@ -208,20 +281,25 @@ def record_attempt_failure(task_id, note, now=None):
             if not row:
                 return False
             attempts_used = row["attempts_used"] + 1
-            if attempts_used >= row["attempts_total"]:
+            if force_exhaust or attempts_used >= row["attempts_total"]:
                 conn.execute(
                     "UPDATE snapshot_tasks SET attempts_used = ?, status = 'exhausted',"
                     " last_note = ?, updated_at = ? WHERE id = ?",
                     (attempts_used, note, now, task_id),
                 )
             else:
-                next_attempt_at = next_occurrence_following_day(
-                    row["peak_hour_utc"], now=now, days_ahead=1
+                peak_hour_utc = (
+                    int(new_peak_hour_utc) if new_peak_hour_utc is not None else row["peak_hour_utc"]
+                )
+                next_attempt_at = (
+                    next_occurrence_at_or_after(peak_hour_utc, now=now)
+                    if new_peak_hour_utc is not None
+                    else next_occurrence_following_day(peak_hour_utc, now=now, days_ahead=1)
                 )
                 conn.execute(
                     "UPDATE snapshot_tasks SET attempts_used = ?, next_attempt_at = ?,"
-                    " last_note = ?, updated_at = ? WHERE id = ?",
-                    (attempts_used, next_attempt_at, note, now, task_id),
+                    " peak_hour_utc = ?, last_note = ?, updated_at = ? WHERE id = ?",
+                    (attempts_used, next_attempt_at, peak_hour_utc, note, now, task_id),
                 )
             conn.commit()
         return True

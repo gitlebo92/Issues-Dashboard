@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, render_template, Response, redirect, url_for
+from werkzeug.utils import secure_filename
 import os
 import copy
 import re
@@ -46,6 +47,32 @@ def inject_work_tool_runtime():
         "work_tool_port": WORK_TOOL_PORT,
         "is_sandbox": WORK_TOOL_ENV == "sandbox",
     }
+
+
+def _env_int(name, default):
+    """
+    int(os.getenv(name)) with a fallback, tolerating an empty or
+    whitespace-only value the same way every REFRESH_SECONDS/KEEP_DAYS
+    constant in this file used to hand-roll individually:
+    `int((os.getenv(name) or str(default)).strip() or str(default))`.
+    Collapses ~9 near-identical 3-line blocks into one-liners — same
+    behavior, one place to get the fallback-of-a-fallback logic right.
+    """
+    raw = (os.getenv(name) or "").strip()
+    return int(raw) if raw else int(default)
+
+
+def _error(message, status=400):
+    """
+    Shared shape for the plain {"ok": False, "error": message} JSON error
+    response every route in this file used to hand-type individually (92
+    call sites collapsed onto this one helper) — one place to change if
+    that shape ever needs a new field, and no risk of a typo'd key
+    breaking a JS `.then()` chain that expects `data.error`. Routes that
+    need extra fields alongside "error" (a handful do) still build their
+    own dict; this only covers the plain, no-extra-fields case.
+    """
+    return jsonify({"ok": False, "error": message}), status
 
 
 def automated_tasks_paused():
@@ -109,7 +136,7 @@ _sweep_stale_uploads()
 # Validation history is append-only. Ninety days is well past what the flap
 # report needs and keeps the file to a few MB on a storage-tight workstation;
 # prune() also enforces a hard row ceiling and reclaims the freed space.
-UNIT_HISTORY_KEEP_DAYS = int((os.getenv("UNIT_HISTORY_KEEP_DAYS") or "90").strip() or "90")
+UNIT_HISTORY_KEEP_DAYS = _env_int("UNIT_HISTORY_KEEP_DAYS", 90)
 import unit_history
 try:
     unit_history.prune(keep_days=UNIT_HISTORY_KEEP_DAYS)
@@ -119,7 +146,7 @@ except Exception as _history_exc:  # never block startup on history
 # Same retention window as unit_history, same reasoning — see
 # alarm_history.py's module docstring for why its row growth is nowhere
 # near unit_history's despite tracking a much larger live alarm count.
-ALARM_HISTORY_KEEP_DAYS = int((os.getenv("ALARM_HISTORY_KEEP_DAYS") or "90").strip() or "90")
+ALARM_HISTORY_KEEP_DAYS = _env_int("ALARM_HISTORY_KEEP_DAYS", 90)
 import alarm_history
 try:
     alarm_history.prune(keep_days=ALARM_HISTORY_KEEP_DAYS)
@@ -137,6 +164,16 @@ try:
     shading_snapshots.prune_old(retention_days=SHADING_SNAPSHOT_RETENTION_DAYS)
 except Exception as _shading_snapshot_exc:  # never block startup on history
     print(f"Shading snapshot prune skipped: {_shading_snapshot_exc}")
+
+# Per-tech ticket stats (resolved/worked/skipped counts) — see
+# tech_stats.py's module docstring. Years of retention by default since a
+# tech may genuinely want their all-time count, not just a recent window.
+TECH_STATS_KEEP_DAYS = _env_int("TECH_STATS_KEEP_DAYS", 730)
+import tech_stats
+try:
+    tech_stats.prune(keep_days=TECH_STATS_KEEP_DAYS)
+except Exception as _tech_stats_exc:  # never block startup on history
+    print(f"Tech stats prune skipped: {_tech_stats_exc}")
 
 issue_jobs = {}
 stream_jobs = issue_jobs  # shared job store for streamed validations
@@ -157,7 +194,8 @@ _power_infra_cache = {"rows": [], "fetched_at": None, "zabbix_error": None, "vrm
 _power_infra_cache_lock = threading.Lock()
 
 # Same shape, x4, for the fleet-wide VRM checks behind the Reports menu's
-# Units Unplugged / Shaded Units / Dead Panels / VRM Disconnected reports.
+# Units Unplugged / Shaded Units / Dead Panels / VRM Disconnected reports,
+# plus the Battery Outlook and Up Steady Power vs Cell checks below them.
 # Each covers every VRM installation the fleet has, not just units with a
 # matching open ticket (an earlier version of the first two reports only
 # checked ticket-scoped units; broadened on request). In-memory only, by
@@ -167,24 +205,13 @@ _power_infra_cache_lock = threading.Lock()
 # already does for Zabbix/VRM alerts. If per-unit HISTORY (not just current
 # state) is wanted later, that's a different, bigger ask — see
 # alarm_history.py's episode model for the precedent.
-_fleet_power_status_cache = {"rows": [], "fetched_at": None, "error": None}
-_fleet_power_status_cache_lock = threading.Lock()
-_fleet_shading_status_cache = {"rows": [], "fetched_at": None, "error": None}
-_fleet_shading_status_cache_lock = threading.Lock()
-_fleet_dead_panel_cache = {"rows": [], "fetched_at": None, "error": None}
-_fleet_dead_panel_cache_lock = threading.Lock()
-_fleet_vrm_freshness_cache = {"rows": [], "fetched_at": None, "error": None}
-_fleet_vrm_freshness_cache_lock = threading.Lock()
-_fleet_battery_outlook_cache = {"rows": [], "fetched_at": None, "error": None}
-_fleet_battery_outlook_cache_lock = threading.Lock()
-
-# Same shape again, but NOT VRM-installation-scoped like the five above —
-# "Up Steady" (false_positives) only exists as a category inside the shared
-# ticket-queue pull's own results, so this cache is fed from that job's
-# current unit list rather than a fleet-wide VRM source. See
-# _up_steady_units_for_power_vs_cell / _power_vs_cell_check_fn.
-_power_vs_cell_cache = {"rows": [], "fetched_at": None, "error": None}
-_power_vs_cell_cache_lock = threading.Lock()
+#
+# The six caches/locks themselves, their /live + /cached routes, and their
+# background poll loops are all built by make_fleet_report(), one call per
+# report, near the bottom of this file (after the REFRESH_SECONDS constants
+# they need) — not declared here. _fleet_shading_status_cache and its lock
+# specifically are still read directly by issues_schedule_shading_snapshot_bulk
+# further down, exactly as before the factory existed.
 
 ISSUE_RESULT_KEYS = (
     "false_positives",
@@ -200,6 +227,7 @@ ISSUE_RESULT_KEYS = (
     "monitoring_hours",
     "termination",
     "relocation",
+    "footage_request",
     "discarded_tickets",
 )
 ARIZONA_TZ = timezone(timedelta(hours=-7))
@@ -424,20 +452,34 @@ def _remove_issue_ids_from_results(results, issue_ids):
     return removed
 
 def _issue_class_key(issue):
+    """
+    The fields that decide whether a listed ticket needs to be dropped and
+    freshly revalidated on the next poll — Issue Type/Subtype, same as
+    always, plus Subject. A subject edit isn't just cosmetic: unit, region,
+    and even which list a ticket belongs in are all parsed FROM the
+    subject during validation, so a changed subject needs the exact same
+    remove-then-revalidate treatment a type/subtype change gets, not a
+    quiet text swap that leaves a stale unit/region/list behind it.
+    """
+    issue = issue or {}
     return (
-        str((issue or {}).get("issue_type") or "").strip().lower(),
-        str((issue or {}).get("issue_subtype") or "").strip().lower(),
+        str(issue.get("issue_type") or "").strip().lower(),
+        str(issue.get("issue_subtype") or "").strip().lower(),
+        str(issue.get("subject") or "").strip(),
     )
 
 def _item_class_differs(item, issue):
-    """True if the listed row's Issue Type or Subtype does not match ERP."""
+    """True if the listed row's Issue Type, Subtype, or Subject does not match ERP."""
     item = item or {}
     issue = issue or {}
-    erp_type, erp_subtype = _issue_class_key(issue)
-    item_type = str(item.get("issue_type") or "").strip().lower()
-    item_subtype = str(item.get("issue_subtype") or "").strip().lower()
     if item.get("reason") and "issue_subtype" not in item and "undiagnosed" not in item:
         return False
+    erp_type, erp_subtype, erp_subject = _issue_class_key(issue)
+    item_subject = str(item.get("subject") or "").strip()
+    if item_subject and erp_subject and item_subject != erp_subject:
+        return True
+    item_type = str(item.get("issue_type") or "").strip().lower()
+    item_subtype = str(item.get("issue_subtype") or "").strip().lower()
     if item_type:
         return item_type != erp_type or item_subtype != erp_subtype
     item_outage = str(item.get("outage_type") or "").strip().lower()
@@ -533,6 +575,15 @@ def _snapshot_items_by_issue_id(results, issue_ids):
     return snapshot
 
 def _preserve_result_item_state(old_item, new_item):
+    # Any field a route patches directly into job["results"] (see
+    # _patch_shared_issue_fields and the routes that write compute_label/
+    # connectivity_kind below) must be listed here, or the next routine
+    # ERP poll — which rebuilds results from scratch — silently reverts it
+    # with no error. Caught live, 2026-09-23: compute_label (set by
+    # /issues/ping-compute) and connectivity_kind (set by /issues/set-fields)
+    # were both missing, so a tech's own classification could vanish on
+    # the next 30-minute poll — the same failure shape as the move_to and
+    # subject-detection bugs found and fixed earlier this session.
     if not old_item or not new_item:
         return new_item
     for field in (
@@ -543,6 +594,8 @@ def _preserve_result_item_state(old_item, new_item):
         "camera_view_status",
         "hold_kind",
         "erp_status",
+        "compute_label",
+        "connectivity_kind",
     ):
         if old_item.get(field) is not None:
             new_item[field] = old_item[field]
@@ -597,29 +650,36 @@ def _patch_shared_issue_fields(unit, fields, camera_target=None, result_keys=Non
                 item.update(fields)
 
 def _move_shared_issue_to_list(results, issue_id, unit, from_key, to_key, extra_fields=None):
-    """Move one shared-job issue row from from_key to to_key."""
+    """Move every shared-job issue row for (issue_id, unit) from from_key to to_key.
+
+    A camera-outage ticket with no camera named in its subject fans out into
+    several rows sharing the same issue_id+unit (one per camera — see
+    work_tool._core's generic camera-outage fan-out). Moving only the first/
+    last match here silently dropped the other rows on reclassify.
+    """
     issue_id = str(issue_id or "").strip()
     unit = str(unit or "").strip()
     if not issue_id or not unit or from_key == to_key:
         return False
     if from_key not in results or to_key not in results:
         return False
-    moved = None
+    moved_items = []
     remaining = []
     for item in results.get(from_key) or []:
         if (
             _item_issue_id(item) == issue_id
             and str((item or {}).get("unit") or "").strip() == unit
         ):
-            moved = item
+            moved_items.append(item)
         else:
             remaining.append(item)
-    if not moved:
+    if not moved_items:
         return False
     results[from_key] = remaining
     if extra_fields:
-        moved.update(extra_fields)
-    results.setdefault(to_key, []).append(moved)
+        for item in moved_items:
+            item.update(extra_fields)
+    results.setdefault(to_key, []).extend(moved_items)
     return True
 
 def _sync_shared_validate_result(unit, issue_id, source_list_id, to_list_id, extra_fields):
@@ -659,6 +719,9 @@ def _sync_shared_validate_result(unit, issue_id, source_list_id, to_list_id, ext
             )
         if not moved and extra_fields:
             unit_norm = str(unit or "").strip()
+            # No `break` — a fanned-out camera-outage ticket has several rows
+            # sharing this issue_id+unit (one per camera); all of them need
+            # the same patch, not just whichever came first.
             for item in results.get(source_list_id) or []:
                 if (
                     _item_issue_id(item) == issue_id
@@ -666,7 +729,6 @@ def _sync_shared_validate_result(unit, issue_id, source_list_id, to_list_id, ext
                 ):
                     item.update(extra_fields)
                     moved = True
-                    break
         if moved:
             job["version"] += 1
 
@@ -726,6 +788,69 @@ def _safe_stream_write(stream, text):
         encoding = getattr(stream, "encoding", None) or "utf-8"
         stream.write(text.encode(encoding, errors="replace").decode(encoding))
 
+# Every job/poll function below used to redirect print() output by
+# reassigning the bare `sys.stdout = <capture>` global directly, then
+# restoring it in a `finally`. That's safe only as long as exactly one such
+# function is ever mid-run at a time — true back when the shared ticket
+# queue only ever got touched by one HTTP request at a time, false since
+# the ERP ticket/project poll (and other background loops) started running
+# on their own scheduled threads concurrently with a tech's own manual
+# Refresh/Revalidate clicks: two threads racing to set/restore the same
+# global `sys.stdout` can leave one job's print() lines landing in
+# another job's captured buffer (or the console) instead of its own.
+#
+# Fix: `sys.stdout` is reassigned exactly ONCE, at import time, to this
+# dispatcher. Every capture site below then pushes/pops its own
+# destination on a per-THREAD stack (via threading.local, not a bare
+# global) instead of touching sys.stdout itself — two threads each pushing
+# their own capture never see each other's, no lock required.
+_true_stdout = sys.stdout
+_stdout_capture_local = threading.local()
+
+def _push_stdout_capture(target):
+    stack = getattr(_stdout_capture_local, "stack", None)
+    if stack is None:
+        stack = []
+        _stdout_capture_local.stack = stack
+    stack.append(target)
+
+def _pop_stdout_capture():
+    stack = getattr(_stdout_capture_local, "stack", None)
+    if stack:
+        stack.pop()
+
+class _ThreadLocalStdoutDispatcher:
+    """Installed as sys.stdout exactly once (see _true_stdout above).
+    Routes print() to whatever the CURRENT THREAD last pushed via
+    _push_stdout_capture, falling back to the real console when nothing
+    has. `.original` always means the real console, never "whatever
+    sys.stdout happened to be" — JobStdout instances below echo to it
+    directly so their own writes don't recurse back through this
+    dispatcher."""
+    def __init__(self, original):
+        self.original = original
+
+    def _current(self):
+        stack = getattr(_stdout_capture_local, "stack", None)
+        return stack[-1] if stack else None
+
+    def write(self, text):
+        target = self._current()
+        if target is not None:
+            return target.write(text)
+        return self.original.write(text)
+
+    def flush(self):
+        target = self._current()
+        if target is not None and hasattr(target, "flush"):
+            try:
+                target.flush()
+            except Exception:
+                pass
+        self.original.flush()
+
+sys.stdout = _ThreadLocalStdoutDispatcher(_true_stdout)
+
 class JobStdout:
     """Tee stdout into a per-job queue so the browser can stream it. This endpoint was created by Cursor reusing code I wrote from work tool"""
     def __init__(self, job_id, original):
@@ -763,6 +888,35 @@ class JobStdout:
         if self.original:
             self.original.flush()
 
+# The background pollers (fleet reports, Power & Infra Alerts, the ERP
+# ticket/project pull, the ART report) never pushed a stdout capture of
+# their own, so every print() they made — including the startup-sequence
+# lines added alongside this ("first pass in Ns", "poll starting...")  —
+# went straight to _true_stdout: the real process console (a service log
+# file on the live instance), never the shared job's own stream the
+# dashboard's Stdout pane and progress bar actually read from. A tech
+# watching the browser right after a restart saw nothing, no matter how
+# much detail those prints carried — this is why. Tee'ing them into the
+# SAME shared-job stream _run_issues_validation already uses fixes that
+# with no new UI: they show up as ordinary lines in the pane that's
+# already there.
+def _with_shared_job_stdout_capture(fn):
+    """Run fn() with print() output also tee'd into the shared issues
+    job's console stream. Safe before that job exists yet — JobStdout
+    itself no-ops (after still echoing to the real console) if the job
+    isn't found."""
+    job_id = _ensure_shared_issue_job()
+    _push_stdout_capture(JobStdout(job_id, _true_stdout))
+    try:
+        return fn()
+    finally:
+        _pop_stdout_capture()
+
+def _shared_console_print(text):
+    """One-off status line (e.g. a loop's "first pass in Ns" announcement)
+    routed the same way — see _with_shared_job_stdout_capture."""
+    _with_shared_job_stdout_capture(lambda: print(text))
+
 def _run_issues_validation(job_id, scheduled=False):
     if scheduled and automated_tasks_paused():
         print(
@@ -773,10 +927,9 @@ def _run_issues_validation(job_id, scheduled=False):
     job = stream_jobs[job_id]
     poll_lock = job["poll_lock"]
     poll_lock.acquire()
-    original_stdout = sys.stdout
     try:
         with issues_validation_lock:
-            sys.stdout = JobStdout(job_id, original_stdout)
+            _push_stdout_capture(JobStdout(job_id, _true_stdout))
             try:
                 if scheduled:
                     when = _arizona_now()
@@ -821,7 +974,7 @@ def _run_issues_validation(job_id, scheduled=False):
                     job["version"] += 1
                     job["last_poll_at"] = time.time()
             finally:
-                sys.stdout = original_stdout
+                _pop_stdout_capture()
         _publish_job_event(job_id, {"type": "done", "results": job["results"]})
     except Exception as e:
         _publish_job_event(job_id, {"type": "log", "line": f"ERROR: {e}"})
@@ -835,14 +988,19 @@ def _run_issues_validation(job_id, scheduled=False):
         poll_lock.release()
 
 def _run_recovery_email_check(job_id, report_path, delete_after=True):
-    import sys
     job = stream_jobs[job_id]
-    original_stdout = sys.stdout
-    sys.stdout = JobStdout(job_id, original_stdout)
+    _push_stdout_capture(JobStdout(job_id, _true_stdout))
     try:
         work_tool.generate_false_mu()
         work_tool.generate_net_array()
-        needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date = work_tool.check_missing_recovery_emails(report_path)
+        recovery_errors = []
+        needs_recovery_email, needs_initial_email, potential_false_positive, pending_recovery, email_status_up_to_date = work_tool.check_missing_recovery_emails(report_path, errors=recovery_errors)
+        if recovery_errors:
+            # Routes into the except block below, reusing its already-correct
+            # "ERROR: ..." log line + empty-results handling instead of
+            # silently publishing a "done" event that looks like a clean,
+            # fully-up-to-date fleet.
+            raise RuntimeError(recovery_errors[0])
         job["results"] = {
             "needs_recovery_email": needs_recovery_email,
             "needs_initial_email": needs_initial_email,
@@ -861,7 +1019,7 @@ def _run_recovery_email_check(job_id, report_path, delete_after=True):
             "email_status_up_to_date": [],
         }})
     finally:
-        sys.stdout = original_stdout
+        _pop_stdout_capture()
         if delete_after:
             try:
                 os.remove(report_path)
@@ -896,6 +1054,24 @@ def _sse_stream(job_id):
         },
     )
 
+def _static_asset_version(filename):
+    """
+    mtime of a static file, for a `?v=` cache-bust query param — so a
+    JS/CSS edit takes effect on the next page load (after the usual
+    service restart) without anyone needing to hard-refresh. Flask's
+    plain url_for('static', ...) carries no version of its own; a NOC
+    tech who just does a normal refresh would otherwise keep the
+    browser's cached copy of issues_results.js/css indefinitely. Falls
+    back to "0" (still a valid, just non-cache-busting, query value) if
+    the file can't be stat'd, rather than raising into a page render.
+    """
+    try:
+        path = os.path.join(app.static_folder, filename)
+        return str(int(os.path.getmtime(path)))
+    except OSError:
+        return "0"
+
+
 def _render_issues_dashboard(job_id=None):
     """Shared Issues Dashboard UI (home page)."""
     if job_id is None:
@@ -910,6 +1086,8 @@ def _render_issues_dashboard(job_id=None):
         raindance_base_url=work_tool.raindance_base_url(),
         automation_paused=automated_tasks_paused(),
         erp_writes_disabled=erp_writes_disabled(),
+        js_version=_static_asset_version("issues_results.js"),
+        css_version=_static_asset_version("issues_results.css"),
     )
 
 
@@ -979,12 +1157,12 @@ def issues_stream(job_id):
 def issues_state(job_id):
     job = stream_jobs.get(job_id)
     if job is None:
-        return jsonify({"ok": False, "error": "Unknown job"}), 404
+        return _error("Unknown job", 404)
     try:
         cursor = max(0, int(request.args.get("cursor", 0)))
         client_version = max(0, int(request.args.get("version", 0)))
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Invalid state cursor"}), 400
+        return _error("Invalid state cursor")
 
     with job["event_lock"]:
         next_cursor = min(
@@ -1012,39 +1190,39 @@ def issues_state(job_id):
         "resolved_today": resolved,
     })
 
-@app.route("/issues/poll/<job_id>", methods=["POST"])
-def issues_poll(job_id):
+def _poll_shared_issue_queue(job_id, scope="issues", force=False, manual=False):
+    """
+    One incremental ERP poll pass for the shared ticket-queue job — new/
+    removed/restored/updated tickets for scope="issues", or a fresh
+    Open/In Progress project pull for scope="projects". Split out of the
+    /issues/poll route itself so a scheduled background loop can call the
+    exact same logic the manual "Pull Issues"/"Pull Projects" buttons do,
+    not a re-implementation that could drift from it (see
+    _erp_ticket_project_poll_loop). Returns (response_dict, http_status) —
+    http_status is None for the normal 200 case, matching how the route
+    itself used to build its response before this was split out.
+
+    Deliberately does NOT check automated_tasks_paused() at all — ticket/
+    project pull is a named exception to that flag now (Andrew's own
+    request, 2026-09-15: resume it specifically, while the 4am Add-
+    Missing-Components/netsheet-sync jobs stay paused), same pattern as
+    the fleet-report polls and Power & Infra Alerts, which never
+    consulted that flag either. This is what lets BOTH the client's own
+    30-min auto-poll and the server-side scheduled loop
+    (_erp_ticket_project_poll_loop) actually pull, not just one of them.
+    """
     job = stream_jobs.get(job_id)
     if job is None:
-        return jsonify({"ok": False, "error": "Unknown job"}), 404
+        return {"ok": False, "error": "Unknown job"}, 404
     if not job["done"]:
-        return jsonify({"ok": False, "error": "Initial validation is still running"}), 409
-    payload = request.get_json(silent=True) or {}
-    force = bool(payload.get("force"))
-    manual = bool(payload.get("manual"))
-    scope = str(payload.get("scope") or "issues").strip().lower()
+        return {"ok": False, "error": "Initial validation is still running"}, 409
     if scope not in ("issues", "projects"):
         scope = "issues"
-    if automated_tasks_paused() and not (force and manual):
-        return jsonify({
-            "ok": True,
-            "skipped": True,
-            "paused": True,
-            "scope": scope,
-            "new_count": 0,
-            "removed_count": 0,
-            "restored_count": 0,
-            "updated_count": 0,
-            "project_count": 0,
-            "results": _empty_issue_results(),
-            "logs": ["Automated ERP refresh paused (PAUSE_AUTOMATED_TASKS)."],
-            "resolved_today": _resolved_stats(),
-        })
     poll_at_key = "last_poll_at" if scope == "issues" else "last_projects_poll_at"
     if not force:
         with job["state_lock"]:
             if time.time() - float(job.get(poll_at_key) or 0.0) < ERP_POLL_THROTTLE_SECONDS:
-                return jsonify({
+                return {
                     "ok": True,
                     "skipped": True,
                     "scope": scope,
@@ -1056,9 +1234,9 @@ def issues_poll(job_id):
                     "results": _empty_issue_results(),
                     "logs": [],
                     "resolved_today": _resolved_stats(),
-                })
+                }, None
     if not job["poll_lock"].acquire(blocking=False):
-        return jsonify({
+        return {
             "ok": True,
             "busy": True,
             "scope": scope,
@@ -1070,9 +1248,8 @@ def issues_poll(job_id):
             "results": _empty_issue_results(),
             "logs": [],
             "resolved_today": _resolved_stats(),
-        })
+        }, None
 
-    original_stdout = sys.stdout
     captured_stdout = io.StringIO()
     new_records = []
     missing_ids = set()
@@ -1082,7 +1259,7 @@ def issues_poll(job_id):
     fetched_count = None
     try:
         with issues_validation_lock:
-            sys.stdout = captured_stdout
+            _push_stdout_capture(captured_stdout)
             try:
                 incremental_results = _empty_issue_results()
                 snapshot = None
@@ -1226,16 +1403,21 @@ def issues_poll(job_id):
                             classifications = job.get("issue_classifications") or {}
                             for issue in updated_records:
                                 issue_id = issue.get("issue_id") or ""
-                                old_type, old_subtype = classifications.get(
-                                    issue_id, ("", "")
+                                old_type, old_subtype, old_subject = classifications.get(
+                                    issue_id, ("", "", "")
                                 )
-                                new_type, new_subtype = _issue_class_key(issue)
+                                new_type, new_subtype, new_subject = _issue_class_key(issue)
                                 print(
                                     f"{issue_id} type/subtype "
                                     f"{old_type or '(none)'}/"
                                     f"{old_subtype or '(undiagnosed)'} -> "
                                     f"{new_type or '(none)'}/"
                                     f"{new_subtype or '(undiagnosed)'}"
+                                    + (
+                                        f"; subject changed: {old_subject!r} -> {new_subject!r}"
+                                        if old_subject and new_subject and old_subject != new_subject
+                                        else ""
+                                    )
                                 )
                                 _patch_issue_class_on_results(job["results"], issue)
                             old_items = []
@@ -1266,7 +1448,7 @@ def issues_poll(job_id):
                             snapshot = copy.deepcopy(job["results"])
                         job["last_poll_at"] = time.time()
             finally:
-                sys.stdout = original_stdout
+                _pop_stdout_capture()
         captured_output = captured_stdout.getvalue()
         if captured_output:
             JobStdout(job_id, None).write(
@@ -1287,7 +1469,7 @@ def issues_poll(job_id):
         }
         if fetched_count is not None:
             response["fetched_count"] = fetched_count
-        return jsonify(response)
+        return response, None
     except Exception as exc:
         captured_output = captured_stdout.getvalue()
         if captured_output:
@@ -1298,14 +1480,25 @@ def issues_poll(job_id):
             "type": "log",
             "line": f"ERP refresh failed: {exc}",
         })
-        return jsonify({
+        return {
             "ok": False,
             "scope": scope,
             "error": str(exc),
             "logs": captured_output.splitlines(),
-        }), 502
+        }, 502
     finally:
         job["poll_lock"].release()
+
+
+@app.route("/issues/poll/<job_id>", methods=["POST"])
+def issues_poll(job_id):
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force"))
+    manual = bool(payload.get("manual"))
+    scope = str(payload.get("scope") or "issues").strip().lower()
+    response, status = _poll_shared_issue_queue(job_id, scope=scope, force=force, manual=manual)
+    return (jsonify(response), status) if status else jsonify(response)
+
 
 @app.route("/issues/resolved", methods=["GET", "POST"])
 def issues_resolved():
@@ -1317,8 +1510,14 @@ def issues_resolved():
     payload = request.get_json(silent=True) or {}
     issue_id = str(payload.get("issue_id") or "").strip()
     if not issue_id:
-        return jsonify({"ok": False, "error": "Missing issue_id"}), 400
+        return _error("Missing issue_id")
     stats, added = _mark_issue_resolved(issue_id)
+    tech = str(payload.get("tech") or "").strip()
+    if added and tech:
+        tech_stats.record(
+            tech, issue_id, "resolved",
+            unit=payload.get("unit"), ip=request.remote_addr,
+        )
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job and job.get("results") is not None:
         with job["state_lock"]:
@@ -1339,7 +1538,7 @@ def issues_resolved():
 def issues_list_cameras(unit):
     cameras, error = work_tool.list_unit_cameras(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     return jsonify({
         "ok": True,
         "unit": unit,
@@ -1378,7 +1577,7 @@ def issues_open_camera_urls():
         ie_mode = True
     result, error = work_tool.open_camera_urls(urls, ie_mode=bool(ie_mode))
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify(result)
 
 @app.route("/issues/camera-snapshot/<unit>/<target>", methods=["GET"])
@@ -1389,6 +1588,77 @@ def issues_camera_snapshot(unit, target):
     response = Response(image, mimetype="image/jpeg")
     response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
+
+@app.route("/issues/camera-sky-snapshot/<unit>/<target>", methods=["GET"])
+def issues_camera_sky_snapshot(unit, target):
+    """Tilt this camera up toward the sky, snapshot, then return it to its
+    saved preset — see work_tool.camera_sky_snapshot. Falls back to a plain
+    in-place snapshot when the camera has no PTZ channel."""
+    image, was_tilted, was_restored, error = work_tool.camera_sky_snapshot(unit, target)
+    if error:
+        return error, 502
+    response = Response(image, mimetype="image/jpeg")
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["X-Camera-Tilted"] = "1" if was_tilted else "0"
+    response.headers["X-Camera-Restored"] = "1" if was_restored else "0"
+    return response
+
+@app.route("/issues/camera-outage-ping/<unit>", methods=["POST"])
+def issues_camera_outage_ping(unit):
+    """Ping-sweep this unit's cameras to try naming which one explains a camera-outage alert — see work_tool.unit_camera_outage_ping_check."""
+    info, error = work_tool.unit_camera_outage_ping_check(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/camera-test-email/<unit>/<target>", methods=["POST"])
+def issues_camera_test_email(unit, target):
+    """Trigger the camera's own test-email action against its already-configured SMTP settings — see work_tool.camera_send_test_email."""
+    message, error = work_tool.camera_send_test_email(unit, target)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, "message": message})
+
+@app.route("/issues/camera-rooms/<unit>", methods=["POST"])
+def issues_camera_rooms(unit):
+    """Each Dahua camera's configured room (from its SMTP Sender) — see work_tool.camera_rooms."""
+    rows, error = work_tool.camera_rooms(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, "unit": unit, "cameras": rows})
+
+@app.route("/issues/camera-test-email-loop/<unit>", methods=["POST"])
+def issues_camera_test_email_loop_start(unit):
+    """Start the 'Test All Emails' background loop — see work_tool.start_camera_test_email_loop."""
+    info, error = work_tool.start_camera_test_email_loop(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/camera-test-email-loop/<job_id>/stream", methods=["GET"])
+def issues_camera_test_email_loop_stream(job_id):
+    def generate():
+        for chunk in work_tool.iter_camera_test_email_loop_output(job_id):
+            yield chunk
+
+    return Response(
+        generate(),
+        content_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@app.route("/issues/camera-test-email-loop/<job_id>/stop", methods=["POST"])
+def issues_camera_test_email_loop_stop(job_id):
+    ok, message, info = work_tool.stop_camera_test_email_loop(job_id, reason="cancelled")
+    if not ok:
+        return _error(message, 404)
+    payload = {"ok": True, "message": message}
+    if info:
+        payload.update(info)
+    return jsonify(payload)
 
 @app.route("/issues/camera/<unit>/<target>", methods=["GET"])
 def issues_camera(unit, target):
@@ -1458,7 +1728,7 @@ def issues_fisheye(unit):
 def issues_ping_speaker(unit):
     speaker_up, output, error = work_tool.ping_speaker_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {"speaker_up": speaker_up},
@@ -1475,35 +1745,66 @@ def issues_ping_speaker(unit):
 def issues_bounce_switch(unit):
     result, error = work_tool.bounce_switch(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 500
+        return _error(error, 500)
     return _bounce_output_response(result, "Bounce Switch", "relay")
 
 @app.route("/issues/robofiber-uptime/<unit>", methods=["POST"])
 def issues_robofiber_uptime(unit):
     result, error = work_tool.get_robofiber_uptime(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
+    # Feeds the same switch-uptime cache unit_power_vs_cell_outage reads
+    # (_store_switch_up_since/_cached_switch_up_since in work_tool._core)
+    # — without this, a fresh manual check here (e.g. right after a
+    # switch reboot) never reached that cache, so the next power-vs-cell
+    # check (scheduled or on-demand) kept whatever pre-reboot uptime it
+    # already had instead of picking up the real one. Also handed back in
+    # the response so the command menu's own uptime line can update
+    # immediately without a second round trip.
+    uptime_seconds = work_tool._parse_switch_uptime_seconds(result.get("uptime") or "")
+    if uptime_seconds is not None:
+        switch_up_since = time.time() - uptime_seconds
+        work_tool._store_switch_up_since(unit, switch_up_since, result.get("uptime") or "")
+        result["switch_uptime_seconds"] = uptime_seconds
+        result["switch_up_since"] = switch_up_since
+        # Also patch this unit's row in the fleet power-vs-cell cache, if
+        # it already has one — without this, the fresh reading only ever
+        # lived in the calling browser's own state; the client's own 60s
+        # poll of /fleet-power-vs-cell-outage/cached (pollPowerVsCellCache)
+        # would silently revert it back to whatever the last full sweep
+        # (up to 30 min stale) had, well before the NEXT sweep could pick
+        # up the real number itself. Caught live, 2026-09-28: refreshed
+        # switch uptime showed the correct "1m" for a moment, then reverted
+        # to the pre-reboot "119d" within about a minute.
+        unit_key = str(unit or "").strip().upper()
+        with _power_vs_cell_cache_lock:
+            for row in _power_vs_cell_cache.get("rows") or []:
+                if str(row.get("unit") or "").strip().upper() == unit_key:
+                    row["switch_uptime_seconds"] = uptime_seconds
+                    row["switch_up_since"] = switch_up_since
+                    row["switch_uptime_text"] = result.get("uptime") or row.get("switch_uptime_text")
+                    row["checked_at"] = time.time()
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/robofiber-logs-link/<unit>", methods=["POST"])
 def issues_robofiber_logs_link(unit):
     result, error = work_tool.get_robofiber_logs_link_events(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/robofiber-logs-month/<unit>", methods=["POST"])
 def issues_robofiber_logs_month(unit):
     result, error = work_tool.get_robofiber_logs_last_month(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/bounce-speaker/<unit>", methods=["POST"])
 def issues_bounce_speaker(unit):
     result, error = work_tool.bounce_speaker(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 500
+        return _error(error, 500)
     return _bounce_output_response(result, "Bounce Speaker", "speaker")
 
 def _bounce_output_response(result, action_label, endpoint_label):
@@ -1537,16 +1838,40 @@ def issues_ping_router(unit):
     mode = str(payload.get("mode") or request.args.get("mode") or "quick").strip()
     info, error = work_tool.ping_router_status(unit, mode=mode)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 @app.route("/issues/ping-router-long/<unit>", methods=["POST"])
 def issues_ping_router_long_start(unit):
     info, error = work_tool.start_router_long_ping(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
+@app.route("/issues/ping-nuc-long/<unit>", methods=["POST"])
+def issues_ping_nuc_long_start(unit):
+    info, error = work_tool.start_nuc_long_ping(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/ping-pve-long/<unit>", methods=["POST"])
+def issues_ping_pve_long_start(unit):
+    info, error = work_tool.start_pve_long_ping(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/ping-camera-long/<unit>/<target>", methods=["POST"])
+def issues_ping_camera_long_start(unit, target):
+    info, error = work_tool.start_camera_long_ping(unit, target)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+# The stream/stop routes above are job_id-keyed and kind-agnostic (see
+# _start_long_ping) — NUC/PVE/camera long pings started above are read
+# back and stopped through these same two routes, not separate copies.
 @app.route("/issues/ping-router-long/<job_id>/stream", methods=["GET"])
 def issues_ping_router_long_stream(job_id):
     def generate():
@@ -1566,7 +1891,7 @@ def issues_ping_router_long_stream(job_id):
 def issues_ping_router_long_stop(job_id):
     ok, message, info = work_tool.stop_router_long_ping(job_id, reason="cancelled")
     if not ok:
-        return jsonify({"ok": False, "error": message}), 404
+        return _error(message, 404)
     payload = {"ok": True, "message": message}
     if info:
         payload.update(info)
@@ -1576,7 +1901,7 @@ def issues_ping_router_long_stop(job_id):
 def issues_ping_camera(unit, target):
     camera_up, output, error = work_tool.ping_camera_status(unit, target)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {"camera_up": camera_up},
@@ -1595,7 +1920,7 @@ def issues_ping_camera(unit, target):
 def issues_ping_compute(unit):
     compute_up, label, output, error = work_tool.ping_compute_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {
@@ -1616,7 +1941,7 @@ def issues_ping_compute(unit):
 def issues_ping_scrypted(unit):
     scrypted_up, output, error = work_tool.ping_scrypted_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {
@@ -1635,15 +1960,39 @@ def issues_ping_scrypted(unit):
 def issues_scrypted_no_audio(unit):
     result, error = work_tool.set_scrypted_no_audio(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     result["ok"] = True
     return jsonify(result)
+
+@app.route("/issues/scrypted-ram-folder/<unit>", methods=["POST"])
+def issues_scrypted_ram_folder(unit):
+    result, error = work_tool.scrypted_ram_folder_status(unit)
+    if error:
+        return _error(error)
+    result["ok"] = True
+    return jsonify(result)
+
+@app.route("/issues/scrypted-ram-folder-stream/<unit>", methods=["POST"])
+def issues_scrypted_ram_folder_stream(unit):
+    """Live output from the RAM folder check — see work_tool.stream_scrypted_ram_folder_status."""
+    def generate():
+        for chunk in work_tool.stream_scrypted_ram_folder_status(unit):
+            yield chunk
+
+    return Response(
+        generate(),
+        content_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.route("/issues/ping-pve/<unit>", methods=["POST"])
 def issues_ping_pve(unit):
     pve_up, output, error = work_tool.ping_pve_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     return jsonify({
         "ok": True,
         "unit": unit,
@@ -1663,7 +2012,7 @@ def issues_set_fields(preset_id, issue_id):
         preset_id, issue_id, unit, subject=subject
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     list_id = result.get("list_id") or ""
     move_to_list = ""
     field_updates = {
@@ -1800,8 +2149,7 @@ def _run_add_missing_components(job, scheduled=False):
         return {"checked": 0, "updated": [], "skipped": [], "errors": []}
     with job["state_lock"]:
         tickets = _listed_tickets_with_units(job["results"])
-    original_stdout = sys.stdout
-    sys.stdout = JobStdout(SHARED_ISSUES_JOB_ID, original_stdout)
+    _push_stdout_capture(JobStdout(SHARED_ISSUES_JOB_ID, _true_stdout))
     try:
         if scheduled:
             when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
@@ -1817,7 +2165,7 @@ def _run_add_missing_components(job, scheduled=False):
             print(line)
         return result
     finally:
-        sys.stdout = original_stdout
+        _pop_stdout_capture()
 
 
 @app.route("/issues/add-missing-components", methods=["POST"])
@@ -1826,15 +2174,15 @@ def issues_add_missing_components():
         return _erp_writes_blocked_response()
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job is None or not job.get("done") or job.get("results") is None:
-        return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
+        return _error("Shared report is not ready", 409)
     if not job["poll_lock"].acquire(blocking=False):
-        return jsonify({"ok": False, "error": "Another ERP update is already running"}), 409
+        return _error("Another ERP update is already running", 409)
     try:
         result = _run_add_missing_components(job, scheduled=False)
         result["ok"] = True
         return jsonify(result)
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 502
+        return _error(str(exc), 502)
     finally:
         job["poll_lock"].release()
 
@@ -1892,9 +2240,8 @@ def _run_netsheet_sync(job=None, scheduled=False):
             "errors": [],
             "updated_units": [],
         }
-    original_stdout = sys.stdout
+    _push_stdout_capture(io.StringIO())
     try:
-        sys.stdout = io.StringIO()
         units = []
         if job and isinstance(job.get("results"), dict):
             units = _units_from_shared_results(job.get("results"))
@@ -1912,21 +2259,21 @@ def _run_netsheet_sync(job=None, scheduled=False):
             print(line)
         return result
     finally:
-        sys.stdout = original_stdout
+        _pop_stdout_capture()
 
 @app.route("/issues/sync-netsheet", methods=["POST"])
 def issues_sync_netsheet():
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job is None or not job.get("done") or job.get("results") is None:
-        return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
+        return _error("Shared report is not ready", 409)
     if not job["poll_lock"].acquire(blocking=False):
-        return jsonify({"ok": False, "error": "Another ERP update is already running"}), 409
+        return _error("Another ERP update is already running", 409)
     try:
         result = _run_netsheet_sync(job, scheduled=False)
         result["ok"] = True
         return jsonify(result)
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 502
+        return _error(str(exc), 502)
     finally:
         job["poll_lock"].release()
 
@@ -1934,7 +2281,7 @@ def issues_sync_netsheet():
 def issues_check_patch(unit):
     info, error = work_tool.get_unit_patch_version(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 @app.route("/issues/pve-nvme-health/<unit>", methods=["POST"])
@@ -1944,7 +2291,41 @@ def issues_pve_nvme_health(unit):
     device = (payload.get("device") or request.args.get("device") or "").strip()
     info, error = work_tool.pve_nvme_health(unit, device=device or None)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/pve-kernel-io-errors/<unit>", methods=["POST"])
+def issues_pve_kernel_io_errors(unit):
+    """Read-only dmesg + journalctl -k grep for storage I/O/NVMe/ATA/filesystem error signatures."""
+    payload = request.get_json(silent=True) or {}
+    journal_days = payload.get("journal_days") or request.args.get("journal_days")
+    info, error = work_tool.pve_kernel_io_errors(unit, journal_days=journal_days or 30)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/pve-boot-errors/<unit>", methods=["POST"])
+def issues_pve_boot_errors(unit):
+    """Read-only journalctl -b -p err — every error-or-worse journal entry since the PVE host's last boot."""
+    info, error = work_tool.pve_boot_errors(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/pve-filesystem-health/<unit>", methods=["POST"])
+def issues_pve_filesystem_health(unit):
+    """Read-only findmnt/lsblk check for a filesystem already mounted read-only on the PVE host."""
+    info, error = work_tool.pve_filesystem_health(unit)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/pve-link-stats/<unit>", methods=["POST"])
+def issues_pve_link_stats(unit):
+    """Read-only `ip -s link` on the PVE host — flags any interface with dropped packets or errors."""
+    info, error = work_tool.pve_link_stats(unit)
+    if error:
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1953,7 +2334,7 @@ def issues_service_status(unit):
     """Which platform services are actually active on the Scrypted box (read-only)."""
     info, error = work_tool.scrypted_service_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1962,7 +2343,7 @@ def issues_pve_resources(unit):
     """Memory, disk, load and VM 101 state on the PVE host (read-only)."""
     info, error = work_tool.pve_host_resources(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1971,7 +2352,16 @@ def issues_nuc_resources(unit):
     """Memory, disk and CPU load on the unit's Windows NUC (read-only)."""
     info, error = work_tool.nuc_host_resources(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/nuc-disk-health/<unit>", methods=["POST"])
+def issues_nuc_disk_health(unit):
+    """Drive health, SMART counters and disk-failure events on the unit's Windows NUC (read-only)."""
+    info, error = work_tool.nuc_disk_health(unit)
+    if error:
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1980,7 +2370,7 @@ def issues_camera_matrix(unit):
     """Reach every camera, fisheye and speaker for a unit in one pass."""
     info, error = work_tool.camera_reachability_matrix(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1989,7 +2379,7 @@ def issues_camera_analytics(unit):
     """Field/Line Detection rule state on a Hikvision unit's cameras (read-only)."""
     info, error = work_tool.hikvision_analytics_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -1998,7 +2388,7 @@ def issues_run_diagnostics(unit):
     """Every read-only check for a unit, in one call. Individual checks may fail independently."""
     info, error = work_tool.run_unit_diagnostics(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2009,10 +2399,10 @@ def issues_unit_history(unit):
         days = int(request.args.get("days") or 30)
         limit = int(request.args.get("limit") or 200)
     except ValueError:
-        return jsonify({"ok": False, "error": "days and limit must be integers"}), 400
+        return _error("days and limit must be integers")
     info, error = work_tool.unit_history_entries(unit, days=days, limit=limit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2023,11 +2413,34 @@ def issues_flap_report():
         days = int(request.args.get("days") or 7)
         min_transitions = int(request.args.get("min_transitions") or 3)
     except ValueError:
-        return jsonify({"ok": False, "error": "days and min_transitions must be integers"}), 400
+        return _error("days and min_transitions must be integers")
     info, error = work_tool.fleet_flap_report(days=days, min_transitions=min_transitions)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
+
+
+@app.route("/issues/zabbix-flap-report", methods=["GET"])
+def issues_zabbix_flap_report():
+    """Units flapping most in the window, read straight from Zabbix's own Router/Switch trigger history — see work_tool.fleet_zabbix_flap_report."""
+    try:
+        days = int(request.args.get("days") or 7)
+        min_transitions = int(request.args.get("min_transitions") or 3)
+    except ValueError:
+        return _error("days and min_transitions must be integers")
+    units, error = work_tool.fleet_zabbix_flap_report(days=days, min_transitions=min_transitions)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, "days": days, "min_transitions": min_transitions, "units": units})
+
+
+@app.route("/issues/camera-outage-report", methods=["GET"])
+def issues_camera_outage_report():
+    """Fleet-wide units with the SNUC-Watch camera image buffer alert open — see work_tool.fleet_camera_outage_report."""
+    rows, error = work_tool.fleet_camera_outage_report()
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, "units": rows})
 
 
 @app.route("/issues/history-stats", methods=["GET"])
@@ -2045,7 +2458,7 @@ def issues_power_infra_alerts():
     """
     info, error = work_tool.combined_power_infra_alerts()
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     rows = info.get("rows") or []
     with _power_infra_cache_lock:
         _power_infra_cache["rows"] = rows
@@ -2092,7 +2505,7 @@ def _fleet_cache_route(check_fn, cache, cache_lock, augment_fn=None):
     baked into the stored cache and always reflects the current state."""
     rows, error = check_fn()
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     with cache_lock:
         cache["rows"] = rows or []
         cache["fetched_at"] = time.time()
@@ -2116,39 +2529,63 @@ def _fleet_cached_route(cache, cache_lock, augment_fn=None):
     })
 
 
-def _up_steady_units_for_power_vs_cell():
+def _power_vs_cell_sweep_units():
     """
-    Current Up Steady (false_positives) unit list from the shared ERP-pull
-    job. Unlike the VRM fleet checks above, this diagnostic has no
-    VRM-installation-wide "everything" source of its own — Up Steady only
-    exists as a category inside the live dashboard's own shared
+    Current Up Steady (false_positives) + Offline compute (nuc_down) +
+    Scrypted outage (scrypted_outage) + Down Full (truly_down) units from
+    the shared ERP-pull job, plus a {unit: issue_id} map — real ERP
+    tickets too, so their issue_id rides along for
+    fleet_power_vs_cell_outage_status to pass into
+    unit_power_vs_cell_outage (it prefers whichever loss window matches
+    the ticket's own creation time; see that function's docstring).
+
+    Andrew's own request, 2026-09-18 (extended same day after reporting a
+    Down Full ticket, RD3421, missing its switch-uptime line): this used
+    to be Up Steady only, but a switch reboot correlating with when
+    compute/Scrypted/the router itself also went down is the same signal
+    everywhere. Down Full is arguably the sharpest case of all — the
+    switch is a separate device from the router/compute, so whether IT
+    also rebooted is exactly what tells a real power event apart from a
+    router/compute-specific failure with the switch (and power) still up.
+    Unlike the VRM fleet checks above, this diagnostic has no
+    VRM-installation-wide "everything" source of its own — these four
+    only exist as categories inside the live dashboard's own shared
     ticket-queue pull (see ISSUE_RESULT_KEYS) — so it rides on whatever
     that job's results currently hold.
 
-    Returns None (not an empty list) when the job doesn't exist yet or is
-    mid-run, so the caller can tell "genuinely zero Up Steady tickets right
-    now" apart from "nothing to check yet."
+    Returns (None, None) when the job doesn't exist yet or is mid-run, so
+    the caller can tell "genuinely zero qualifying tickets right now"
+    apart from "nothing to check yet." Where more than one ticket names
+    the same unit (including across these four lists), whichever is seen
+    first wins the mapping — one is enough to give the window-matching
+    something to work with.
     """
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if not job or not job.get("done"):
-        return None
-    entries = (job.get("results") or {}).get("false_positives") or []
-    units = {str((entry or {}).get("unit") or "").strip().upper() for entry in entries}
-    units.discard("")
-    return sorted(units)
+        return None, None
+    results = job.get("results") or {}
+    unit_issue_ids = {}
+    for list_id in ("false_positives", "nuc_down", "scrypted_outage", "truly_down"):
+        for entry in results.get(list_id) or []:
+            unit = str((entry or {}).get("unit") or "").strip().upper()
+            issue_id = str((entry or {}).get("issue_id") or "").strip()
+            if unit and unit not in unit_issue_ids:
+                unit_issue_ids[unit] = issue_id
+    return sorted(unit_issue_ids), unit_issue_ids
 
 
 def _power_vs_cell_check_fn():
     """check_fn adapter so this fits _run_fleet_check/_fleet_cache_route's
     zero-arg contract — fleet_power_vs_cell_outage_status itself needs an
     explicit unit list (it has no fleet-wide source of its own), supplied
-    here from the shared job's current Up Steady category."""
-    units = _up_steady_units_for_power_vs_cell()
+    here from the shared job's current Up Steady/Offline compute/Scrypted
+    outage categories."""
+    units, unit_issue_ids = _power_vs_cell_sweep_units()
     if units is None:
         return None, "Shared ticket-queue pull hasn't completed a run yet — nothing to check"
     if not units:
         return [], None
-    return work_tool.fleet_power_vs_cell_outage_status(units)
+    return work_tool.fleet_power_vs_cell_outage_status(units, unit_issue_ids=unit_issue_ids)
 
 
 def _snapshot_task_public(task):
@@ -2182,116 +2619,10 @@ def _augment_shading_rows_with_snapshot_tasks(rows):
     return rows
 
 
-@app.route("/issues/fleet-power-status", methods=["GET"])
-def issues_fleet_power_status():
-    """
-    Experimental: AC-power status for every VRM installation, fleet-wide —
-    live (takes about a minute; runs concurrently). Backs the Units
-    Unplugged report's manual Refresh; the scheduled poll (every
-    FLEET_POWER_STATUS_REFRESH_SECONDS) is what keeps /cached warm day to
-    day.
-    """
-    return _fleet_cache_route(
-        work_tool.fleet_power_status, _fleet_power_status_cache, _fleet_power_status_cache_lock
-    )
-
-
-@app.route("/issues/fleet-power-status/cached", methods=["GET"])
-def issues_fleet_power_status_cached():
-    """Instant cached read for the Units Unplugged report — see issues_fleet_power_status."""
-    return _fleet_cached_route(_fleet_power_status_cache, _fleet_power_status_cache_lock)
-
-
-@app.route("/issues/fleet-shading-status", methods=["GET"])
-def issues_fleet_shading_status():
-    """Experimental: shading status for every VRM installation, fleet-wide — live. Backs the Shaded Units report."""
-    return _fleet_cache_route(
-        work_tool.fleet_shading_status, _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
-        augment_fn=_augment_shading_rows_with_snapshot_tasks,
-    )
-
-
-@app.route("/issues/fleet-shading-status/cached", methods=["GET"])
-def issues_fleet_shading_status_cached():
-    """Instant cached read for the Shaded Units report — see issues_fleet_shading_status."""
-    return _fleet_cached_route(
-        _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
-        augment_fn=_augment_shading_rows_with_snapshot_tasks,
-    )
-
-
-@app.route("/issues/fleet-dead-panel-status", methods=["GET"])
-def issues_fleet_dead_panel_status():
-    """Experimental: dead/underperforming-panel status for every VRM installation, fleet-wide — live. Backs the Dead Panels report."""
-    return _fleet_cache_route(
-        work_tool.fleet_dead_panel_status, _fleet_dead_panel_cache, _fleet_dead_panel_cache_lock
-    )
-
-
-@app.route("/issues/fleet-dead-panel-status/cached", methods=["GET"])
-def issues_fleet_dead_panel_status_cached():
-    """Instant cached read for the Dead Panels report — see issues_fleet_dead_panel_status."""
-    return _fleet_cached_route(_fleet_dead_panel_cache, _fleet_dead_panel_cache_lock)
-
-
-@app.route("/issues/fleet-vrm-freshness", methods=["GET"])
-def issues_fleet_vrm_freshness():
-    """
-    Experimental: VRM data freshness for every installation, fleet-wide —
-    live, and cheap (no per-site VRM calls — see fleet_vrm_freshness_status).
-    Backs the VRM Disconnected report.
-    """
-    return _fleet_cache_route(
-        work_tool.fleet_vrm_freshness_status, _fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock
-    )
-
-
-@app.route("/issues/fleet-vrm-freshness/cached", methods=["GET"])
-def issues_fleet_vrm_freshness_cached():
-    """Instant cached read for the VRM Disconnected report — see issues_fleet_vrm_freshness."""
-    return _fleet_cached_route(_fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock)
-
-
-@app.route("/issues/fleet-battery-outlook", methods=["GET"])
-def issues_fleet_battery_outlook():
-    """
-    Experimental: VRM battery SOC vs. multi-day cloud forecast for every
-    installation, fleet-wide — live, one VRM diagnostics read + one GPS
-    resolution + one (metro-shared) forecast fetch per site, run
-    concurrently. Backs the Battery Outlook report. Checked live
-    (2026-09-13): ~186 installations after staleness/site filters, ~104s.
-    """
-    return _fleet_cache_route(
-        work_tool.fleet_battery_outlook_status,
-        _fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock,
-    )
-
-
-@app.route("/issues/fleet-battery-outlook/cached", methods=["GET"])
-def issues_fleet_battery_outlook_cached():
-    """Instant cached read for the Battery Outlook report — see issues_fleet_battery_outlook."""
-    return _fleet_cached_route(_fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock)
-
-
-@app.route("/issues/fleet-power-vs-cell-outage", methods=["GET"])
-def issues_fleet_power_vs_cell_outage():
-    """
-    Power vs Cell Outage diagnostic for every unit currently in the Up
-    Steady (false_positives) list — live. SSH-heavy (see
-    fleet_power_vs_cell_outage_status), so slower than the VRM fleet checks
-    above; backs the Up Steady list's "Diagnose Up Steady (Cell/Power)"
-    button. The scheduled poll (every POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
-    is what keeps /cached warm without a tech ever pressing it.
-    """
-    return _fleet_cache_route(
-        _power_vs_cell_check_fn, _power_vs_cell_cache, _power_vs_cell_cache_lock,
-    )
-
-
-@app.route("/issues/fleet-power-vs-cell-outage/cached", methods=["GET"])
-def issues_fleet_power_vs_cell_outage_cached():
-    """Instant cached read for the Up Steady command-menu glyph — see issues_fleet_power_vs_cell_outage."""
-    return _fleet_cached_route(_power_vs_cell_cache, _power_vs_cell_cache_lock)
+# The /issues/fleet-* live+cached route pairs (Units Unplugged, Shaded
+# Units, Dead Panels, VRM Disconnected, Battery Outlook, Up Steady Power vs
+# Cell) are registered by make_fleet_report() near the bottom of this file,
+# not declared here — see that function's docstring for what each one backs.
 
 
 @app.route("/issues/network-latency-history/<unit>", methods=["POST"])
@@ -2301,7 +2632,7 @@ def issues_network_latency_history(unit):
     hours = payload.get("hours") or request.args.get("hours") or 24
     info, error = work_tool.unit_network_latency_history(unit, hours)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2319,9 +2650,16 @@ def issues_power_vs_cell_outage(unit):
     # — otherwise let unit_power_vs_cell_outage's own default (2 weeks)
     # apply rather than pinning this route to a stale, shorter one.
     kwargs = {"hours": hours} if hours else {}
+    # issue_id is optional — when the ticket's own ERP id is known, it
+    # lets unit_power_vs_cell_outage pick the loss window matching when
+    # the ticket was actually opened, rather than falling straight to its
+    # longest-duration fallback (see that function's docstring).
+    issue_id = payload.get("issue_id") or request.args.get("issue_id")
+    if issue_id:
+        kwargs["issue_id"] = issue_id
     info, error = work_tool.unit_power_vs_cell_outage(unit, **kwargs)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2330,7 +2668,7 @@ def issues_zabbix_alerts(unit):
     """Active Zabbix problems for one unit's Router/Switch/NUC/Speaker/SNUC hosts."""
     by_unit, error = work_tool.zabbix_active_problems_by_unit()
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     problems = (by_unit or {}).get(str(unit or "").strip().upper()) or []
     problems = sorted(problems, key=lambda p: -p["severity"])
     return jsonify({
@@ -2353,7 +2691,7 @@ def issues_history_compact():
     deleted = unit_history.prune(keep_days=UNIT_HISTORY_KEEP_DAYS)
     result = unit_history.compact()
     if not result.get("ok"):
-        return jsonify({"ok": False, "error": result.get("error")}), 500
+        return _error(result.get("error"), 500)
     return jsonify({
         "ok": True,
         "deleted": deleted,
@@ -2376,7 +2714,7 @@ def issues_alarm_history_compact():
     deleted = alarm_history.prune(keep_days=ALARM_HISTORY_KEEP_DAYS)
     result = alarm_history.compact()
     if not result.get("ok"):
-        return jsonify({"ok": False, "error": result.get("error")}), 500
+        return _error(result.get("error"), 500)
     return jsonify({
         "ok": True,
         "deleted": deleted,
@@ -2434,7 +2772,7 @@ def issues_alarm_frequency():
 def issues_carrier(unit):
     info, error = work_tool.get_unit_carriers(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 @app.route("/issues/weather/<unit>", methods=["POST"])
@@ -2447,7 +2785,7 @@ def issues_weather(unit):
     ).strip()
     info, error = work_tool.get_unit_weather(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2462,7 +2800,21 @@ def issues_battery_outlook(unit):
     ).strip()
     info, error = work_tool.unit_battery_weather_outlook(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
+    return jsonify({"ok": True, **info})
+
+@app.route("/issues/weather-forecast/<unit>", methods=["POST"])
+def issues_weather_forecast(unit):
+    """Multi-day cloud outlook only, no VRM call — see work_tool.unit_weather_forecast."""
+    payload = request.get_json(silent=True) or {}
+    subject = str(
+        payload.get("subject")
+        or request.args.get("subject")
+        or ""
+    ).strip()
+    info, error = work_tool.unit_weather_forecast(unit, subject)
+    if error:
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2477,7 +2829,7 @@ def issues_power_status(unit):
     ).strip()
     info, error = work_tool.unit_power_status(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2496,7 +2848,7 @@ def issues_shading_status(unit):
     ).strip()
     info, error = work_tool.unit_shading_status(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2515,7 +2867,7 @@ def issues_dead_panel_status(unit):
     ).strip()
     info, error = work_tool.unit_dead_panel_status(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
@@ -2535,7 +2887,7 @@ def issues_schedule_shading_snapshot(unit):
 
     info, error = work_tool.unit_shading_status(unit, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     if info.get("shading_status") != "shaded" or info.get("shading_worst_hour_utc") is None:
         return jsonify({
             "ok": False,
@@ -2547,9 +2899,12 @@ def issues_schedule_shading_snapshot(unit):
 
     task_id, created, next_attempt_at = shading_snapshots.schedule_task(
         info["unit"], subject, camera_target, info["shading_worst_hour_utc"],
+        verify_mode=info.get("shading_source") or "dip",
+        window_start_minutes_utc=info.get("shading_window_start_minutes_utc"),
+        window_end_minutes_utc=info.get("shading_window_end_minutes_utc"),
     )
     if task_id is None:
-        return jsonify({"ok": False, "error": "Could not schedule the snapshot task"}), 500
+        return _error("Could not schedule the snapshot task", 500)
     return jsonify({
         "ok": True,
         "task_id": task_id,
@@ -2588,6 +2943,9 @@ def issues_schedule_shading_snapshot_bulk():
             continue
         task_id, created, next_attempt_at = shading_snapshots.schedule_task(
             unit, "", camera_target, worst_hour,
+            verify_mode=row.get("shading_source") or "dip",
+            window_start_minutes_utc=row.get("shading_window_start_minutes_utc"),
+            window_end_minutes_utc=row.get("shading_window_end_minutes_utc"),
         )
         if task_id is None:
             skipped.append(unit)
@@ -2683,21 +3041,45 @@ def issues_battery_history(unit):
     subject = payload.get("subject") or request.args.get("subject") or ""
     info, error = work_tool.unit_battery_history(unit, hours, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **info})
 
 
 @app.route("/issues/weather-bulk", methods=["POST"])
 def issues_weather_bulk():
+    """
+    Retained for region_code_from_subject's OTHER use (resolving local
+    time for detect_early_morning_outage_pattern) — the ticket weather
+    icon itself no longer calls this; see /issues/weather-bulk-units.
+    """
     payload = request.get_json(silent=True) or {}
     regions = payload.get("regions") or []
     if not isinstance(regions, list):
-        return jsonify({"ok": False, "error": "regions must be a list"}), 400
+        return _error("regions must be a list")
     force = bool(payload.get("force"))
     info, error = work_tool.get_weather_for_regions(regions, force=force)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, "regions": info})
+
+
+@app.route("/issues/weather-bulk-units", methods=["POST"])
+def issues_weather_bulk_units():
+    """
+    Per-ticket weather icon data source (WEATHER_V2, 2026-09-15) — each
+    unit's own trailer/site GPS via work_tool.get_weather_for_units,
+    not a shared per-region metro coordinate. `units` is a list of
+    {"unit": ..., "subject": ...} objects.
+    """
+    payload = request.get_json(silent=True) or {}
+    units = payload.get("units") or []
+    if not isinstance(units, list):
+        return _error("units must be a list")
+    force = bool(payload.get("force"))
+    info, error = work_tool.get_weather_for_units(units, force=force)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, "units": info})
 
 def _unit_busy_response(unit, existing):
     existing = existing or {}
@@ -2726,7 +3108,7 @@ def _run_locked_quick_action(unit, action_label, fn, *, token=None):
         ok, message = fn()
         work_tool.unit_busy_end(unit, token)
         if not ok:
-            return jsonify({"ok": False, "error": message}), 400
+            return _error(message)
         return jsonify({"ok": True, "unit": unit, "message": message})
 
     started, new_token, existing = work_tool.unit_busy_start(unit, action_label)
@@ -2737,7 +3119,7 @@ def _run_locked_quick_action(unit, action_label, fn, *, token=None):
     finally:
         work_tool.unit_busy_end(unit, new_token)
     if not ok:
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     return jsonify({"ok": True, "unit": unit, "message": message})
 
 
@@ -2809,7 +3191,7 @@ def issues_ticket_state_set():
     payload = request.get_json(silent=True) or {}
     issue_id = str(payload.get("issue_id") or "").strip()
     if not issue_id:
-        return jsonify({"ok": False, "error": "issue_id is required"}), 400
+        return _error("issue_id is required")
     worked = payload.get("worked")
     skipped = payload.get("skipped")
     entry = work_tool.set_ticket_state(
@@ -2817,7 +3199,36 @@ def issues_ticket_state_set():
         worked=bool(worked) if worked is not None else None,
         skipped=bool(skipped) if skipped is not None else None,
     )
+    tech = str(payload.get("tech") or "").strip()
+    if tech:
+        unit = payload.get("unit")
+        ip = request.remote_addr
+        if worked is not None:
+            if worked:
+                tech_stats.record(tech, issue_id, "worked", unit=unit, ip=ip)
+            else:
+                tech_stats.clear(tech, issue_id, "worked")
+        if skipped is not None:
+            if skipped:
+                tech_stats.record(tech, issue_id, "skipped", unit=unit, ip=ip)
+            else:
+                tech_stats.clear(tech, issue_id, "skipped")
     return jsonify({"ok": True, "issue_id": issue_id, "state": entry or {"worked": False, "skipped": False}})
+
+
+@app.route("/issues/tech-stats", methods=["GET"])
+def issues_tech_stats():
+    """Week/month/year/all-time resolved+worked+skipped counts for one tech name."""
+    tech = str(request.args.get("tech") or "").strip()
+    if not tech:
+        return _error("tech is required")
+    return jsonify({"ok": True, **tech_stats.summary(tech)})
+
+
+@app.route("/issues/tech-stats/techs", methods=["GET"])
+def issues_tech_stats_techs():
+    """Every tech name with recorded stats, most active first — for a "whose stats?" picker."""
+    return jsonify({"ok": True, "techs": tech_stats.known_techs()})
 
 
 @app.route("/issues/ticket-state/clear", methods=["POST"])
@@ -2845,7 +3256,7 @@ def issues_security_fix_step1(unit):
     ok, message, version = work_tool.security_update_web_step1(unit)
     if not ok:
         work_tool.unit_busy_end(unit, token)
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     work_tool.unit_busy_touch(unit, token, phase="step1_done", version=version, log_line=message)
     return jsonify({"ok": True, "unit": unit, "version": version, "message": message, "token": token})
 
@@ -2857,7 +3268,7 @@ def issues_security_fix_step2(unit):
     ok, message = work_tool.security_update_web_step2(unit)
     work_tool.unit_busy_touch(unit, token, phase="step2_done" if ok else "step2_failed", log_line=message)
     if not ok:
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     return jsonify({"ok": True, "unit": unit, "message": message})
 
 @app.route("/issues/security-update-fix/shutdown/<unit>", methods=["POST"])
@@ -2868,7 +3279,7 @@ def issues_security_fix_shutdown(unit):
     ok, message = work_tool.security_update_web_shutdown(unit)
     work_tool.unit_busy_touch(unit, token, phase="shutdown_done" if ok else "shutdown_failed", log_line=message)
     if not ok:
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     return jsonify({"ok": True, "unit": unit, "message": message})
 
 @app.route("/issues/security-update-fix/finish/<unit>", methods=["POST"])
@@ -2886,7 +3297,7 @@ def issues_security_fix_finish(unit):
     ok, message = work_tool.security_update_web_finish(unit, version)
     work_tool.unit_busy_touch(unit, token, phase="finish_done" if ok else "finish_failed", log_line=message)
     if not ok:
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     return jsonify({"ok": True, "unit": unit, "message": message})
 
 @app.route("/issues/security-update-fix/verify/<unit>", methods=["POST"])
@@ -2898,7 +3309,7 @@ def issues_security_fix_verify(unit):
     phase = "verify_done" if (ok and drivers_loaded) else ("verify_warning" if ok else "verify_failed")
     work_tool.unit_busy_touch(unit, token, phase=phase, log_line=message)
     if not ok:
-        return jsonify({"ok": False, "error": message}), 400
+        return _error(message)
     return jsonify({
         "ok": True, "unit": unit, "message": message, "drivers_loaded": drivers_loaded,
         "token": token, **counts,
@@ -2916,14 +3327,14 @@ def issues_restart_services(unit):
 def issues_reboot_nuc(unit):
     ok, message = work_tool.reboot_nuc(unit)
     if not ok:
-        return jsonify({"ok": False, "error": message or "Reboot NUC failed"}), 400
+        return _error(message or "Reboot NUC failed")
     return jsonify({"ok": True, "unit": unit, "message": message or "Restarting"})
 
 @app.route("/issues/nuc-uptime/<unit>", methods=["POST"])
 def issues_nuc_uptime(unit):
     ok, message, output = work_tool.nuc_uptime(unit)
     if not ok:
-        return jsonify({"ok": False, "error": message or "NUC uptime failed"}), 400
+        return _error(message or "NUC uptime failed")
     return jsonify({
         "ok": True,
         "unit": unit,
@@ -2949,6 +3360,22 @@ def issues_chkdsk(unit):
         "message": message or "OK",
         "output": output or "",
     })
+
+@app.route("/issues/update-patch-stream/<unit>", methods=["POST"])
+def issues_update_patch_stream(unit):
+    """Live output from a patch update — see work_tool.stream_update_unit_patch_version."""
+    def generate():
+        for chunk in work_tool.stream_update_unit_patch_version(unit):
+            yield chunk
+
+    return Response(
+        generate(),
+        content_type="text/plain; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @app.route("/issues/update-patch/<unit>", methods=["POST"])
 def issues_update_patch(unit):
@@ -2979,7 +3406,7 @@ def issues_create_deployment_project():
         prep_subject=subject or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **created})
 
 @app.route("/issues/create-termination-project", methods=["POST"])
@@ -2994,7 +3421,7 @@ def issues_create_termination_project():
         issue_subject=subject or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **created})
 
 @app.route("/issues/create-relocation-project", methods=["POST"])
@@ -3009,7 +3436,7 @@ def issues_create_relocation_project():
         issue_subject=subject or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **created})
 
 @app.route("/issues/lookup-site", methods=["POST"])
@@ -3018,10 +3445,10 @@ def issues_lookup_site():
     subject = str(payload.get("subject") or "").strip()
     action = str(payload.get("action") or "").strip().lower()
     if action not in ("terminate", "activate"):
-        return jsonify({"ok": False, "error": "action must be terminate or activate"}), 400
+        return _error("action must be terminate or activate")
     site, error = work_tool.lookup_erp_site_for_project_action(subject, action)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **site})
 
 @app.route("/issues/terminate-site", methods=["POST"])
@@ -3036,7 +3463,7 @@ def issues_terminate_site():
         site_id=site_id or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/activate-site", methods=["POST"])
@@ -3051,7 +3478,7 @@ def issues_activate_site():
         site_id=site_id or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/clear-mu-coordinates", methods=["POST"])
@@ -3067,7 +3494,7 @@ def issues_clear_mu_coordinates():
     else:
         result, error = work_tool.clear_mu_coordinates_from_subject(subject, unit=unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/clear-mu-site", methods=["POST"])
@@ -3083,7 +3510,7 @@ def issues_clear_mu_site():
     else:
         result, error = work_tool.clear_mu_site_from_subject(subject, unit=unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/refurbish-projects/preview", methods=["POST"])
@@ -3098,7 +3525,7 @@ def issues_refurbish_projects_preview():
         unit=unit or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **preview})
 
 @app.route("/issues/refurbish-projects", methods=["POST"])
@@ -3113,7 +3540,7 @@ def issues_refurbish_projects():
         unit=unit or None,
     )
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **created})
 
 @app.route("/issues/tech-checks/preview", methods=["POST"])
@@ -3124,7 +3551,7 @@ def issues_tech_checks_preview():
     project_id = str(payload.get("project_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
     if not project_id:
-        return jsonify({"ok": False, "error": "Missing project id"}), 400
+        return _error("Missing project id")
     if not work_tool._is_noc_deployment_project_subject(subject):
         return jsonify({
             "ok": False,
@@ -3132,7 +3559,7 @@ def issues_tech_checks_preview():
         }), 400
     preview, error = work_tool.preview_project_tech_checks(project_id, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **preview})
 
 @app.route("/issues/tech-checks", methods=["POST"])
@@ -3143,7 +3570,7 @@ def issues_tech_checks():
     project_id = str(payload.get("project_id") or "").strip()
     subject = str(payload.get("subject") or "").strip()
     if not project_id:
-        return jsonify({"ok": False, "error": "Missing project id"}), 400
+        return _error("Missing project id")
     if not work_tool._is_noc_deployment_project_subject(subject):
         return jsonify({
             "ok": False,
@@ -3151,22 +3578,78 @@ def issues_tech_checks():
         }), 400
     result, error = work_tool.complete_project_tech_checks(project_id, subject)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify({"ok": True, **result})
+
+# Quick Validate only ever pings router/compute/Scrypted — it has no idea
+# whether a ticket's actual complaint is the speaker, a camera, or a panel,
+# so "router+compute are up" is not evidence any of THOSE are fixed. Caught
+# live, 2026-09-28 (RD3523, "Unit Outage Partial - Speaker"): Quick Validate
+# moved it straight to Up Steady on router/compute alone while the row's own
+# data still read "speaker down". These four lists already have correct,
+# speaker/camera/panel-aware per-entry logic in revalidate_list_entry (the
+# same thing the bulk "Revalidate list" button uses) — route Quick Validate
+# through that instead of the blind connectivity check when the ticket is
+# currently sitting in one of them.
+SPECIALIZED_VALIDATE_LISTS = {"speaker_outage", "camera_outage", "panel_issues", "camera_view"}
 
 @app.route("/issues/validate-unit/<unit>", methods=["POST"])
 def issues_validate_unit(unit):
+    payload = request.get_json(silent=True) or {}
+    issue_id = payload.get("issue_id")
+    source_list_id = payload.get("source_list_id")
+    camera_target = payload.get("camera_target") or ""
+
+    if source_list_id in SPECIALIZED_VALIDATE_LISTS:
+        job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+        if job is None or job.get("results") is None:
+            return _error("Shared report is not ready", 409)
+        with job["state_lock"]:
+            item = _find_result_item(
+                job["results"].get(source_list_id) or [], issue_id, unit, camera_target,
+            )
+            item_copy = copy.deepcopy(item) if item else None
+        if item_copy is None:
+            return _error(f"{unit} is no longer in {source_list_id.replace('_', ' ')}")
+        category, fields, output, error = work_tool.revalidate_list_entry(source_list_id, item_copy)
+        if error:
+            return _error(error)
+        destination = category or source_list_id
+        if destination not in ISSUE_RESULT_KEYS or destination in (
+            "discarded_tickets", "monitoring_hours", "termination", "relocation", "footage_request",
+        ):
+            destination = source_list_id
+        with job["state_lock"]:
+            live = _find_result_item(
+                job["results"].get(source_list_id) or [], issue_id, unit, camera_target,
+            )
+            if live is not None:
+                if fields:
+                    live.update(fields)
+                if destination != source_list_id:
+                    job["results"][source_list_id] = [
+                        row for row in (job["results"].get(source_list_id) or [])
+                        if row is not live
+                    ]
+                    job["results"][destination].append(live)
+                job["version"] += 1
+        return jsonify({
+            "ok": True,
+            "unit": unit,
+            "category": destination,
+            "output": output or "",
+        })
+
     category, output, error = work_tool.validate_unit_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
-    payload = request.get_json(silent=True) or {}
+        return _error(error, 404)
     to_list_id = "truly_down" if category == "stale_vpn" else (category or "")
     led_status = {
         "false_positives": "green", "nuc_down": "yellow",
         "scrypted_outage": "yellow", "truly_down": "red",
     }.get(to_list_id)
     _sync_shared_validate_result(
-        unit, payload.get("issue_id"), payload.get("source_list_id"),
+        unit, issue_id, source_list_id,
         to_list_id, {"led_status": led_status} if led_status else None,
     )
     return jsonify({
@@ -3180,12 +3663,22 @@ def issues_validate_unit(unit):
 def issues_validate_unit_full(unit):
     result, error = work_tool.validate_unit_full(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     payload = request.get_json(silent=True) or {}
     extra_fields = {"led_status": result["led_status"]} if result.get("led_status") else None
+    # validate_unit_full leaves move_to = "" for the false_positives category
+    # (there's no dedicated "down" list to name) — mirror the frontend's own
+    # fallback here so the shared job actually relocates the ticket instead
+    # of just patching led_status in place, which a later /issues/state poll
+    # then reverts (the RD3410 "status LED didn't properly update" bug: the
+    # calling browser moved the row locally, the server's copy never moved,
+    # the next shared-state snapshot silently put it back).
+    to_list_id = result.get("move_to") or (
+        "false_positives" if result.get("category") == "false_positives" else ""
+    )
     _sync_shared_validate_result(
         unit, payload.get("issue_id"), payload.get("source_list_id"),
-        result.get("move_to") or "", extra_fields,
+        to_list_id, extra_fields,
     )
     return jsonify({"ok": True, **result})
 
@@ -3196,22 +3689,22 @@ def issues_revalidate_list(list_id):
         "monitoring_hours",
         "termination",
         "relocation",
+        "footage_request",
     ):
-        return jsonify({"ok": False, "error": "This list cannot be revalidated"}), 400
+        return _error("This list cannot be revalidated")
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job is None or not job.get("done") or job.get("results") is None:
-        return jsonify({"ok": False, "error": "Shared report is not ready"}), 409
+        return _error("Shared report is not ready", 409)
     if not job["poll_lock"].acquire(blocking=False):
-        return jsonify({"ok": False, "error": "Another refresh is already running"}), 409
+        return _error("Another refresh is already running", 409)
 
-    original_stdout = sys.stdout
     captured_stdout = io.StringIO()
     moves = []
     checked = 0
     moved = 0
     try:
         with issues_validation_lock:
-            sys.stdout = captured_stdout
+            _push_stdout_capture(captured_stdout)
             try:
                 work_tool.generate_net_array()
                 with job["state_lock"]:
@@ -3256,6 +3749,7 @@ def issues_revalidate_list(list_id):
                         "monitoring_hours",
                         "termination",
                         "relocation",
+                        "footage_request",
                     ):
                         destination = list_id
                     with job["state_lock"]:
@@ -3296,7 +3790,7 @@ def issues_revalidate_list(list_id):
                     with job["state_lock"]:
                         job["version"] += 1
             finally:
-                sys.stdout = original_stdout
+                _pop_stdout_capture()
         captured_output = captured_stdout.getvalue()
         if captured_output:
             JobStdout(SHARED_ISSUES_JOB_ID, None).write(
@@ -3328,7 +3822,7 @@ def issues_revalidate_list(list_id):
 def issues_validate_stale_vpn(unit):
     result, error = work_tool.validate_stale_vpn_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {
@@ -3344,7 +3838,7 @@ def issues_validate_stale_vpn(unit):
 def issues_validate_camera_view(unit):
     result, error = work_tool.validate_camera_view_status(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 404
+        return _error(error, 404)
     _patch_shared_issue_fields(
         unit,
         {
@@ -3360,12 +3854,13 @@ def issues_validate_camera_view(unit):
 def issues_unit_context(unit):
     payload, error = work_tool.unit_context_for_ui(unit)
     if error:
-        return jsonify({"ok": False, "error": error}), 400
+        return _error(error)
     return jsonify(payload)
 
 def _issues_site_id_from_request(unit):
     subject = str(request.args.get("subject") or "").strip()
-    site_id, error = work_tool.resolve_dashboard_site_id(unit, subject)
+    is_project = request.args.get("is_project") in ("1", "true", "True")
+    site_id, error = work_tool.resolve_dashboard_site_id(unit, subject, is_project=is_project)
     if error:
         return None, error
     return site_id, None
@@ -3388,6 +3883,15 @@ def issues_shield_component(unit):
     if not url:
         return "Unit or workTLD is missing", 404
     return redirect(url)
+
+
+@app.route("/issues/router/<unit>", methods=["GET"])
+def issues_router(unit):
+    """Plain redirect to http://<router ip>/ — no login automation, unlike /issues/switch/."""
+    ip = work_tool.router_ip_for_unit(unit)
+    if not ip:
+        return f"No router IP in net sheet for {unit}", 502
+    return redirect(f"http://{ip}/")
 
 
 @app.route("/issues/attached-mu/<unit>", methods=["GET"])
@@ -3419,6 +3923,16 @@ def issues_event_records(unit):
     if not url:
         return "Unit or workTLD is missing", 404
     return redirect(url)
+
+@app.route("/issues/art-site-contacts/<unit>", methods=["POST"])
+def issues_art_site_contacts(unit):
+    """ART report 152 (Site Contacts), filtered to this ticket's own site — see work_tool.get_art_site_contacts."""
+    payload = request.get_json(silent=True) or {}
+    subject = str(payload.get("subject") or request.args.get("subject") or "").strip()
+    info, error = work_tool.get_art_site_contacts(unit, subject)
+    if error:
+        return _error(error)
+    return jsonify({"ok": True, **info})
 
 @app.route("/issues/switch/<unit>", methods=["GET"])
 def issues_switch(unit):
@@ -3481,7 +3995,7 @@ def recovery_email_results():
         report = request.files.get("report_file")
         if not report:
             return "Missing report file", 400
-        report_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{report.filename}")
+        report_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{secure_filename(report.filename)}")
         report.save(report_path)
         report.close()
 
@@ -3686,11 +4200,35 @@ def _start_arizona_validation_scheduler():
         if _arizona_scheduler_started:
             return
         _arizona_scheduler_started = True
+        # Bookends the whole startup sequence below so it's obvious in
+        # stdout where it begins and ends — each thread started in between
+        # prints its own "first pass in Ns" line the moment it launches,
+        # then "poll starting..."/"checked N" (or its own equivalent) once
+        # that delay elapses, so a tech watching stdout right after a
+        # restart can see exactly which background report is scheduled,
+        # which one is currently mid-run, and which have already completed
+        # their first pass — instead of the dashboard just quietly filling
+        # in over the next few minutes with no indication why.
+        _shared_console_print("=== Starting background pollers/schedulers ===")
+        # Stage 1 of the startup order (see "Startup order" near
+        # make_fleet_report): the initial ping sweep. The print above
+        # already creates the shared job as a side effect; this says so
+        # outright so the sweep never depends on a log line.
+        _ensure_shared_issue_job()
+        _shared_console_print(
+            "Startup order: 1. initial ping sweep (running now) -> "
+            "2. weather (Battery Outlook) -> 3. Power vs Cell -> "
+            "4. reports: ART report + recovery email check, VRM Disconnected, "
+            "Power & Infra Alerts, Units Unplugged, Shaded Units, Dead Panels "
+            "-> Camera Outage Report last"
+        )
         if automated_tasks_paused():
             print(
                 "PAUSE_AUTOMATED_TASKS is enabled — daily 4:00/4:05/4:10 AM "
-                "jobs, hourly ART report refresh, and automatic ERP polling "
-                "are paused until cleared"
+                "jobs stay paused until cleared (hourly ART report refresh "
+                "and automatic ERP ticket/project polling now run "
+                "regardless, per 2026-09-15 request — see their own "
+                "scheduler comments)"
             )
         thread = threading.Thread(
             target=_arizona_validation_loop,
@@ -3735,11 +4273,25 @@ def _start_arizona_validation_scheduler():
             name="art-recovery-report",
         )
         art_thread.start()
-        if not automated_tasks_paused():
-            print(
-                "ART NOC outage report (reportId=153) refresh scheduled "
-                f"every {ART_REPORT_REFRESH_SECONDS // 60} minutes"
-            )
+        # Always-on regardless of PAUSE_AUTOMATED_TASKS too — see
+        # _run_scheduled_art_recovery_report's own comment.
+        print(
+            "ART NOC outage report (reportId=153) refresh scheduled "
+            f"every {ART_REPORT_REFRESH_SECONDS // 60} minutes, each followed "
+            "by the recovery email status check"
+        )
+        erp_poll_thread = threading.Thread(
+            target=_erp_ticket_project_poll_loop,
+            daemon=True,
+            name="erp-ticket-project-poll",
+        )
+        erp_poll_thread.start()
+        # Also always-on regardless of PAUSE_AUTOMATED_TASKS — see
+        # _run_scheduled_erp_ticket_project_pull's own comment.
+        print(
+            "ERP ticket/project pull scheduled every "
+            f"{ERP_POLL_INTERVAL_SECONDS // 60} minutes"
+        )
         power_infra_thread = threading.Thread(
             target=_power_infra_alerts_loop,
             daemon=True,
@@ -3752,39 +4304,208 @@ def _start_arizona_validation_scheduler():
             "Power & Infra Alerts (Zabbix + VRM) poll scheduled every "
             f"{POWER_INFRA_ALERTS_REFRESH_SECONDS // 60} minutes"
         )
+        # Listed in startup order. All start now, but each holds its first
+        # pass on the stage before it (wait_for_stage / ready_fn on each
+        # make_fleet_report call) — weather, then Power vs Cell, then the
+        # rest, per Andrew's own request, 2026-10-02. The Camera Outage
+        # Report thread (started below) waits for all of them.
         for loop_fn, thread_name, refresh_seconds, label in (
+            (_fleet_battery_outlook_loop, "fleet-battery-outlook", FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS, "Battery Outlook"),
+            (_power_vs_cell_outage_loop, "power-vs-cell-outage", POWER_VS_CELL_OUTAGE_REFRESH_SECONDS, "Up Steady Power vs Cell"),
+            (_fleet_vrm_freshness_loop, "fleet-vrm-freshness", FLEET_VRM_FRESHNESS_REFRESH_SECONDS, "VRM Disconnected"),
             (_fleet_power_status_loop, "fleet-power-status", FLEET_POWER_STATUS_REFRESH_SECONDS, "Units Unplugged"),
             (_fleet_shading_status_loop, "fleet-shading-status", FLEET_SHADING_STATUS_REFRESH_SECONDS, "Shaded Units"),
             (_fleet_dead_panel_loop, "fleet-dead-panel", FLEET_DEAD_PANEL_REFRESH_SECONDS, "Dead Panels"),
-            (_fleet_vrm_freshness_loop, "fleet-vrm-freshness", FLEET_VRM_FRESHNESS_REFRESH_SECONDS, "VRM Disconnected"),
-            (_fleet_battery_outlook_loop, "fleet-battery-outlook", FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS, "Battery Outlook"),
-            (_power_vs_cell_outage_loop, "power-vs-cell-outage", POWER_VS_CELL_OUTAGE_REFRESH_SECONDS, "Up Steady Power vs Cell"),
         ):
             fleet_thread = threading.Thread(target=loop_fn, daemon=True, name=thread_name)
             fleet_thread.start()
             # Always-on too — see _run_fleet_check's docstring.
             print(f"Fleet {label} report poll scheduled every {refresh_seconds // 60} minutes")
+        camera_thread = threading.Thread(
+            target=_camera_outage_report_loop,
+            daemon=True,
+            name="camera-outage-report",
+        )
+        camera_thread.start()
+        print(
+            "Camera Outage Report + camera find scheduled every "
+            f"{CAMERA_OUTAGE_REFRESH_SECONDS // 60} minutes (first run after every other report)"
+        )
+        _shared_console_print(
+            "=== All background pollers/schedulers launched — watch for each "
+            "one's own \"first pass in Ns\" / \"poll starting...\" / \"checked "
+            "N\" (or equivalent) lines above as they come online over the "
+            "next few minutes ==="
+        )
 
 def _run_scheduled_art_recovery_report():
-    if automated_tasks_paused():
-        return
-    path, error = work_tool.download_art_noc_outage_report()
+    # Deliberately NOT gated on automated_tasks_paused() — Andrew's own
+    # request, 2026-09-15: resume the hourly ART pull specifically, while
+    # the 4am Add-Missing-Components/netsheet-sync jobs stay paused. Same
+    # "named exception, not a blanket flip" pattern as the fleet-report
+    # polls and Power & Infra Alerts above.
     when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    print(f"[{when}] Scheduled ART recovery report starting...")
+    path, error = work_tool.download_art_noc_outage_report()
     if error:
         print(f"[{when}] Scheduled ART recovery report failed: {error}")
     else:
         print(f"[{when}] Scheduled ART recovery report refreshed: {path}")
+    # The hourly recovery-email check rides on this hourly download, so
+    # it always reads the report that was just fetched. A failed download
+    # still runs it against the previous copy, which beats no answer.
+    _run_recovery_email_status_check(download_if_missing=False)
+
+
+# ---- Recovery email status --------------------------------------------------
+# Which units need an outage email, which need a recovery email — the same
+# answer the Recovery Email Check page gives, run hourly (chained onto the
+# ART report refresh above) and cached per unit so the Graphs modal's
+# indicator is a cheap read. Read-only: pings units and reads the ART
+# spreadsheet, never sends an email or writes to ERP, so — like the fleet
+# polls — it is not gated on automated_tasks_paused(). Like every
+# scheduler here it doesn't run in sandbox; POST .../refresh runs it there.
+_recovery_email_status_cache = {
+    "by_unit": {},
+    "checked_at": None,
+    "error": None,
+    "running": False,
+}
+_recovery_email_status_lock = threading.Lock()
+
+
+def _run_recovery_email_status_check(download_if_missing=True):
+    """Run one check and update the cache. Returns False if one was already running."""
+    with _recovery_email_status_lock:
+        if _recovery_email_status_cache["running"]:
+            return False
+        _recovery_email_status_cache["running"] = True
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    print(f"[{when}] Recovery email status check starting...")
+    try:
+        by_unit, error = work_tool.recovery_email_status_check(download_if_missing=download_if_missing)
+    except Exception as exc:
+        by_unit, error = None, f"Recovery email status check crashed: {exc}"
+    with _recovery_email_status_lock:
+        _recovery_email_status_cache["running"] = False
+        if error:
+            # Keep the last good result; only the error updates, so the UI
+            # can say "as of <earlier>, last check failed" instead of
+            # showing every unit as needing nothing.
+            _recovery_email_status_cache["error"] = error
+        else:
+            _recovery_email_status_cache["by_unit"] = by_unit
+            _recovery_email_status_cache["checked_at"] = time.time()
+            _recovery_email_status_cache["error"] = None
+    if error:
+        print(f"[{when}] Recovery email status check failed: {error}")
+    else:
+        counts = {}
+        for info in by_unit.values():
+            counts[info["status"]] = counts.get(info["status"], 0) + 1
+        print(
+            f"[{when}] Recovery email status: "
+            f"{counts.get('needs_initial_email', 0)} need an outage email, "
+            f"{counts.get('needs_recovery_email', 0)} need a recovery email "
+            f"({len(by_unit)} unit(s) on the report)"
+        )
+    return True
+
+
+@app.route("/issues/recovery-email-status", methods=["GET"])
+def issues_recovery_email_status():
+    with _recovery_email_status_lock:
+        cache = dict(_recovery_email_status_cache)
+    return jsonify({"ok": True, **cache})
+
+
+@app.route("/issues/recovery-email-status/refresh", methods=["POST"])
+def issues_recovery_email_status_refresh():
+    with _recovery_email_status_lock:
+        if _recovery_email_status_cache["running"]:
+            return jsonify({"ok": True, "started": False, "running": True})
+    thread = threading.Thread(
+        target=_with_shared_job_stdout_capture,
+        args=(_run_recovery_email_status_check,),
+        daemon=True,
+        name="recovery-email-status-refresh",
+    )
+    thread.start()
+    return jsonify({"ok": True, "started": True, "running": True})
 
 
 def _art_recovery_report_loop():
-    # Brief startup delay so the service finishes boot before first pull.
-    time.sleep(45)
+    # Starts the moment Power vs Cell's first pass is done (Andrew's
+    # request, 2026-10-02), so the Graphs modal's email status pill is filled
+    # soon after a restart. Then every ART_REPORT_REFRESH_SECONDS (hourly):
+    # download the ART report, then run the recovery email check on it. See
+    # "Startup order" near make_fleet_report.
+    _wait_for_startup_stage(STARTUP_STAGE_POWER_VS_CELL, "ART report + recovery email check")
     while True:
         try:
-            _run_scheduled_art_recovery_report()
+            _with_shared_job_stdout_capture(_run_scheduled_art_recovery_report)
         except Exception as exc:
-            print(f"Scheduled ART recovery report failed: {exc}")
+            _shared_console_print(f"Scheduled ART recovery report failed: {exc}")
+        if not _art_first_pass_done.is_set():
+            _art_first_pass_done.set()
         time.sleep(ART_REPORT_REFRESH_SECONDS)
+
+def _run_scheduled_erp_ticket_project_pull():
+    """
+    One background pass pulling BOTH the shared ticket queue (scope=
+    "issues") and NOC/Prep projects (scope="projects") — the server-side
+    equivalent of clicking "Pull Issues"/"Pull Projects" by hand, so the
+    dashboard stays current even with no browser tab open (the client's
+    own 30-min auto-poll only ever refreshes whichever ONE panel,
+    Issues or Projects, happens to be active in an open tab — see
+    pollForNewIssues in issues_results.html). Reuses
+    _poll_shared_issue_queue directly, not a re-implementation, so this
+    can never drift from what the manual buttons do.
+
+    Deliberately NOT gated on automated_tasks_paused() — Andrew's own
+    request, 2026-09-15: resume automatic ticket/project pull
+    specifically, while the 4am Add-Missing-Components/netsheet-sync jobs
+    stay paused. Same "named exception, not a blanket flip" pattern as
+    the fleet-report polls, Power & Infra Alerts, and the ART report — see
+    _poll_shared_issue_queue's own docstring, which no longer checks that
+    flag at all.
+    """
+    job_id = _ensure_shared_issue_job()
+    job = stream_jobs.get(job_id)
+    if not job or not job.get("done"):
+        print("Scheduled ERP ticket/project pull skipped — initial validation still running")
+        return
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    print(f"[{when}] Scheduled ERP ticket/project pull starting...")
+    for scope in ("issues", "projects"):
+        response, _status = _poll_shared_issue_queue(job_id, scope=scope, force=True)
+        if not response.get("ok"):
+            print(f"[{when}] Scheduled ERP {scope} pull failed: {response.get('error')}")
+            continue
+        if response.get("skipped"):
+            continue
+        if scope == "issues":
+            print(
+                f"[{when}] Scheduled ERP issue pull: {response.get('new_count', 0)} new, "
+                f"{response.get('removed_count', 0)} removed, {response.get('restored_count', 0)} restored, "
+                f"{response.get('updated_count', 0)} updated"
+            )
+        else:
+            print(f"[{when}] Scheduled ERP project pull: {response.get('project_count', 0)} project(s)")
+
+
+def _erp_ticket_project_poll_loop():
+    # Brief startup delay so the service finishes boot (and the shared
+    # job's own initial validation has a head start) before the first
+    # scheduled pass.
+    _shared_console_print("ERP ticket/project pull: first pass in 90s (after the initial validation run)")
+    time.sleep(90)
+    while True:
+        try:
+            _with_shared_job_stdout_capture(_run_scheduled_erp_ticket_project_pull)
+        except Exception as exc:
+            _shared_console_print(f"Scheduled ERP ticket/project pull failed: {exc}")
+        time.sleep(ERP_POLL_INTERVAL_SECONDS)
 
 def _run_scheduled_power_infra_alerts():
     """
@@ -3804,6 +4525,7 @@ def _run_scheduled_power_infra_alerts():
     applies to its own always-on loop.
     """
     when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    print(f"[{when}] Power & Infra Alerts poll starting...")
     info, error = work_tool.combined_power_infra_alerts()
     if error:
         print(f"[{when}] Scheduled Power & Infra Alerts poll failed: {error}")
@@ -3837,17 +4559,20 @@ def _run_scheduled_power_infra_alerts():
 
 
 def _power_infra_alerts_loop():
-    # Brief startup delay so the service finishes boot before first pull.
-    time.sleep(60)
+    # Stage 4 of the startup order (see "Startup order" near
+    # make_fleet_report): after the ping sweep, weather and Power vs Cell.
+    _wait_for_startup_stage(STARTUP_STAGE_POWER_VS_CELL, "Power & Infra Alerts poll")
     while True:
         try:
-            _run_scheduled_power_infra_alerts()
+            _with_shared_job_stdout_capture(_run_scheduled_power_infra_alerts)
         except Exception as exc:
-            print(f"Scheduled Power & Infra Alerts poll failed: {exc}")
+            _shared_console_print(f"Scheduled Power & Infra Alerts poll failed: {exc}")
+        if not _power_infra_first_pass_done.is_set():
+            _power_infra_first_pass_done.set()
         time.sleep(POWER_INFRA_ALERTS_REFRESH_SECONDS)
 
 
-def _run_fleet_check(label, check_fn, cache, cache_lock):
+def _run_fleet_check(label, check_fn, cache, cache_lock, after_check_fn=None):
     """
     Shared body for the four fleet-wide VRM poll loops below: fetch, cache,
     log one line. Never lets a bad poll wipe out a good cache — on error,
@@ -3860,8 +4585,20 @@ def _run_fleet_check(label, check_fn, cache, cache_lock):
     Units Unplugged/Shaded Units/Dead Panels/VRM Disconnected reports, and
     a tech shouldn't have to hit each one's Refresh button by hand just to
     see whether anything is wrong right after the service starts.
+
+    after_check_fn(rows), if given, runs once per successful poll, after
+    the cache updates — currently just the Shaded Units report's own
+    auto-schedule step (see _auto_schedule_shading_snapshots). A failure
+    in it is logged, not raised — a broken hook must never look like the
+    fleet check itself failed.
     """
     when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    # Paired with the "checked N installation(s)"/"failed" line below so
+    # stdout shows a clear start/end for each pass — otherwise a poll that
+    # takes a minute-plus (real VRM load, not a couple of seconds) is
+    # invisible the whole time it's running, right when a tech watching
+    # stdout after a service restart most wants to know it's in progress.
+    print(f"[{when}] Fleet {label} poll starting...")
     try:
         rows, error = check_fn()
     except Exception as exc:
@@ -3879,102 +4616,11 @@ def _run_fleet_check(label, check_fn, cache, cache_lock):
         cache["fetched_at"] = time.time()
         cache["error"] = None
     print(f"[{when}] Fleet {label}: checked {len(rows or [])} installation(s)")
-
-
-def _fleet_power_status_loop():
-    # Staggered startup delays (120/150/180/60s) so the four fleet polls —
-    # each a genuine minute-plus of concurrent VRM calls — don't all launch
-    # in the same instant as each other or as the lighter existing pollers.
-    time.sleep(120)
-    while True:
+    if after_check_fn is not None:
         try:
-            _run_fleet_check(
-                "power status", work_tool.fleet_power_status,
-                _fleet_power_status_cache, _fleet_power_status_cache_lock,
-            )
+            after_check_fn(rows or [])
         except Exception as exc:
-            print(f"Fleet power status poll failed: {exc}")
-        time.sleep(FLEET_POWER_STATUS_REFRESH_SECONDS)
-
-
-def _fleet_shading_status_loop():
-    time.sleep(150)
-    while True:
-        try:
-            _run_fleet_check(
-                "shading status", work_tool.fleet_shading_status,
-                _fleet_shading_status_cache, _fleet_shading_status_cache_lock,
-            )
-        except Exception as exc:
-            print(f"Fleet shading status poll failed: {exc}")
-        time.sleep(FLEET_SHADING_STATUS_REFRESH_SECONDS)
-
-
-def _fleet_dead_panel_loop():
-    time.sleep(180)
-    while True:
-        try:
-            _run_fleet_check(
-                "dead panel", work_tool.fleet_dead_panel_status,
-                _fleet_dead_panel_cache, _fleet_dead_panel_cache_lock,
-            )
-        except Exception as exc:
-            print(f"Fleet dead panel poll failed: {exc}")
-        time.sleep(FLEET_DEAD_PANEL_REFRESH_SECONDS)
-
-
-def _fleet_vrm_freshness_loop():
-    # No per-site VRM calls at all (see fleet_vrm_freshness_status), so
-    # this one can run often without adding real load.
-    time.sleep(60)
-    while True:
-        try:
-            _run_fleet_check(
-                "VRM freshness", work_tool.fleet_vrm_freshness_status,
-                _fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock,
-            )
-        except Exception as exc:
-            print(f"Fleet VRM freshness poll failed: {exc}")
-        time.sleep(FLEET_VRM_FRESHNESS_REFRESH_SECONDS)
-
-
-def _fleet_battery_outlook_loop():
-    # Fifth stagger slot, after the other four (120/150/180/60s).
-    time.sleep(210)
-    while True:
-        try:
-            _run_fleet_check(
-                "battery outlook", work_tool.fleet_battery_outlook_status,
-                _fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock,
-            )
-        except Exception as exc:
-            print(f"Fleet battery outlook poll failed: {exc}")
-        time.sleep(FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS)
-
-
-def _power_vs_cell_outage_loop():
-    """
-    Sixth stagger slot, after the other five (120/150/180/60/210s). Unlike
-    those, this one has nothing to check until the shared ticket-queue pull
-    has completed at least once — see _up_steady_units_for_power_vs_cell —
-    so it waits in a short retry loop for that (covers the ordinary startup
-    case, where a tech hasn't clicked Refresh Report yet) before settling
-    into the long steady-state interval. SSH into every Up Steady unit's
-    switch is heavier than the VRM fleet checks above, hence the longer
-    interval once it does start.
-    """
-    time.sleep(240)
-    while _up_steady_units_for_power_vs_cell() is None:
-        time.sleep(30)
-    while True:
-        try:
-            _run_fleet_check(
-                "power vs cell outage", _power_vs_cell_check_fn,
-                _power_vs_cell_cache, _power_vs_cell_cache_lock,
-            )
-        except Exception as exc:
-            print(f"Fleet power vs cell outage poll failed: {exc}")
-        time.sleep(POWER_VS_CELL_OUTAGE_REFRESH_SECONDS)
+            print(f"[{when}] Fleet {label} poll's after-check step failed: {exc}")
 
 
 def _camera_unit_for_shading_snapshot(unit):
@@ -4009,30 +4655,68 @@ def _camera_unit_for_shading_snapshot(unit):
     return heads[0] if heads else unit
 
 
+SHADING_DIP_CAPTURE_HOUR_TOLERANCE = 1
+
+
 def _run_due_shading_snapshot_tasks():
     """
     Process every snapshot task whose scheduled attempt has arrived:
-    re-verify the dip is actually happening right now (see
-    work_tool.verify_shading_dip_now), and only THEN spend a camera fetch
-    on it. Either outcome consumes one attempt — see shading_snapshots'
-    own record_attempt_failure/record_captured for the retry-vs-exhausted
+    re-verify the dip is actually happening right now — via
+    work_tool.verify_shading_dip_now for a plain "dip"-mode task, or
+    work_tool.verify_compressed_window_dip_now for a "compressed_window"
+    one (see schedule_task's own docstring for why these two need
+    different logic) — and only THEN spend a camera fetch on it. Either
+    outcome consumes one attempt — see shading_snapshots' own
+    record_attempt_failure/record_captured for the retry-vs-exhausted
     logic.
     """
     for task in shading_snapshots.due_tasks():
         task_id = task["id"]
         unit = task["unit"]
         subject = task.get("subject") or ""
-        hour_utc = task["peak_hour_utc"]
+        verify_mode = task.get("verify_mode") or "dip"
+        retarget_hour = None
         try:
-            is_dip, detail, _current_watts, _typical_watts = work_tool.verify_shading_dip_now(
-                unit, subject, hour_utc
-            )
+            if verify_mode == "compressed_window":
+                is_dip, detail, _current_watts, _reference_watts = work_tool.verify_compressed_window_dip_now(
+                    unit, subject,
+                    task.get("window_start_minutes_utc"), task.get("window_end_minutes_utc"),
+                )
+            else:
+                # Scans every hour today already has a reading for and
+                # finds the dip wherever it actually is, not just the hour
+                # this task was originally scheduled at — see
+                # verify_shading_dip_now's own docstring (caught live
+                # 2026-09-16, MU8087: nearly a 4-hour drift). That widens
+                # WHERE a dip gets found, but a real dip found several
+                # hours away from right now is still the wrong moment for
+                # a camera fetch — a photo taken now wouldn't show it (see
+                # RD3365/MU7034, same day: scheduled for 7am, real dip
+                # around noon). So a confirmed dip whose hour isn't close
+                # to the current one doesn't get captured either — instead
+                # the task retargets to that hour instead of just retrying
+                # the same stale one again next time.
+                is_dip, detail, _current_watts, _typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                    unit, subject
+                )
+                if is_dip and worst_hour is not None:
+                    now_hour = datetime.utcnow().hour
+                    hour_gap = min((worst_hour - now_hour) % 24, (now_hour - worst_hour) % 24)
+                    if hour_gap > SHADING_DIP_CAPTURE_HOUR_TOLERANCE:
+                        is_dip = False
+                        retarget_hour = worst_hour
+                        detail = (
+                            f"{detail} — that's not close to the current hour ({now_hour}:00 UTC), "
+                            f"so retargeting to {worst_hour}:00 UTC instead of capturing a photo "
+                            f"that wouldn't show it"
+                        )
         except Exception as exc:
             shading_snapshots.record_attempt_failure(task_id, f"Verification error: {exc}")
             continue
         if not is_dip:
             shading_snapshots.record_attempt_failure(
-                task_id, f"Not captured: {detail or 'could not verify a current dip'}"
+                task_id, f"Not captured: {detail or 'could not verify a current dip'}",
+                new_peak_hour_utc=retarget_hour,
             )
             continue
         camera_unit = _camera_unit_for_shading_snapshot(unit)
@@ -4094,52 +4778,450 @@ def _start_shading_snapshot_scheduler():
         )
 
 
-ART_REPORT_REFRESH_SECONDS = int(
-    (os.getenv("ART_REPORT_REFRESH_SECONDS") or "3600").strip() or "3600"
-)
-POWER_INFRA_ALERTS_REFRESH_SECONDS = int(
-    (os.getenv("POWER_INFRA_ALERTS_REFRESH_SECONDS") or "600").strip() or "600"
-)
+ART_REPORT_REFRESH_SECONDS = _env_int("ART_REPORT_REFRESH_SECONDS", 3600)
+# Brought down from 600 (10min) to 1800 (30min) — Andrew's own request,
+# 2026-09-22, matching every other VRM-calling fleet poll's cadence (see
+# FLEET_POWER_STATUS_REFRESH_SECONDS's own comment). Unlike VRM Disconnected
+# below, this one's real VRM alarm reads per unit, not a free check.
+POWER_INFRA_ALERTS_REFRESH_SECONDS = _env_int("POWER_INFRA_ALERTS_REFRESH_SECONDS", 1800)
 # Longer than POWER_INFRA_ALERTS_REFRESH_SECONDS on purpose — each of these
 # costs a real fan-out of VRM calls across the whole fleet (a minute or more
 # wall-clock, not a couple of seconds), so polling them as often would mean
 # a near-continuous background load against VRM's API for marginal freshness
 # gain. VRM freshness itself is the exception — see its loop above.
-FLEET_POWER_STATUS_REFRESH_SECONDS = int(
-    (os.getenv("FLEET_POWER_STATUS_REFRESH_SECONDS") or "1800").strip() or "1800"
-)
-FLEET_SHADING_STATUS_REFRESH_SECONDS = int(
-    (os.getenv("FLEET_SHADING_STATUS_REFRESH_SECONDS") or "3600").strip() or "3600"
-)
-FLEET_DEAD_PANEL_REFRESH_SECONDS = int(
-    (os.getenv("FLEET_DEAD_PANEL_REFRESH_SECONDS") or "3600").strip() or "3600"
-)
-FLEET_VRM_FRESHNESS_REFRESH_SECONDS = int(
-    (os.getenv("FLEET_VRM_FRESHNESS_REFRESH_SECONDS") or "600").strip() or "600"
-)
+FLEET_POWER_STATUS_REFRESH_SECONDS = _env_int("FLEET_POWER_STATUS_REFRESH_SECONDS", 1800)
+# Brought down from 3600 (60min) to 1800 (30min), matching every other
+# fleet report's cadence — Andrew's own request, 2026-09-15: no reason for
+# Shaded Units/Dead Panels to be twice as stale as Units Unplugged/Battery
+# Outlook/Up Steady when they cost the same shape of VRM fan-out.
+FLEET_SHADING_STATUS_REFRESH_SECONDS = _env_int("FLEET_SHADING_STATUS_REFRESH_SECONDS", 1800)
+FLEET_DEAD_PANEL_REFRESH_SECONDS = _env_int("FLEET_DEAD_PANEL_REFRESH_SECONDS", 1800)
+# Brought up from 600 (10min) to 1800 (30min), matching every other fleet
+# report's cadence — Andrew's own request, 2026-09-24. Still the cheapest of
+# the six (see fleet_vrm_freshness_status's own docstring: no per-site VRM
+# calls at all), so it stays the shortest stagger delay of the group even at
+# the same refresh interval — just no longer polling faster than the data
+# meaningfully changes for no reason.
+FLEET_VRM_FRESHNESS_REFRESH_SECONDS = _env_int("FLEET_VRM_FRESHNESS_REFRESH_SECONDS", 1800)
 # One VRM diagnostics call + one GPS resolution + one (metro-shared)
 # forecast fetch per site — comparable load to FLEET_POWER_STATUS's single
 # VRM call, so the same interval. Also matches how slowly the underlying
 # data actually changes: SOC swings meaningfully hour to hour, but the
 # 5-day cloud outlook it's being weighed against barely moves in 30
 # minutes.
-FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS = int(
-    (os.getenv("FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS") or "1800").strip() or "1800"
-)
+FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS = _env_int("FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS", 1800)
 # Same interval as FLEET_POWER_STATUS — one real fan-out across every Up
 # Steady unit, most of which short-circuit on a cheap Zabbix-only check
 # (see unit_power_vs_cell_outage's docstring) and only SSH the ones with an
 # actual loss window to explain.
-POWER_VS_CELL_OUTAGE_REFRESH_SECONDS = int(
-    (os.getenv("POWER_VS_CELL_OUTAGE_REFRESH_SECONDS") or "1800").strip() or "1800"
-)
+POWER_VS_CELL_OUTAGE_REFRESH_SECONDS = _env_int("POWER_VS_CELL_OUTAGE_REFRESH_SECONDS", 1800)
 # How often the shading-snapshot scheduler checks for due tasks. Short,
 # unlike the fleet-report polls above — a task's own next_attempt_at is
 # already a full day out, so there's no cost to checking often, and it's
 # what keeps a scheduled capture from missing its window by more than a
 # few minutes.
-SHADING_SNAPSHOT_POLL_SECONDS = int(
-    (os.getenv("SHADING_SNAPSHOT_POLL_SECONDS") or "300").strip() or "300"
+SHADING_SNAPSHOT_POLL_SECONDS = _env_int("SHADING_SNAPSHOT_POLL_SECONDS", 300)
+# Scheduling a snapshot task used to be a purely manual click (the single
+# "Schedule Snapshot" button, or the bulk one) — checked live, 2026-09-21:
+# the queue had sat completely empty for days, not because the capture
+# mechanism was broken (its own history was a healthy 33/42 captured), but
+# because nobody had clicked either button since the last bulk run. Andrew's
+# own call: a unit showing up "shaded" in the fleet report should get a
+# task on its own, no click required — see _auto_schedule_shading_snapshots,
+# hooked into the Shaded Units poll's after_check_fn below. One cooldown
+# per unit (its most recent task's updated_at, regardless of that task's
+# outcome) keeps a persistently-shaded unit — the common case, not the
+# exception — from getting a fresh task queued on every ~30-minute poll
+# once its last one finished.
+#
+# updated_at, not created_at: every task's own next_attempt_at is already
+# ~24h after it was created (see schedule_task's docstring on why it
+# always waits a day), so gating the cooldown on created_at meant it
+# expired within minutes of the attempt actually running — a fresh photo
+# of a still-shaded unit got immediately superseded by a brand-new pending
+# task on the very next poll, which is also what the Shaded Units report
+# shows (latest_tasks_by_unit picks one task per unit). Caught live,
+# 2026-09-23: every currently-"shaded" row on the report showed a bare
+# "scheduled" line with no photo, even though the day's capture history
+# had plenty of hits — each one's evidence had been overwritten by its own
+# successor task within the same day. updated_at anchors the cooldown to
+# the last actual attempt instead, so a fresh capture stays the visible
+# "latest" task, thumbnail and all, for a full day.
+SHADING_SNAPSHOT_AUTO_SCHEDULE_COOLDOWN_SECONDS = _env_int(
+    "SHADING_SNAPSHOT_AUTO_SCHEDULE_COOLDOWN_SECONDS", 24 * 3600
+)
+
+
+def _auto_schedule_shading_snapshots(rows):
+    """
+    Schedule a snapshot task for every currently-shaded row the fleet
+    Shaded Units check just returned — see SHADING_SNAPSHOT_AUTO_SCHEDULE_
+    COOLDOWN_SECONDS above for why this is safe to call on every poll.
+    Reuses shading_snapshots.schedule_task directly (the same call
+    issues_schedule_shading_snapshot-bulk makes by hand), so a unit that
+    already has a pending task is left alone either way (schedule_task's
+    own de-dup).
+    """
+    camera_target = "fisheye"
+    candidates = [
+        row for row in (rows or [])
+        if row.get("shading_status") == "shaded"
+        and row.get("unit")
+        and row.get("shading_worst_hour_utc") is not None
+    ]
+    if not candidates:
+        return
+    latest_by_unit = shading_snapshots.latest_tasks_by_unit(
+        units=[row["unit"] for row in candidates]
+    )
+    now = time.time()
+    scheduled = []
+    for row in candidates:
+        unit = str(row["unit"]).strip().upper()
+        latest = latest_by_unit.get(unit)
+        if latest and (now - (latest.get("updated_at") or latest.get("created_at") or 0)) < SHADING_SNAPSHOT_AUTO_SCHEDULE_COOLDOWN_SECONDS:
+            continue
+        task_id, created, _next_attempt_at = shading_snapshots.schedule_task(
+            unit, "", camera_target, row["shading_worst_hour_utc"],
+            verify_mode=row.get("shading_source") or "dip",
+            window_start_minutes_utc=row.get("shading_window_start_minutes_utc"),
+            window_end_minutes_utc=row.get("shading_window_end_minutes_utc"),
+        )
+        if task_id is not None and created:
+            scheduled.append(unit)
+    if scheduled:
+        print(f"Auto-scheduled {len(scheduled)} shading snapshot task(s): {', '.join(scheduled)}")
+
+
+# ---- Startup order ----------------------------------------------------------
+# Andrew's own request, 2026-10-02: after a restart the background work runs
+# in a fixed order instead of on staggered fixed delays —
+#   1. the initial ping sweep (the shared ticket-queue validation, started
+#      the moment the scheduler starts),
+#   2. weather (the Battery Outlook report), once 1 has finished,
+#   3. Power vs Cell (needs 1's results; see _power_vs_cell_sweep_units),
+#   4. the reports: the ART report download + recovery email check, the
+#      other fleet reports and Power & Infra Alerts — and, last of all, once
+#      every one of those has done its first pass, the Camera Outage Report
+#      with its per-unit camera find (_camera_outage_report_loop).
+# Each stage's first pass sets its Event whether it succeeded or failed, and
+# every wait is capped at STARTUP_STAGE_TIMEOUT_SECONDS, so one hung stage
+# delays the reports after it instead of blocking them forever.
+STARTUP_STAGE_TIMEOUT_SECONDS = _env_int("STARTUP_STAGE_TIMEOUT_SECONDS", 1800)
+_startup_weather_done = threading.Event()
+_startup_power_vs_cell_done = threading.Event()
+# (Event, name, previous stage or None). Waiting on a stage waits on its
+# previous stage first, each with its own timeout, so if weather hangs, the
+# stage-4 reports still wait for Power vs Cell to actually run after it,
+# instead of all timing out at the same moment and running alongside it.
+STARTUP_STAGE_WEATHER = (_startup_weather_done, "weather (Battery Outlook)", None)
+STARTUP_STAGE_POWER_VS_CELL = (_startup_power_vs_cell_done, "Power vs Cell", STARTUP_STAGE_WEATHER)
+STARTUP_ORDER_TEXT = (
+    "ping sweep -> weather -> Power vs Cell -> reports (Camera Outage Report last)"
+)
+
+# One Event per stage-4 report, set after its first pass. The Camera Outage
+# Report job waits on all of them so it really is the last thing to run.
+_startup_report_events = []
+
+
+def _startup_report_event():
+    event = threading.Event()
+    _startup_report_events.append(event)
+    return event
+
+
+# The two hand-written stage-4 loops' own "first pass done" events (the
+# fleet reports get theirs through make_fleet_report's marks_stage).
+_power_infra_first_pass_done = _startup_report_event()
+_art_first_pass_done = _startup_report_event()
+
+
+# ---- Camera Outage Report (server side) -------------------------------------
+# The last thing to run at startup (Andrew's request, 2026-10-02), then every
+# CAMERA_OUTAGE_REFRESH_SECONDS: the Zabbix list of units with the SNUC-Watch
+# camera-buffer alert open, then — one unit at a time, like the page's own
+# Find All Cameras — the same per-unit find each row's Find Camera button
+# runs (Scrypted RAM-folder check, or the camera ping sweep for a NUC unit).
+# Read-only. Cached so opening Reports shows the result instantly instead of
+# re-running the sweep in a browser. Like every scheduler here, it doesn't
+# start in sandbox; the page falls back to its live load + Find All there.
+CAMERA_OUTAGE_REFRESH_SECONDS = _env_int("CAMERA_OUTAGE_REFRESH_SECONDS", 3600)
+_camera_outage_cache = {
+    "units": [],
+    "finds": {},
+    "fetched_at": None,
+    "error": None,
+    "running": False,
+}
+_camera_outage_cache_lock = threading.Lock()
+
+
+def _camera_outage_find(row):
+    """One unit's camera find, shaped like the matching POST route's JSON."""
+    unit = row.get("unit")
+    if row.get("has_scrypted"):
+        result, error = work_tool.scrypted_ram_folder_status(unit)
+    else:
+        result, error = work_tool.unit_camera_outage_ping_check(unit)
+    if error:
+        return {"ok": False, "error": error}
+    return {"ok": True, **(result or {})}
+
+
+def _run_camera_outage_sweep():
+    when = _arizona_now().strftime("%Y-%m-%d %H:%M %Z")
+    print(f"[{when}] Camera Outage Report starting...")
+    rows, error = work_tool.fleet_camera_outage_report()
+    if error:
+        with _camera_outage_cache_lock:
+            _camera_outage_cache["error"] = error
+        print(f"[{when}] Camera Outage Report failed: {error}")
+        return
+    rows = rows or []
+    finds = {}
+    with _camera_outage_cache_lock:
+        _camera_outage_cache["running"] = True
+    try:
+        for row in rows:
+            unit = row.get("unit")
+            try:
+                finds[unit] = _camera_outage_find(row)
+            except Exception as exc:
+                finds[unit] = {"ok": False, "error": str(exc)}
+    finally:
+        with _camera_outage_cache_lock:
+            _camera_outage_cache["units"] = rows
+            _camera_outage_cache["finds"] = finds
+            _camera_outage_cache["fetched_at"] = time.time()
+            _camera_outage_cache["error"] = None
+            _camera_outage_cache["running"] = False
+    found = sum(1 for f in finds.values() if f.get("ok"))
+    print(f"[{when}] Camera Outage Report: {len(rows)} unit(s) with the alert open, "
+          f"camera find ran on {found}/{len(rows)}")
+
+
+def _camera_outage_report_loop():
+    # Last stage of the startup order: after every other report's first pass.
+    _wait_for_startup_reports("Camera Outage Report")
+    while True:
+        try:
+            _with_shared_job_stdout_capture(_run_camera_outage_sweep)
+        except Exception as exc:
+            _shared_console_print(f"Scheduled Camera Outage Report failed: {exc}")
+        time.sleep(CAMERA_OUTAGE_REFRESH_SECONDS)
+
+
+@app.route("/issues/camera-outage-report/cached", methods=["GET"])
+def issues_camera_outage_report_cached():
+    """The scheduled Camera Outage Report + per-unit finds — never runs a check itself."""
+    with _camera_outage_cache_lock:
+        snapshot = dict(_camera_outage_cache)
+    return jsonify({"ok": True, **snapshot})
+
+
+def _wait_for_startup_reports(label):
+    """Block until every stage-4 report has done its first pass, with one
+    overall STARTUP_STAGE_TIMEOUT_SECONDS cap measured from when Power vs
+    Cell finished (or gave up)."""
+    _wait_for_startup_stage(STARTUP_STAGE_POWER_VS_CELL, label)
+    pending = [e for e in _startup_report_events if not e.is_set()]
+    if not pending:
+        return
+    _shared_console_print(
+        f"{label}: waiting for the other {len(pending)} report(s) to finish their first pass "
+        f"(startup order: {STARTUP_ORDER_TEXT})"
+    )
+    deadline = time.time() + STARTUP_STAGE_TIMEOUT_SECONDS
+    for event in pending:
+        if not event.wait(max(0, deadline - time.time())):
+            _shared_console_print(
+                f"{label}: other reports still running after "
+                f"{STARTUP_STAGE_TIMEOUT_SECONDS // 60} minutes — starting anyway"
+            )
+            return
+
+
+def _wait_for_startup_stage(stage, label):
+    """Block until `stage` has finished its first pass, or
+    STARTUP_STAGE_TIMEOUT_SECONDS passes after its previous stage did.
+    No-op once it's set, so this costs nothing after startup."""
+    event, stage_name, previous = stage
+    if event.is_set():
+        return
+    if previous is not None:
+        _wait_for_startup_stage(previous, label)
+        if event.is_set():
+            return
+    _shared_console_print(
+        f"{label}: waiting for {stage_name} to finish its first pass "
+        f"(startup order: {STARTUP_ORDER_TEXT})"
+    )
+    if not event.wait(STARTUP_STAGE_TIMEOUT_SECONDS):
+        _shared_console_print(
+            f"{label}: {stage_name} still hasn't finished after "
+            f"{STARTUP_STAGE_TIMEOUT_SECONDS // 60} minutes — starting anyway"
+        )
+
+
+def make_fleet_report(route, endpoint, label, check_fn, refresh_seconds, startup_delay_seconds,
+                       augment_fn=None, ready_fn=None, ready_poll_seconds=30, after_check_fn=None,
+                       wait_for_stage=None, marks_stage=None):
+    """
+    Builds one fleet-wide report end to end: its cache + lock, its
+    `route` (live) and `route + "/cached"` routes, and its background poll
+    loop — the one shape that Units Unplugged, Shaded Units, Dead Panels,
+    VRM Disconnected, Battery Outlook and Up Steady Power vs Cell all
+    shared, differing only in the arguments below (never in structure).
+    Returns (cache, cache_lock, loop_fn): the caller binds these to plain
+    module globals so the handful of other spots that still read a cache
+    directly (issues_schedule_shading_snapshot_bulk's shading cache read)
+    keep working unchanged, and so _start_arizona_validation_scheduler can
+    hand loop_fn to a Thread exactly like before.
+
+    `endpoint` becomes both this route's and its `/cached` sibling's Flask
+    endpoint name (with "_cached" appended) — kept identical to each
+    report's old function name so nothing that ever inspects the URL map
+    sees a change.
+
+    `startup_delay_seconds` staggers the six loops apart so they don't all
+    launch in the same instant (each is a genuine minute-plus of
+    concurrent VRM calls, bar VRM Disconnected which is cheap — see its
+    call below). `ready_fn`, if given, is polled every `ready_poll_seconds`
+    after that delay until it returns True before the steady-state loop
+    begins — only Power vs Cell needs this, to wait for the shared
+    ticket-queue pull's first run (see _power_vs_cell_sweep_units).
+
+    `wait_for_stage` (an (Event, name) pair, see "Startup order" above)
+    holds the first pass until that earlier stage has finished; the
+    startup delay then counts from there, so it only staggers reports
+    within the same stage. `marks_stage` is the Event this report sets once
+    its own first pass is over, success or not.
+
+    Deliberately NOT gated on automated_tasks_paused() — see
+    _run_fleet_check's docstring for why.
+    """
+    cache = {"rows": [], "fetched_at": None, "error": None}
+    cache_lock = threading.Lock()
+
+    def _live_route():
+        return _fleet_cache_route(check_fn, cache, cache_lock, augment_fn=augment_fn)
+
+    def _cached_route():
+        return _fleet_cached_route(cache, cache_lock, augment_fn=augment_fn)
+
+    app.add_url_rule(route, endpoint, _live_route, methods=["GET"])
+    app.add_url_rule(route + "/cached", endpoint + "_cached", _cached_route, methods=["GET"])
+
+    def _loop():
+        if wait_for_stage is not None:
+            _wait_for_startup_stage(wait_for_stage, f"Fleet {label} poll")
+        if startup_delay_seconds:
+            _shared_console_print(
+                f"Fleet {label} poll: first pass in {startup_delay_seconds}s "
+                "(staggered so the background polls don't all hit VRM at once)"
+            )
+            time.sleep(startup_delay_seconds)
+        if ready_fn is not None:
+            printed_waiting = False
+            while not ready_fn():
+                if not printed_waiting:
+                    _shared_console_print(
+                        f"Fleet {label} poll: waiting on the shared ticket-queue "
+                        "pull's first run before its own first pass..."
+                    )
+                    printed_waiting = True
+                time.sleep(ready_poll_seconds)
+        while True:
+            try:
+                # Tee'd into the shared job's own console stream — see
+                # _with_shared_job_stdout_capture — so this thread's prints
+                # (including _run_fleet_check's own "starting"/"checked N"
+                # lines) land in the dashboard's Stdout pane, not just the
+                # real process console nobody watching the browser can see.
+                _with_shared_job_stdout_capture(
+                    lambda: _run_fleet_check(
+                        label, check_fn, cache, cache_lock, after_check_fn=after_check_fn
+                    )
+                )
+            except Exception as exc:
+                _shared_console_print(f"Fleet {label} poll failed: {exc}")
+            if marks_stage is not None and not marks_stage.is_set():
+                marks_stage.set()
+                _shared_console_print(f"Startup: Fleet {label} first pass done — next stage can start")
+            time.sleep(refresh_seconds)
+
+    return cache, cache_lock, _loop
+
+
+# Backs the VRM Disconnected report. No per-site VRM calls at all (see
+# fleet_vrm_freshness_status), so this one adds no real load regardless of
+# cadence — first of the stage-4 reports, with no stagger delay, even
+# though its refresh interval now matches the others (see
+# FLEET_VRM_FRESHNESS_REFRESH_SECONDS's own comment).
+_fleet_vrm_freshness_cache, _fleet_vrm_freshness_cache_lock, _fleet_vrm_freshness_loop = make_fleet_report(
+    "/issues/fleet-vrm-freshness", "issues_fleet_vrm_freshness", "VRM freshness",
+    work_tool.fleet_vrm_freshness_status, FLEET_VRM_FRESHNESS_REFRESH_SECONDS, 0,
+    wait_for_stage=STARTUP_STAGE_POWER_VS_CELL, marks_stage=_startup_report_event(),
+)
+# Backs the Battery Outlook report: one VRM diagnostics read + one GPS
+# resolution + one (metro-shared) forecast fetch per site, run
+# concurrently. Checked live (2026-09-13): ~186 installations after
+# staleness/site filters, ~104s. Stage 3 of the startup order: right after
+# Power vs Cell and before every other report (Andrew's own requests,
+# 2026-09-21 and 2026-10-02), so the forecast data is already pulled by the
+# time the others (which read the same net-sheet/GPS context) start.
+_fleet_battery_outlook_cache, _fleet_battery_outlook_cache_lock, _fleet_battery_outlook_loop = make_fleet_report(
+    "/issues/fleet-battery-outlook", "issues_fleet_battery_outlook", "battery outlook",
+    work_tool.fleet_battery_outlook_status, FLEET_BATTERY_OUTLOOK_REFRESH_SECONDS, 0,
+    # Stage 2: right after the initial ping sweep finishes (same "shared
+    # job done" check Power vs Cell uses), before Power vs Cell.
+    ready_fn=lambda: _power_vs_cell_sweep_units()[0] is not None,
+    ready_poll_seconds=5,
+    marks_stage=_startup_weather_done,
+)
+# Backs the Units Unplugged report's manual Refresh (live, ~a minute,
+# concurrent VRM calls); the scheduled poll is what keeps /cached warm day
+# to day.
+_fleet_power_status_cache, _fleet_power_status_cache_lock, _fleet_power_status_loop = make_fleet_report(
+    "/issues/fleet-power-status", "issues_fleet_power_status", "power status",
+    work_tool.fleet_power_status, FLEET_POWER_STATUS_REFRESH_SECONDS, 30,
+    wait_for_stage=STARTUP_STAGE_POWER_VS_CELL, marks_stage=_startup_report_event(),
+)
+# Backs the Shaded Units report. augment_fn attaches each row's own most
+# recent shading-snapshot task after every cache refresh (see
+# _augment_shading_rows_with_snapshot_tasks) — never baked into the stored
+# cache, so it always reflects the task's current state. after_check_fn
+# auto-schedules a snapshot task for every row this poll finds shaded —
+# see _auto_schedule_shading_snapshots.
+_fleet_shading_status_cache, _fleet_shading_status_cache_lock, _fleet_shading_status_loop = make_fleet_report(
+    "/issues/fleet-shading-status", "issues_fleet_shading_status", "shading status",
+    work_tool.fleet_shading_status, FLEET_SHADING_STATUS_REFRESH_SECONDS, 60,
+    augment_fn=_augment_shading_rows_with_snapshot_tasks,
+    after_check_fn=_auto_schedule_shading_snapshots,
+    wait_for_stage=STARTUP_STAGE_POWER_VS_CELL, marks_stage=_startup_report_event(),
+)
+# Backs the Dead Panels report.
+_fleet_dead_panel_cache, _fleet_dead_panel_cache_lock, _fleet_dead_panel_loop = make_fleet_report(
+    "/issues/fleet-dead-panel-status", "issues_fleet_dead_panel_status", "dead panel",
+    work_tool.fleet_dead_panel_status, FLEET_DEAD_PANEL_REFRESH_SECONDS, 90,
+    wait_for_stage=STARTUP_STAGE_POWER_VS_CELL, marks_stage=_startup_report_event(),
+)
+# Backs the Up Steady / Offline compute / Scrypted outage lists' "Diagnose
+# (Cell/Power)" buttons. SSH-heavy (see fleet_power_vs_cell_outage_status),
+# so slower than the VRM fleet checks above. ready_fn covers the ordinary
+# startup case, where the shared ticket-queue pull (and so the sweep's own
+# unit list) hasn't finished its first run yet.
+_power_vs_cell_cache, _power_vs_cell_cache_lock, _power_vs_cell_outage_loop = make_fleet_report(
+    "/issues/fleet-power-vs-cell-outage", "issues_fleet_power_vs_cell_outage", "power vs cell outage",
+    _power_vs_cell_check_fn, POWER_VS_CELL_OUTAGE_REFRESH_SECONDS, 0,
+    # Stage 3: after weather (which itself waited for the ping sweep).
+    wait_for_stage=STARTUP_STAGE_WEATHER,
+    ready_fn=lambda: _power_vs_cell_sweep_units()[0] is not None,
+    # A dict lookup, so poll it often: every later report waits on this
+    # one, and a 30s poll could leave the whole chain idle for 30s.
+    ready_poll_seconds=5,
+    marks_stage=_startup_power_vs_cell_done,
 )
 
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or __name__ != "__main__":
@@ -4162,11 +5244,6 @@ if __name__ == "__main__":
     # one that does), each independently hitting VRM/cameras.
     if not debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         _start_shading_snapshot_scheduler()
-    # Loopback by default. The dashboard has no authentication and holds
-    # switch / NUC / PVE / Scrypted credentials plus live camera proxies, so
-    # binding every interface is opt-in rather than the default it used to be.
-    # Set WORK_TOOL_BIND=0.0.0.0 in .env only when a coworker genuinely needs
-    # to reach this instance over the NOC LAN.
     # Bind every interface by default. The live instance runs as the Windows
     # service "IssuesDashboard", which starts flask_endpoints.py directly and
     # therefore never sees run_live.bat — so the DEFAULT has to be the value

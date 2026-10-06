@@ -15,8 +15,11 @@ work on the code without breaking a live NOC tool.
 | `work_tool/weather.py` | Open-Meteo lookups, WMO mapping, region coordinates. |
 | `work_tool/diagnostics.py` | The read-only diagnostics and the shared `_ssh_read` helper. |
 | `work_tool/security_update.py` | The guided Scrypted GPU-passthrough fix and platform service restarts. |
+| `work_tool/recovery_email.py` | Turns the Recovery Email Check's five lists into one email status per unit, for the Graphs modal's email pill. |
 | `flask_endpoints.py` | Every HTTP route. There is no `app.py`. Routes stay thin and delegate into `work_tool`. |
-| `templates/issues_results.html` | The entire dashboard UI and its JavaScript, in one file. This is where buttons and command menus live. |
+| `templates/issues_results.html` | The dashboard's markup, plus a small inline `<script>` that injects Jinja values (`jobId`, `erpWritesDisabled`, ...). |
+| `static/issues_results.js` | All dashboard JavaScript (~17k lines). This is where buttons and command menus live. |
+| `static/issues_results.css` | All dashboard styles, with the `:root` palette at the top. Both static files are cache-busted by mtime (`_static_asset_version`). |
 | `static/camera_shim.js` | Injected into proxied camera UIs (Dahua H5 / Hikvision). |
 | `unit_history.py` | SQLite-backed per-unit validation history (`data/<env>/unit_history.db`). Append-only; every function fails soft and never raises into a validation run. |
 | `zabbix_tool.py`, `page_file.py`, `art_get.py`, `issues.py` | Standalone helpers/CLIs, not imported by the web app (except `zabbix_tool`). |
@@ -30,18 +33,37 @@ work on the code without breaking a live NOC tool.
   `_erp_writes_blocked_response()` like its neighbours. Resolve (R) is local
   only and deliberately not gated.
 - **`PAUSE_AUTOMATED_TASKS=1` in both `run_live.bat` and `run_sandbox.bat`.**
-  The 4:00/4:05/4:10 AM jobs, the hourly ART report refresh, and the
-  30-minute ERP poll stay off. Don't "fix" a scheduler that looks idle — it
-  is paused on purpose. The four fleet report polls (Units Unplugged/Shaded
-  Units/Dead Panels/VRM Disconnected) and the Power & Infra Alerts
-  (Zabbix+VRM) poll are a deliberate exception — they're read-only with no
+  The 4:00/4:05/4:10 AM jobs stay off. Don't "fix" a scheduler that looks
+  idle — it is paused on purpose. Everything else in the background is a
+  deliberate exception: the 30-minute ERP ticket/project pull and the hourly
+  ART report refresh (Andrew's request, 2026-09-15), the fleet report polls
+  (Units Unplugged/Shaded Units/Dead Panels/VRM Disconnected/Battery
+  Outlook/Power vs Cell) and the Power & Infra Alerts (Zabbix+VRM) poll.
+  The polls are read-only with no
   side effects, and a tech shouldn't have to hit Refresh by hand after every
   service restart just to see them populate, so they run regardless of this
   flag (see `_run_fleet_check` / `_run_scheduled_power_infra_alerts` in
-  `flask_endpoints.py`). None of them start in sandbox at all though — their
+  `flask_endpoints.py`). The hourly recovery email status check is the
+  same kind of exception: it runs right after each hourly ART report
+  download, only pings units and reads the spreadsheet (it never sends an
+  email), and feeds the Graphs modal's email indicator — see
+  `_run_recovery_email_status_check` and `work_tool/recovery_email.py`.
+  None of them start in sandbox at all though — their
   whole scheduler is skipped there (`WORK_TOOL_ENV != "sandbox"` at the
   `_start_arizona_validation_scheduler()` call sites), so this doesn't add
   any VRM/Zabbix load to a dev sandbox.
+- **Startup runs in a fixed order, not on timers** (Andrew's request,
+  2026-10-02): initial ping sweep -> weather (Battery Outlook) -> Power vs
+  Cell -> the reports (ART report + recovery email check, the fleet
+  reports, Power & Infra Alerts) -> the Camera Outage Report + per-unit
+  camera find, last. Each stage holds its first pass on a
+  `threading.Event` the stage before it sets (`wait_for_stage` /
+  `marks_stage` on `make_fleet_report`, `_wait_for_startup_stage` for the
+  hand-written loops), capped at `STARTUP_STAGE_TIMEOUT_SECONDS`. A new
+  background report belongs in the reports stage: give it
+  `wait_for_stage=STARTUP_STAGE_POWER_VS_CELL` and
+  `marks_stage=_startup_report_event()` (so the camera job waits for it
+  too), not a fixed startup delay.
 - **The live instance is a Windows service, `IssuesDashboard`.** It runs
   :5000 continuously, starts automatically, and launches
   `flask_endpoints.py` **directly — it never reads `run_live.bat`**. So a
@@ -113,7 +135,7 @@ import inside `main()`.
 
 Three edits, in this order:
 
-1. **`work_tool.py`** — a function returning `(info_dict, error)` for reads
+1. **`work_tool/`** (the submodule it belongs to, not `_core`) — a function returning `(info_dict, error)` for reads
    (see `get_unit_patch_version`, `pve_nvme_health`) or `(ok, message)` for
    actions (see `reboot_pve`). Resolve the IP with `ensure_unit_net_info`,
    pass `timeout=` to paramiko `connect` *and* `exec_command`, and `close()`
@@ -122,7 +144,7 @@ Three edits, in this order:
    `jsonify({"ok": True, **info})` or `400` with `{"ok": False, "error": ...}`.
    Disruptive actions go through `_run_locked_quick_action`, which takes the
    per-unit lock; read-only diagnostics do not need it.
-3. **`templates/issues_results.html`** — for a read-only check, add it to
+3. **`static/issues_results.js`** — for a read-only check, add it to
    `appendDiagnosticsCommandMenu` via `appendDiagnosticButton`, which wraps
    the whole fetch/log/report pattern: you supply a label, endpoint and an
    optional `detailLines(data)` formatter. Device-specific actions go in
@@ -148,8 +170,9 @@ filter. Don't wire click handlers onto it.
 
 ## Colour
 
-Every colour in every template resolves through CSS custom properties declared
-in a `:root` block at the top of that file's `<style>`. **There are no colour
+Every colour resolves through CSS custom properties declared in a `:root`
+block: at the top of `static/issues_results.css` for the dashboard, and at the
+top of each other template's own `<style>`. **There are no colour
 literals outside `:root`** — a repaint is a change to those values and nothing
 else. Names are roles (`--bg-panel`, `--border-strong`, `--text-muted`,
 `--accent`, `--ok`, `--danger`), never colours, so the names survive a repaint.
@@ -171,12 +194,29 @@ checks; green/yellow/orange/red are only ~11-12 dE apart under deuteranopia
 even now, which is why the lights also carry the glyphs. `--led-idle` is a
 neutral grey so the "no reading" light never reads as UI furniture.
 
-Every command menu gets a search box from `createCommandMenuElement()` (the
-shared factory both menu builders use), so a new action is searchable with no
-extra work — `filterCommandMenu()` walks the live DOM rather than any
-registry. Keep new actions as `.action-btn` elements inside
-`.command-submenu-items` and give them a label worth typing; that is the whole
-contract.
+Command menus come from `createCommandMenuElement()`, and the submenus inside
+them from the `appendXCommandMenu` builders (`appendValidateCommandMenu`,
+`appendWeatherCommandMenu`, `appendCamerasCommandMenu`,
+`appendOpenCommandMenu`, `appendDiagnosticsCommandMenu`,
+`appendRouterCommandMenu`, `appendArtMenu`, `appendSwitchCommandMenu`,
+`appendSetFieldsCommandMenu`, `appendLinuxCommandMenus`). The Power vs Cell
+Graphs modal's right-hand rail calls the same builders
+(`renderGraphsDeviceMenu`), so an action added to one of them shows up on the
+ticket row's menu and in the modal with no extra work — keep it that way: the
+row's unit button opens the modal, and its ▾ quick menu is only a shortcut
+(Andrew's request, 2026-10-03), so the modal must stay a superset of it.
+
+Both places also get a **Search commands** box (`createCommandSearch()`;
+`ensureCommandMenuSearch()` re-inserts it in the row menu, whose panel gets
+rebuilt by the multi-unit chooser). `filterCommandMenu()` walks the live DOM
+on each keystroke rather than any registry, so a new action is searchable
+with no extra work. Keep new actions as `.action-btn` elements inside
+`.command-submenu-items` and give them a label worth typing; that is the
+whole contract.
+
+The shared per-unit note box is built by `createUnitNotesBox()` /
+`loadUnitNote()` and used by both the row menu and the modal rail; reuse
+those rather than building another notes UI.
 
 To promote an action onto every ticket row, add an entry to the
 `QUICK_ACTIONS` array instead — it is one object with a label, a tooltip, an
@@ -185,7 +225,9 @@ optional `show(entry)` gate, and either `run(entry, btn)` or `href(entry)`.
 Results are written to the shared stdout pane with
 `consoleLines.push(...)` + `renderConsole(true)`, and to `statusEl.textContent`.
 For anything the user must not miss, also call `notify(message, kind)` —
-`"error"` toasts stay until dismissed, everything else fades. **Do not use
+every toast fades on its own (`"error"` ones after `TOAST_ERROR_AUTO_DISMISS_MS`,
+slower than the rest, and only if nobody moused over it first) unless the
+caller passes `{ persist: true }`. **Do not use
 `window.alert`**: it blocks the whole tab, which is painful while a long ping
 is streaming, and the message is already on screen twice.
 
@@ -212,7 +254,7 @@ test for exactly this.
 
 ## Per-unit lock
 
-`unit_busy_start / touch / end / force_clear` in `work_tool.py` stop two
+`unit_busy_start / touch / end / force_clear` in `work_tool/locks.py` stop two
 people (or two tabs) running conflicting actions on one unit, and double as
 the server-side job store for the multi-step Security Update Fix wizard. The
 caller gets a token it must present to touch or end the job. It is a live

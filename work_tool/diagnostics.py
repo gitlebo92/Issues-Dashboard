@@ -7,6 +7,7 @@ re-exported by work_tool/__init__.py, so each name is still reachable as
 """
 
 import time
+import base64
 import requests
 import csv
 import os
@@ -36,8 +37,10 @@ import urllib3
 from ._core import (  # noqa: F401  (re-exported dependencies)
     _erp_heads_for_mu_trailers,
     _fetch_erp_component_site_map,
+    _fetch_erp_issue_doc,
     _format_switch_uptime_seconds,
     _host_only,
+    _iter_remote_pty_command,
     _net_row_for_unit,
     _ping_host,
     _ping_reachable,
@@ -45,14 +48,18 @@ from ._core import (  # noqa: F401  (re-exported dependencies)
     _sc_component_name,
     _scrypted_ssh_credentials,
     _scrypted_ssh_target,
+    _scrypted_web_credentials,
     ensure_unit_net_info,
     env_path,
     get_robofiber_uptime,
     is_hikvision_unit,
     list_unit_cameras,
+    open_camera_targets_for_unit,
+    ping_camera,
     username,
     uses_pve,
     validate_unit_full,
+    work_tld,
 )
 from .weather import vrm_active_alarms_by_unit  # noqa: F401  (re-exported dependency)
 
@@ -178,6 +185,454 @@ def scrypted_service_status(unit):
         "down": down,
         "output": raw,
     }, None
+# The RAM-drive snapshot folders on a Scrypted box are named after each
+# camera device — but NOT consistently by the same identifier. Checked
+# live, 2026-09-21, across several units: some name the folder after the
+# device's "room" field (e.g. "SC000852" — RD3500/RD3556/RD3431), others
+# after Scrypted's own internal numeric device id instead (e.g.
+# "scrypted-101" — RD3419, where device id 101 is that unit's Fisheye,
+# room SC000312; the folder is /mnt/ram/cameras/scrypted-101/, not
+# .../SC000312/). A version of this that only tried camera_rooms()'s
+# SMTP-derived room code (matching Scrypted's own "room" field, so no
+# improvement there either) left every RD3419-shaped unit's folders
+# unlabeled by their raw "scrypted-10x" name and wrongly read as "not
+# populating" — the count itself was accurate, only the label was wrong,
+# but a label a tech can't recognize is as good as none. Registering BOTH
+# candidate keys per camera below means whichever naming scheme an
+# installation actually uses resolves to the same friendly label.
+_SCRYPTED_RAM_ROOM_CAMERA_LABELS = (
+    ("C1-180", "C1-180"),
+    ("C1-PTZ", "C1-PTZ"),
+    ("C2-180", "C2-180"),
+    ("C2-PTZ", "C2-PTZ"),
+    ("FISHEYE", "Fisheye"),
+)
+_SCRYPTED_RAM_FULLSIZE_HEALTHY_MIN = 5
+def _camera_target_for_ram_camera_name(name):
+    """
+    Netsheet camera target (fisheye/camera1-4) for a RAM-folder row's
+    friendly name (see _SCRYPTED_RAM_ROOM_CAMERA_LABELS) — "C1-180"/
+    "C1-PTZ" are the same physical camera1 IP's two channels (confirmed
+    with Andrew, 2026-09-24: on a >=3300 unit, camera1 hosts a fixed 180
+    on channel 1 and PTZ on channel 2, sharing one IP), so both map to
+    "camera1"; likewise "C2-*" -> camera2. Only used to pick which host
+    to ping for the not-populating secondary check below, not to
+    distinguish the two channels — ICMP can't tell them apart anyway,
+    both live on the same IP.
+    """
+    text = str(name or "").strip().upper()
+    if text == "FISHEYE":
+        return "fisheye"
+    match = re.match(r"^C(\d)-", text)
+    if match:
+        return "camera" + match.group(1)
+    return None
+async def _scrypted_camera_rooms_by_folder(unit):
+    """
+    Map each 180/PTZ/Fisheye camera's Scrypted room AND its Scrypted
+    device id (the two folder-naming schemes seen live — see the comment
+    above) back to a friendly camera label. Returns ({room_or_id: label}, error).
+    """
+    from scrypted_sdk import connect_scrypted_client
+
+    web_username, web_password = _scrypted_web_credentials()
+    if not web_username or not web_password:
+        return None, "scryptuserweb/scryptpass are not set in .env"
+    tld = work_tld()
+    if not tld:
+        return None, "workTLD is not set in .env"
+    base_url = f"https://{unit.lower()}.{tld}"
+    loop = asyncio.get_running_loop()
+    try:
+        transport, sdk = await connect_scrypted_client(loop, base_url, web_username, web_password)
+    except Exception as exc:
+        return None, f"Scrypted login failed for {unit}: {exc}"
+    try:
+        rooms_by_label = {}
+        for device_id, state in sdk.systemManager.getSystemState().items():
+            name = str((state.get("name") or {}).get("value") or "")
+            if "SC" not in name or "AA" in name or "TT" in name:
+                continue
+            room = (state.get("room") or {}).get("value")
+            name_upper = name.upper()
+            for needle, label in _SCRYPTED_RAM_ROOM_CAMERA_LABELS:
+                if needle in name_upper:
+                    if room:
+                        rooms_by_label[room] = label
+                    if device_id:
+                        rooms_by_label[f"scrypted-{device_id}"] = label
+                    break
+        return rooms_by_label, None
+    finally:
+        try:
+            await transport.close()
+        except Exception:
+            pass
+def _camera_rooms_by_label(unit):
+    """
+    {folder_key: friendly_label} for labeling RAM-folder rows — see
+    _scrypted_camera_rooms_by_folder. Best-effort: a failure here (no
+    scryptuserweb/scryptpass, Scrypted unreachable) just means folder rows
+    show up unlabeled by their raw folder name instead of a camera name —
+    it doesn't fail the RAM-folder populating check itself, which reads
+    the RAM drive directly over SSH and doesn't depend on this at all.
+    Returns ({key: label}, error) — error is informational only, callers
+    are not required to abort on it.
+    """
+    rooms_by_label, error = asyncio.run(_scrypted_camera_rooms_by_folder(unit))
+    return rooms_by_label or {}, error
+def _merge_ram_folder_rows(raw_rows, rooms_by_label):
+    """
+    (room, count) pairs from the raw `/mnt/ram/cameras/*/` listing, merged
+    down to one row per camera LABEL rather than one per raw folder name.
+    A camera can have more than one folder on disk at once — verified
+    live, RD3419, 2026-09-21: its snapshot mixin restarted mid-session and
+    switched from naming folders after Scrypted's device id
+    ("scrypted-101") to naming them after the room field ("SC000312"),
+    leaving the old id-named folders behind, empty, with no `fullsize`
+    subdirectory at all. _scrypted_camera_rooms_by_folder registers both
+    naming schemes under the same label for exactly this reason, so both
+    folders land here mapped to "Fisheye" — keeping whichever one
+    actually has files (the real, currently-written one) means the dead
+    leftover can't read as a second camera that's "not populating."
+    Folders that don't match any known label still show up individually,
+    unlabeled, same as before this existed.
+    """
+    by_name = {}
+    for room, count in raw_rows:
+        name = rooms_by_label.get(room, room)
+        existing = by_name.get(name)
+        if existing is None or count > existing["file_count"]:
+            by_name[name] = {
+                "room": room,
+                "name": name,
+                "file_count": count,
+                "ok": count >= _SCRYPTED_RAM_FULLSIZE_HEALTHY_MIN,
+            }
+    return list(by_name.values())
+def _expected_camera_ram_labels(unit):
+    """
+    The camera RAM-folder labels this unit SHOULD have — derived purely
+    from the netsheet camera config (open_camera_targets_for_unit, the
+    same ACRD/Tippy/>=3300 camera-count rules used everywhere else) plus
+    uses_pve's own PTZ-channel inference (camera1/camera2 each split into
+    a fixed-180 and a PTZ channel on a >=3300 unit — see
+    _ptz_channel_for_camera's own comment), never by asking Scrypted.
+
+    Corrected with Andrew, 2026-10-01: this used to come from
+    _scrypted_camera_rooms_by_folder's live Scrypted systemManager query
+    instead — but that's a folder-NAME-to-label mapping aid (matching the
+    actual room code/device id a RAM folder happens to be named after),
+    not a trustworthy source for how many cameras a unit has. A Scrypted
+    login failure, an incomplete/misconfigured device list, or any other
+    live hiccup silently undercounted "Found N camera(s)" — exactly when
+    this check runs (chasing a camera/Scrypted problem) is also when that
+    live query is least reliable. The config-derived set here is the same
+    deterministic answer the rest of the app already agrees on, and holds
+    regardless of whether Scrypted itself is reachable right now.
+    """
+    targets = open_camera_targets_for_unit(unit)
+    pve = uses_pve(unit)
+    labels = []
+    for n in (1, 2, 3, 4):
+        target = f"camera{n}"
+        if target not in targets:
+            continue
+        if pve and n in (1, 2):
+            labels.append(f"C{n}-180")
+            labels.append(f"C{n}-PTZ")
+        else:
+            labels.append(f"Camera {n}")
+    if "fisheye" in targets:
+        labels.append("Fisheye")
+    return labels
+def _add_missing_camera_rows(cameras, expected_labels):
+    """
+    Add a row for any expected camera with NO RAM folder on disk at all —
+    not just an existing-but-empty one. Without this, a camera whose
+    snapshot folder was never created (its capture mixin never started, or
+    the box just rebooted) silently disappears from the report instead of
+    showing up as a finding. Caught live, RD3421, 2026-09-30: this unit
+    has 5 expected cameras, but only 3 had any folder on disk — C1-180 and
+    C1-PTZ had none at all and were missing from the list entirely instead
+    of reporting as failing.
+    Mutates `cameras` in place (appends only).
+    """
+    present = {c["name"] for c in cameras}
+    for label in expected_labels:
+        if label in present:
+            continue
+        cameras.append({
+            "room": None,
+            "name": label,
+            "file_count": 0,
+            "ok": False,
+            "no_folder": True,
+        })
+def _add_camera_reachability(unit, cameras):
+    """
+    For each not-populating camera, ping its actual device — the
+    secondary check that tells "camera itself is dead" (folder empty
+    because nothing's feeding it) apart from "camera answers fine, only
+    Scrypted's own capture stopped" (folder empty despite the camera
+    being reachable) — two different problems with two different fixes.
+    Andrew's own request, 2026-09-28. Mutates `cameras` in place, adding
+    "camera_reachable": True/False/None to each failing entry — None
+    means either the folder's name couldn't be mapped back to a netsheet
+    target (see _camera_target_for_ram_camera_name) or the ping itself
+    couldn't run (e.g. unit not in the net sheet), not a real verdict.
+    Healthy (already-populating) cameras are left untouched — nothing to
+    disambiguate there.
+    """
+    for camera in cameras:
+        if camera.get("ok"):
+            continue
+        target = _camera_target_for_ram_camera_name(camera.get("name"))
+        if not target:
+            camera["camera_reachable"] = None
+            continue
+        result = ping_camera(unit, target)
+        if not result:
+            camera["camera_reachable"] = None
+            continue
+        _code, output = result
+        camera["camera_reachable"] = _ping_reachable(output)
+def scrypted_ram_folder_status(unit):
+    """
+    Which cameras are actually populating /mnt/ram/cameras/<room>/fullsize
+    on the unit's Scrypted box. The expected camera set comes from the
+    netsheet config (see _expected_camera_ram_labels); Scrypted's own room
+    assignment is only used to map a raw folder name back to that camera's
+    friendly label. Returns (info, error).
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+
+    rooms_by_label, _room_error = _camera_rooms_by_label(unit)
+
+    _row, host, error = _scrypted_ssh_target(unit)
+    if error:
+        return None, error
+    ssh_username, ssh_password = _scrypted_ssh_credentials()
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    cameras = []
+    try:
+        client.connect(hostname=host, username=ssh_username, password=ssh_password, timeout=30)
+        list_cmd = (
+            f"echo {shlex.quote(ssh_password)} | sudo -S bash -c "
+            # nullglob: without it, a unit with NOTHING under
+            # /mnt/ram/cameras/ yet (mount just created, box freshly
+            # rebooted) leaves the glob unexpanded, and the loop runs
+            # once on the literal string "/mnt/ram/cameras/*/" — basename
+            # of that is "*", reported as one camera named "*" that's
+            # "not populating" (looks like every camera is down; it just
+            # means the listing found nothing at all). Caught live, RD3340,
+            # 2026-09-22.
+            "'shopt -s nullglob; for d in /mnt/ram/cameras/*/; do "
+            'room=$(basename "$d"); '
+            'count=$(ls -1 "$d/fullsize" 2>/dev/null | wc -l); '
+            'printf "%s %s\\n" "$room" "$count"; done\''
+        )
+        _stdin, stdout, stderr = client.exec_command(list_cmd, timeout=30)
+        raw = stdout.read().decode("utf-8")
+        err = stderr.read().decode("utf-8")
+        # sudo -S always echoes its password prompt to stderr, success or
+        # not — treating any non-empty stderr as a failure misread a unit
+        # with genuinely empty output (nullglob correctly finding zero
+        # camera folders) as this SSH call itself having failed, surfacing
+        # "[sudo] password for sentracam:" as if it were the real error
+        # instead of falling through to the accurate "No camera RAM
+        # folders found" below. Strip just that routine prompt line first.
+        err_for_check = re.sub(r"^\[sudo\]\s*password for [^:]+:\s*", "", err, flags=re.IGNORECASE).strip()
+        if not raw and err_for_check:
+            return None, err_for_check
+
+        raw_rows = []
+        for line in raw.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            room, count_text = parts
+            try:
+                count = int(count_text)
+            except ValueError:
+                continue
+            raw_rows.append((room, count))
+        cameras = _merge_ram_folder_rows(raw_rows, rooms_by_label)
+        # Only synthesize "missing" rows when the room/device-id mapping
+        # actually resolved something — with no mapping at all we can't
+        # tell an expected camera's folder apart from an unrecognized raw
+        # name, so claiming 5 specific cameras are "missing" on top of
+        # already showing their folders unlabeled would double-count the
+        # same cameras twice. Caught live, RD3375, 2026-10-01 (Scrypted
+        # login failed outright): without this guard it reported "7 of 11"
+        # instead of the real 5.
+        if rooms_by_label:
+            _add_missing_camera_rows(cameras, _expected_camera_ram_labels(unit))
+    except Exception as exc:
+        return None, f"SSH to Scrypted box on {unit} failed: {exc}"
+    finally:
+        client.close()
+
+    if not cameras:
+        return None, f"No camera RAM folders found on {unit}"
+
+    _add_camera_reachability(unit, cameras)
+    failing = [c["name"] for c in cameras if not c["ok"]]
+    if not failing:
+        summary = f"All {len(cameras)} camera RAM folders populating on {unit}"
+        status = "ok"
+    else:
+        summary = (
+            f"{len(failing)} of {len(cameras)} camera RAM folders not "
+            f"populating on {unit}: " + ", ".join(failing)
+        )
+        status = "fail"
+
+    return {
+        "unit": unit,
+        "host": host,
+        "status": status,
+        "summary": summary,
+        "cameras": cameras,
+    }, None
+def stream_scrypted_ram_folder_status(unit):
+    """
+    Same check as scrypted_ram_folder_status, but yields output live as it
+    runs instead of collecting it all before returning — same reasoning as
+    stream_update_unit_patch_version: the Scrypted room lookup and the
+    remote listing can each take a few seconds, and a tech watching this
+    run wants to see progress, not a blank pane until it either finishes
+    or errors out.
+
+    Yields plain text chunks. Never raises into the caller — any
+    lookup/connection/SSH error is yielded as a line instead.
+    """
+    unit = str(unit or "").strip()
+    if not unit:
+        yield "Missing unit\n"
+        return
+
+    # The expected camera set comes from the netsheet config (+ uses_pve's
+    # PTZ-channel inference) — see _expected_camera_ram_labels — never
+    # from Scrypted's own live state, so this line is accurate even when
+    # Scrypted itself is the thing having a bad day. Corrected with
+    # Andrew, 2026-10-01, after this used to ask Scrypted's systemManager
+    # directly and could silently undercount when that query was
+    # incomplete or failed outright.
+    expected_labels = _expected_camera_ram_labels(unit)
+    yield (
+        f"Expecting {len(expected_labels)} camera(s) on {unit}: "
+        + ", ".join(expected_labels) + "\n"
+    )
+    yield f"Looking up Scrypted room/device-id mapping for {unit}...\n"
+    rooms_by_label, room_error = _camera_rooms_by_label(unit)
+    if room_error:
+        yield (
+            f"Scrypted room lookup incomplete ({room_error}) — folders "
+            "below will show unlabeled by their raw folder name instead "
+            "of a camera name.\n"
+        )
+
+    _row, host, error = _scrypted_ssh_target(unit)
+    if error:
+        yield f"{error}\n"
+        return
+    ssh_username, ssh_password = _scrypted_ssh_credentials()
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    yield f"Connecting to {unit} ({host})...\n"
+    try:
+        client.connect(hostname=host, username=ssh_username, password=ssh_password, timeout=30)
+    except Exception as exc:
+        yield f"SSH connect to {host} failed: {exc}\n"
+        return
+    yield "Connected — listing /mnt/ram/cameras...\n"
+
+    list_cmd = "sudo -S bash -c " + shlex.quote(
+        # nullglob — see scrypted_ram_folder_status's identical comment.
+        "shopt -s nullglob; for d in /mnt/ram/cameras/*/; do "
+        'room=$(basename "$d"); '
+        'count=$(ls -1 "$d/fullsize" 2>/dev/null | wc -l); '
+        'printf "%s %s\\n" "$room" "$count"; done'
+    )
+    raw_lines = []
+    exit_status = None
+    try:
+        for item in _iter_remote_pty_command(client, list_cmd, ssh_password, timeout=60):
+            if isinstance(item, tuple):
+                exit_status = item[1]
+            elif item:
+                raw_lines.append(item)
+                yield item
+    except Exception as exc:
+        yield f"\nRAM folder check error: {exc}\n"
+        return
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    raw_rows = []
+    for line in "".join(raw_lines).splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        room, count_text = parts
+        try:
+            count = int(count_text)
+        except ValueError:
+            continue
+        raw_rows.append((room, count))
+    cameras = _merge_ram_folder_rows(raw_rows, rooms_by_label)
+    # See scrypted_ram_folder_status's identical guard: with no working
+    # room/device-id mapping, "missing" rows would double-count cameras
+    # whose folders are already showing up unlabeled by raw name.
+    if rooms_by_label:
+        _add_missing_camera_rows(cameras, expected_labels)
+
+    if not cameras:
+        yield f"\nNo camera RAM folders found on {unit} (exit {exit_status})\n"
+        return
+
+    failing = [c["name"] for c in cameras if not c["ok"]]
+    if not failing:
+        yield f"\nAll {len(cameras)} camera RAM folders populating on {unit}\n"
+    else:
+        yield (
+            f"\n{len(failing)} of {len(cameras)} camera RAM folders not "
+            f"populating on {unit}: " + ", ".join(failing) + "\n"
+        )
+        yield "Checking whether each is actually reachable...\n"
+        _add_camera_reachability(unit, cameras)
+        any_unreachable = False
+        for camera in cameras:
+            if camera.get("ok"):
+                continue
+            reachable = camera.get("camera_reachable")
+            if reachable is False:
+                any_unreachable = True
+            verdict = (
+                "camera unreachable too — likely dead/offline" if reachable is False
+                else "camera IS reachable — Scrypted-side capture issue, not the camera itself" if reachable is True
+                else "could not determine camera reachability"
+            )
+            yield f"  {camera['name']}: {verdict}\n"
+        # A trailing, machine-readable line the frontend pulls out of the
+        # stream (and never displays) to decide whether to flip this
+        # unit's LED to yellow — a camera that's not just "not populating"
+        # but confirmed UNREACHABLE is a real degraded-hardware finding,
+        # not just a Scrypted-side capture hiccup, and is worth surfacing
+        # on the ticket's own status light. Deliberately does NOT move the
+        # ticket to a different list — Up Steady tickets stay in Up Steady,
+        # this only changes which LED color they show. Andrew's own
+        # request, 2026-10-01.
+        yield "__RAM_FOLDER_RESULT__ " + json.dumps({"any_camera_unreachable": any_unreachable}) + "\n"
 def _parse_size_table(text, wanted_mounts=("/",)):
     """Pull the rows we care about out of `df -h` output."""
     rows = []
@@ -440,6 +895,247 @@ def nuc_host_resources(unit):
         else f"NUC for {unit} needs attention ({'; '.join(reasons)}) — {detail}"
     )
     return info, None
+
+
+# ---- NUC Disk Health ---------------------------------------------------------
+# Windows NUCs had chkdsk and nothing else for disk health (the Linux/Scrypted
+# units have their own checks). Three read-only sources, all over the same SSH
+# login chkdsk uses, verified live on RD1009 and RD3059 (2026-10-05):
+#   - Get-PhysicalDisk: each drive's own HealthStatus/OperationalStatus.
+#   - Get-StorageReliabilityCounter: SMART-style temperature, wear, read/write
+#     error counts, power-on hours. NVMe drives often leave the error counts
+#     blank — that's "not reported", not zero.
+#   - MSStorageDriver_FailurePredictStatus: the SMART predict-failure flag —
+#     SATA drives only; NVMe never shows up here.
+#   - The System event log: warnings/errors from the disk, NTFS and storage
+#     driver providers over the last 90 days.
+# Each event provider is queried on its own inside try/catch: one
+# FilterHashtable listing a provider the machine doesn't have (Intel's iaStorA
+# wasn't on RD3059) throws and returns NOTHING for the providers that do exist.
+# Sent with -EncodedCommand because nested quotes don't survive cmd.exe.
+_NUC_DISK_HEALTH_PS = r"""
+$ProgressPreference='SilentlyContinue'
+$disks = @(Get-PhysicalDisk | ForEach-Object { [PSCustomObject]@{
+  DeviceId=[string]$_.DeviceId; Name=$_.FriendlyName; Media=[string]$_.MediaType; Bus=[string]$_.BusType;
+  Health=[string]$_.HealthStatus; Operational=[string]$_.OperationalStatus; SizeGB=[math]::Round($_.Size/1GB) } })
+$rel = @(Get-PhysicalDisk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue | ForEach-Object { [PSCustomObject]@{
+  DeviceId=[string]$_.DeviceId; Temperature=$_.Temperature; TemperatureMax=$_.TemperatureMax; Wear=$_.Wear;
+  ReadErrorsTotal=$_.ReadErrorsTotal; ReadErrorsUncorrected=$_.ReadErrorsUncorrected;
+  WriteErrorsTotal=$_.WriteErrorsTotal; WriteErrorsUncorrected=$_.WriteErrorsUncorrected; PowerOnHours=$_.PowerOnHours } })
+$pred = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction SilentlyContinue | ForEach-Object { [PSCustomObject]@{
+  Instance=$_.InstanceName; PredictFailure=[bool]$_.PredictFailure; Reason=$_.Reason } })
+$events = @()
+foreach ($p in 'disk','Ntfs','Microsoft-Windows-Ntfs','stornvme','storahci','iaStorA','iaStorAC','iaStorAVC','volmgr','Microsoft-Windows-StorPort') {
+  try {
+    $events += @(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName=$p;Level=1,2,3;StartTime=(Get-Date).AddDays(-90)} -MaxEvents 200 -ErrorAction Stop | ForEach-Object {
+      [PSCustomObject]@{ Provider=$_.ProviderName; Id=$_.Id; Level=$_.Level; Time=$_.TimeCreated.ToUniversalTime().ToString('o');
+        Message=$(if ($_.Message) { ($_.Message -split "`n")[0].Trim() } else { '' }) } })
+  } catch {}
+}
+[PSCustomObject]@{ Disks=$disks; Reliability=$rel; Predict=$pred; Events=$events } | ConvertTo-Json -Depth 4 -Compress
+"""
+
+# (provider family, event id) -> (tier, plain-English meaning). "critical"
+# means the disk or file system is actually failing; "warning" is an early
+# sign worth watching. Anything else from these providers is listed but
+# doesn't change the verdict (e.g. disk 34, "driver disabled the write
+# cache", which RD1009's Miray RAM drive logs routinely).
+_NUC_DISK_EVENT_MEANINGS = {
+    ("disk", 7): ("critical", "bad block"),
+    ("disk", 11): ("critical", "controller error"),
+    ("disk", 51): ("critical", "I/O error during paging"),
+    ("disk", 52): ("critical", "SMART predicts the drive will fail"),
+    ("disk", 154): ("critical", "hardware error"),
+    ("ntfs", 55): ("critical", "file system corruption"),
+    ("ntfs", 98): ("critical", "volume needs chkdsk to repair it"),
+    ("ntfs", 137): ("critical", "file system transaction error"),
+    ("disk", 153): ("warning", "I/O had to be retried"),
+    ("storage", 129): ("warning", "drive stopped responding and was reset"),
+}
+
+
+def _nuc_disk_event_family(provider):
+    name = str(provider or "").lower()
+    if name == "disk":
+        return "disk"
+    if "ntfs" in name:
+        return "ntfs"
+    if name in ("stornvme", "storahci", "volmgr") or name.startswith("iastor") or "storport" in name:
+        return "storage"
+    return name
+
+
+def _as_list(value):
+    """ConvertTo-Json turns a one-item array into a bare object."""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _summarize_nuc_disk_health(unit, parsed, now=None):
+    """
+    Turn the PowerShell JSON (_NUC_DISK_HEALTH_PS) into a verdict. Pure — no
+    SSH — so tests/test_diagnostics.py can feed it captured output.
+    Returns the info dict (status ok/warn/fail, reasons, summary, disks,
+    events).
+    """
+    now = now or datetime.now(timezone.utc)
+    reliability = {str(r.get("DeviceId")): r for r in _as_list(parsed.get("Reliability")) if isinstance(r, dict)}
+    predicts = [p for p in _as_list(parsed.get("Predict")) if isinstance(p, dict)]
+
+    disks = []
+    for d in _as_list(parsed.get("Disks")):
+        if not isinstance(d, dict):
+            continue
+        rel = reliability.get(str(d.get("DeviceId")), {})
+        name = str(d.get("Name") or "").strip()
+        # MSStorageDriver_FailurePredictStatus has no device id — match on
+        # the model, which its InstanceName embeds (truncated, no spaces).
+        model_key = name.replace(" ", "").upper()[:12]
+        predict = next(
+            (p for p in predicts if model_key and model_key in str(p.get("Instance") or "").replace(" ", "").upper()),
+            None,
+        )
+        disks.append({
+            "device_id": str(d.get("DeviceId")),
+            "name": name,
+            "media": d.get("Media") or "",
+            "bus": d.get("Bus") or "",
+            "health": d.get("Health") or "",
+            "operational": d.get("Operational") or "",
+            "size_gb": d.get("SizeGB"),
+            "temperature": rel.get("Temperature"),
+            "temperature_max": rel.get("TemperatureMax"),
+            "wear": rel.get("Wear"),
+            "read_errors_total": rel.get("ReadErrorsTotal"),
+            "read_errors_uncorrected": rel.get("ReadErrorsUncorrected"),
+            "write_errors_total": rel.get("WriteErrorsTotal"),
+            "write_errors_uncorrected": rel.get("WriteErrorsUncorrected"),
+            "power_on_hours": rel.get("PowerOnHours"),
+            "predict_failure": predict.get("PredictFailure") if predict else None,
+        })
+    disk_by_number = {d["device_id"]: d["name"] for d in disks}
+
+    grouped = {}
+    for e in _as_list(parsed.get("Events")):
+        if not isinstance(e, dict):
+            continue
+        provider = str(e.get("Provider") or "")
+        event_id = e.get("Id")
+        key = (provider, event_id)
+        try:
+            when = datetime.fromisoformat(str(e.get("Time")).replace("Z", "+00:00"))
+        except ValueError:
+            when = None
+        group = grouped.setdefault(key, {"provider": provider, "id": event_id, "count": 0,
+                                         "last": None, "message": "", "disk": ""})
+        group["count"] += 1
+        if when and (group["last"] is None or when > group["last"]):
+            group["last"] = when
+            group["message"] = str(e.get("Message") or "")
+    events = []
+    for group in grouped.values():
+        tier, meaning = _NUC_DISK_EVENT_MEANINGS.get(
+            (_nuc_disk_event_family(group["provider"]), group["id"]), ("other", "")
+        )
+        match = re.search(r"\\Device\\Harddisk(\d+)\\", group["message"])
+        days_ago = (now - group["last"]).total_seconds() / 86400 if group["last"] else None
+        events.append({
+            "provider": group["provider"],
+            "id": group["id"],
+            "count": group["count"],
+            "tier": tier,
+            "meaning": meaning,
+            "message": group["message"],
+            "disk": disk_by_number.get(match.group(1), "") if match else "",
+            "last": group["last"].isoformat() if group["last"] else None,
+            "days_ago": round(days_ago, 1) if days_ago is not None else None,
+        })
+    tier_rank = {"critical": 0, "warning": 1, "other": 2}
+    events.sort(key=lambda ev: (tier_rank[ev["tier"]], ev["days_ago"] if ev["days_ago"] is not None else 999))
+
+    fail, warn = [], []
+    for d in disks:
+        label = d["name"] or f"disk {d['device_id']}"
+        if d["health"] and d["health"] != "Healthy":
+            fail.append(f"{label} reports {d['health']}")
+        if d["predict_failure"] is True:
+            fail.append(f"{label}: SMART predicts failure")
+        for field, what in (("read_errors_uncorrected", "uncorrected read"), ("write_errors_uncorrected", "uncorrected write")):
+            if isinstance(d[field], (int, float)) and d[field] > 0:
+                fail.append(f"{label}: {d[field]} {what} error(s)")
+        if isinstance(d["wear"], (int, float)) and d["wear"] >= 80:
+            warn.append(f"{label} {d['wear']}% worn")
+        if isinstance(d["temperature"], (int, float)) and d["temperature"] >= 70:
+            warn.append(f"{label} at {d['temperature']}°C")
+    for ev in events:
+        if ev["tier"] == "other":
+            continue
+        recent = ev["days_ago"] is not None and ev["days_ago"] <= 30
+        text = f"{ev['count']}x {ev['meaning']} (event {ev['provider']} {ev['id']})"
+        if ev["tier"] == "critical" and recent:
+            fail.append(text)
+        else:
+            warn.append(text)
+
+    status = "fail" if fail else ("warn" if warn else "ok")
+    reasons = fail + warn
+    flagged = [ev for ev in events if ev["tier"] != "other"]
+    detail = f"{len(disks)} drive(s), " + (
+        f"{sum(ev['count'] for ev in flagged)} failure-related event(s) in 90 days" if flagged
+        else "no failure-related events in 90 days"
+    )
+    summary = (
+        f"Disks on {unit}'s NUC look healthy — {detail}" if status == "ok"
+        else f"Disks on {unit}'s NUC need attention ({'; '.join(reasons)}) — {detail}"
+    )
+    return {"unit": unit, "status": status, "reasons": reasons, "summary": summary,
+            "disks": disks, "events": events}
+
+
+def nuc_disk_health(unit):
+    """
+    Read-only disk health for a unit's Windows NUC: drive health, SMART
+    counters, SMART predict-failure, and 90 days of disk/NTFS/storage-driver
+    events, with the ones that mean a failing disk called out. See the
+    block comment above _NUC_DISK_HEALTH_PS. Returns (info, error).
+    """
+    load_dotenv(env_path)
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, "Missing unit"
+    if uses_pve(unit):
+        return None, f"{unit} uses PVE — use NVMe Health for its disks instead"
+    row = ensure_unit_net_info(unit, needed_indexes=(3,))
+    if not row:
+        return None, f"Unit {unit} not found in net sheet"
+    host = _host_only(row[3] if len(row) > 3 else "")
+    if not host:
+        return None, f"No NUC IP for {unit}"
+    nucuser = (os.getenv("nucuser") or "").strip().strip('"').strip("'")
+    nucpass = (os.getenv("nucpass") or "").strip().strip('"').strip("'")
+    if not nucuser or not nucpass:
+        return None, "Set nucuser/nucpass in .env"
+
+    encoded = base64.b64encode(_NUC_DISK_HEALTH_PS.encode("utf-16-le")).decode("ascii")
+    command = f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"
+    raw, error = _ssh_read(host, nucuser, nucpass, command, timeout=120)
+    if error:
+        return None, error
+    if not raw:
+        return None, f"No output from NUC {host}"
+    try:
+        parsed = json.loads(raw[raw.find("{"):]) if "{" in raw else None
+    except (ValueError, TypeError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        return None, f"Could not read disk health from NUC {host}: {raw[:200]}"
+    info = _summarize_nuc_disk_health(unit, parsed)
+    info["host"] = host
+    return info, None
+
+
+
 def camera_reachability_matrix(unit):
     """
     Reach every camera, the fisheye and the speaker for a unit in one pass.
@@ -699,11 +1395,21 @@ def _parse_nvme_smart(text):
         "media_errors": r"Media and Data Integrity Errors:\s*([\d,\s]+)",
         "error_log_entries": r"Error Information Log Entries:\s*([\d,\s]+)",
         "data_units_written": r"Data Units Written:\s*([\d,\s]+)",
+        # NVMe spec's own composite-temperature counters — cumulative
+        # MINUTES the drive's temperature has spent at/above the
+        # warning/critical threshold, not just its instantaneous reading
+        # above. A drive can read a perfectly normal temperature right now
+        # and still have a nonzero count here from an earlier thermal
+        # event (e.g. a cooling problem that's since cleared) — this is
+        # the field that catches that history.
+        "warning_temp_time": r"Warning\s+Comp\.?\s*Temperature Time:\s*([\d,\s]+)",
+        "critical_temp_time": r"Critical\s+Comp\.?\s*Temperature Time:\s*([\d,\s]+)",
     }
     numeric_keys = (
         "temperature_c", "available_spare", "available_spare_threshold",
         "percentage_used", "power_on_hours", "power_cycles",
         "unsafe_shutdowns", "media_errors", "error_log_entries",
+        "warning_temp_time", "critical_temp_time",
     )
     for key, pattern in patterns.items():
         match = re.search(pattern, text)
@@ -762,6 +1468,21 @@ def _nvme_health_verdict(info):
         if status == "ok":
             status = "warn"
         reasons.append(f"{temp}C drive temperature")
+
+    # These catch a thermal event the CURRENT reading above can miss
+    # entirely — the drive may read perfectly normal right now and still
+    # have spent real time over threshold earlier (a cooling problem
+    # that's since cleared, a hot rack during a heat wave).
+    critical_temp_time = info.get("critical_temp_time")
+    if isinstance(critical_temp_time, int) and critical_temp_time > 0:
+        status = "fail"
+        reasons.append(f"critical temperature threshold hit ({critical_temp_time} min total)")
+
+    warning_temp_time = info.get("warning_temp_time")
+    if isinstance(warning_temp_time, int) and warning_temp_time > 0:
+        if status == "ok":
+            status = "warn"
+        reasons.append(f"warning temperature threshold hit ({warning_temp_time} min total)")
 
     return status, reasons
 def pve_nvme_health(unit, device=None):
@@ -868,6 +1589,329 @@ def pve_nvme_health(unit, device=None):
         "output": raw,
     })
     return info, None
+# Storage-related I/O/filesystem/ATA/NVMe error terms — shared by both the
+# dmesg and journalctl -k greps in pve_kernel_io_errors below. Deliberately
+# narrower than a bare "reset|timeout|abort" (which also matches routine,
+# unrelated USB/network resets in these logs) — ata/nvme prefixed so only
+# a storage controller's own reset/timeout/abort counts.
+_PVE_IO_ERROR_PATTERN = (
+    r"I/O error"
+    r"|blk_update_request"
+    r"|critical medium error"
+    r"|ata[0-9]+.*(exception|error|reset)"
+    r"|nvme[0-9]*n?[0-9]*.*(error|timeout|reset|abort)"
+    r"|EXT4-fs error"
+    r"|EXT4-fs.*remount.*read-only"
+    r"|XFS.*(error|corrupt)"
+    r"|btrfs.*(error|corrupt)"
+    r"|remounting filesystem read-only"
+    r"|Unrecoverable error"
+)
+def _pve_ssh_target(unit):
+    """(ip, username, password, error) for the unit's PVE host — shared setup for the three checks below."""
+    unit = str(unit or "").strip()
+    if not unit:
+        return None, None, None, "Missing unit"
+    row = ensure_unit_net_info(unit, needed_indexes=(11,))
+    if not row:
+        return None, None, None, f"Unit {unit} not found in net sheet"
+    ip = _host_only(row[11] if len(row) > 11 else "")
+    if not ip:
+        return None, None, None, f"No PVE IP for {unit}"
+    ssh_username, ssh_password, cred_error = _pve_ssh_credentials()
+    if cred_error:
+        return None, None, None, cred_error
+    return ip, ssh_username, ssh_password, None
+def _pve_ssh_read(ip, ssh_username, ssh_password, command, timeout=60):
+    """_ssh_read, but with the same actionable auth-failure hint pve_nvme_health gives."""
+    raw, error = _ssh_read(ip, ssh_username, ssh_password, command, timeout=timeout)
+    if error and "authentication failed" in error.lower():
+        return raw, (
+            f"{error}. SSH uses the Linux user only (usually root), not root@pam. "
+            "Set pvesshuser=root and pvepass in .env."
+        )
+    return raw, error
+def pve_kernel_io_errors(unit, journal_days=30):
+    """
+    SSH to the unit's PVE host and grep for storage I/O/NVMe/ATA/filesystem
+    error signatures — read-only, grep only reports. Two sources in one SSH
+    round trip:
+      - `dmesg -T`: the kernel ring buffer, only covers since the host's
+        last boot (it doesn't persist across reboots).
+      - `journalctl -k --since <journal_days> days ago`: the persisted
+        journal, so it also catches an error from an earlier boot that
+        dmesg's buffer has since dropped.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    try:
+        journal_days = int(journal_days)
+    except (TypeError, ValueError):
+        journal_days = 30
+    journal_days = max(1, min(journal_days, 365))
+
+    ip, ssh_username, ssh_password, error = _pve_ssh_target(unit)
+    if error:
+        return None, error
+    unit = str(unit or "").strip()
+
+    pattern = shlex.quote(_PVE_IO_ERROR_PATTERN)
+    since = shlex.quote(f"{journal_days} days ago")
+    command = (
+        "echo __DMESG__; "
+        f"dmesg -T 2>&1 | grep -iE {pattern} | tail -n 40; "
+        "echo __JOURNAL__; "
+        f"journalctl -k --since {since} --no-pager 2>&1 | grep -iE {pattern} | tail -n 100"
+    )
+    raw, error = _pve_ssh_read(ip, ssh_username, ssh_password, command)
+    if error:
+        return None, error
+
+    dmesg_section, _, journal_section = (raw or "").partition("__JOURNAL__")
+    dmesg_lines = [
+        line for line in dmesg_section.replace("__DMESG__", "").splitlines() if line.strip()
+    ]
+    journal_lines = [line for line in journal_section.splitlines() if line.strip()]
+
+    if dmesg_lines or journal_lines:
+        status = "fail" if (len(dmesg_lines) + len(journal_lines)) >= 10 else "warn"
+        summary = (
+            f"{unit} ({ip}): {len(dmesg_lines)} I/O error line(s) in dmesg (since last boot), "
+            f"{len(journal_lines)} in the last {journal_days}d of journal"
+        )
+    else:
+        status = "ok"
+        summary = f"{unit} ({ip}): no I/O errors in dmesg or the last {journal_days}d of journal"
+
+    return {
+        "unit": unit,
+        "host": ip,
+        "status": status,
+        "summary": summary,
+        "journal_days": journal_days,
+        "dmesg_error_count": len(dmesg_lines),
+        "dmesg_lines": dmesg_lines,
+        "journal_error_count": len(journal_lines),
+        "journal_lines": journal_lines,
+    }, None
+def pve_boot_errors(unit):
+    """
+    SSH to the unit's PVE host and read every error-or-worse (err/crit/
+    alert/emerg) journal entry since the host's last boot — read-only.
+
+    Broader net than pve_kernel_io_errors: not limited to the kernel
+    facility or to I/O-shaped wording, so it also catches a service
+    (mdadm, zed/ZFS, a filesystem repair tool) reporting real trouble
+    through its own log lines that never go through dmesg at all.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    ip, ssh_username, ssh_password, error = _pve_ssh_target(unit)
+    if error:
+        return None, error
+    unit = str(unit or "").strip()
+
+    command = "journalctl -b -p err --no-pager 2>&1 | tail -n 100"
+    raw, error = _pve_ssh_read(ip, ssh_username, ssh_password, command)
+    if error:
+        return None, error
+
+    lines = [
+        line for line in (raw or "").splitlines()
+        if line.strip() and "-- No entries --" not in line and "-- Boot " not in line
+    ]
+
+    if lines:
+        status = "fail" if len(lines) >= 10 else "warn"
+        summary = f"{unit} ({ip}): {len(lines)} error-or-worse journal entr{'y' if len(lines) == 1 else 'ies'} since last boot"
+    else:
+        status = "ok"
+        summary = f"{unit} ({ip}): no error-or-worse journal entries since last boot"
+
+    return {
+        "unit": unit,
+        "host": ip,
+        "status": status,
+        "summary": summary,
+        "error_count": len(lines),
+        "lines": lines,
+    }, None
+def pve_filesystem_health(unit):
+    """
+    SSH to the unit's PVE host and check whether a filesystem is already
+    mounted read-only — read-only itself (findmnt/lsblk only report).
+
+    ext4's default errors=remount-ro mount option means a box that hit
+    persistent I/O errors often SILENTLY remounts root read-only rather
+    than crashing — services keep running (until they try to write) and
+    nothing pages anyone, so this is the single clearest "this already
+    happened" signal on the box: cheaper and more certain than inferring
+    it from log grepping. lsblk's own RO column backstops findmnt for any
+    OTHER mounted block device besides root.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    ip, ssh_username, ssh_password, error = _pve_ssh_target(unit)
+    if error:
+        return None, error
+    unit = str(unit or "").strip()
+
+    command = (
+        "echo __FINDMNT__; "
+        "findmnt -P -no SOURCE,FSTYPE,OPTIONS / 2>&1; "
+        "echo __LSBLK__; "
+        "lsblk -P -o NAME,RO,RM,SIZE,FSTYPE,MOUNTPOINT 2>&1"
+    )
+    raw, error = _pve_ssh_read(ip, ssh_username, ssh_password, command)
+    if error:
+        return None, error
+
+    findmnt_section, _, lsblk_section = (raw or "").partition("__LSBLK__")
+    findmnt_section = findmnt_section.replace("__FINDMNT__", "").strip()
+
+    def _parse_pairs(line):
+        return dict(re.findall(r'(\w+)="([^"]*)"', line))
+
+    findmnt_line = next((l for l in findmnt_section.splitlines() if l.strip()), "")
+    findmnt_info = _parse_pairs(findmnt_line) if findmnt_line else {}
+    root_options = findmnt_info.get("OPTIONS", "")
+    root_fs_read_only = bool(root_options) and "ro" in root_options.split(",")
+
+    read_only_devices = []
+    for line in lsblk_section.splitlines():
+        if not line.strip():
+            continue
+        info = _parse_pairs(line)
+        mount = info.get("MOUNTPOINT", "")
+        # RM=1 (removable, e.g. a CD-ROM entry Proxmox sometimes lists) is
+        # legitimately read-only and not a finding. Also require an actual
+        # MOUNTPOINT — caught live on RD3320: Proxmox's own LVM-thin data
+        # volume (`pve-data`, the thin pool's own plumbing LV, no FSTYPE,
+        # never mounted) always reports RO=1 on every stock Proxmox host,
+        # which would otherwise flag every single one of them as "failed".
+        if info.get("RO") == "1" and info.get("RM") != "1" and mount:
+            name = info.get("NAME", "?")
+            read_only_devices.append(f"{name} ({mount})")
+
+    if root_fs_read_only or read_only_devices:
+        status = "fail"
+        parts = []
+        if root_fs_read_only:
+            parts.append(f"root ({findmnt_info.get('SOURCE', '/')}) is mounted read-only")
+        if read_only_devices:
+            parts.append("read-only device(s): " + ", ".join(read_only_devices))
+        summary = f"{unit} ({ip}): " + "; ".join(parts)
+    else:
+        status = "ok"
+        summary = f"{unit} ({ip}): root filesystem and all block devices are read-write"
+
+    return {
+        "unit": unit,
+        "host": ip,
+        "status": status,
+        "summary": summary,
+        "root_fs_read_only": root_fs_read_only,
+        "root_fs_source": findmnt_info.get("SOURCE", ""),
+        "root_fs_fstype": findmnt_info.get("FSTYPE", ""),
+        "root_fs_options": root_options,
+        "read_only_devices": read_only_devices,
+    }, None
+def pve_link_stats(unit):
+    """
+    SSH to the unit's PVE host and read `ip -s link` — read-only, a pure
+    stats dump. Uses `-j` (JSON) rather than scraping the columnar text
+    output, which iproute2 has changed the spacing/column-set of before;
+    confirmed live (2026-09-30, iproute2 6.1.0) that JSON stats live under
+    stats64.rx/tx with errors/dropped/over_errors (RX) and
+    errors/dropped/carrier_errors/collisions (TX) — any interface with a
+    nonzero value in any of those is flagged, so a tech scanning a box with
+    a dozen interfaces (physical NICs, the bond, the bridge, per-VM taps)
+    doesn't have to eyeball every row by hand. Flagged interfaces are
+    listed first in the result, ahead of the full interface list.
+    Returns (info, error).
+    """
+    load_dotenv(env_path)
+    ip, ssh_username, ssh_password, error = _pve_ssh_target(unit)
+    if error:
+        return None, error
+    unit = str(unit or "").strip()
+
+    raw, error = _pve_ssh_read(ip, ssh_username, ssh_password, "ip -j -s link 2>&1")
+    if error:
+        return None, error
+    raw = (raw or "").strip()
+    if not raw:
+        return None, f"No `ip -s link` output from {ip}"
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None, f"Could not parse `ip -s link` JSON output from {ip} (unexpected iproute2 version?): {raw[:200]}"
+    if not isinstance(parsed, list):
+        return None, f"Unexpected `ip -s link` JSON shape from {ip}"
+
+    def _n(d, key):
+        try:
+            return int((d or {}).get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    interfaces = []
+    for item in parsed:
+        stats = item.get("stats64") or item.get("stats") or {}
+        rx = stats.get("rx") or {}
+        tx = stats.get("tx") or {}
+        rx_errors = _n(rx, "errors")
+        rx_dropped = _n(rx, "dropped")
+        rx_over_errors = _n(rx, "over_errors")
+        tx_errors = _n(tx, "errors")
+        tx_dropped = _n(tx, "dropped")
+        tx_carrier_errors = _n(tx, "carrier_errors")
+        tx_collisions = _n(tx, "collisions")
+        flagged = bool(
+            rx_errors or rx_dropped or rx_over_errors
+            or tx_errors or tx_dropped or tx_carrier_errors or tx_collisions
+        )
+        interfaces.append({
+            "name": item.get("ifname") or "?",
+            "state": item.get("operstate") or "",
+            "flags": item.get("flags") or [],
+            "rx_bytes": _n(rx, "bytes"),
+            "rx_packets": _n(rx, "packets"),
+            "rx_errors": rx_errors,
+            "rx_dropped": rx_dropped,
+            "rx_over_errors": rx_over_errors,
+            "tx_bytes": _n(tx, "bytes"),
+            "tx_packets": _n(tx, "packets"),
+            "tx_errors": tx_errors,
+            "tx_dropped": tx_dropped,
+            "tx_carrier_errors": tx_carrier_errors,
+            "tx_collisions": tx_collisions,
+            "flagged": flagged,
+        })
+
+    if not interfaces:
+        return None, f"No interfaces parsed from `ip -s link` on {ip}"
+
+    flagged_interfaces = [iface for iface in interfaces if iface["flagged"]]
+    if flagged_interfaces:
+        status = "warn"
+        summary = (
+            f"{unit} ({ip}): {len(flagged_interfaces)} of {len(interfaces)} interface(s) "
+            "have dropped packets or errors: "
+            + ", ".join(iface["name"] for iface in flagged_interfaces)
+        )
+    else:
+        status = "ok"
+        summary = f"{unit} ({ip}): all {len(interfaces)} interfaces clean — no drops or errors"
+
+    return {
+        "unit": unit,
+        "host": ip,
+        "status": status,
+        "summary": summary,
+        "interfaces": interfaces,
+        "flagged_interfaces": flagged_interfaces,
+    }, None
 def _zabbix_call(method, params):
     """One JSON-RPC call to the Zabbix API. Raises on transport/API error."""
     url = (os.getenv("zab_url") or "").strip()
@@ -1031,11 +2075,26 @@ def detect_early_morning_outage_pattern(unit, region_code=None, days=21):
     return True, detail, confidence, sorted(matching_dates)
 
 
-def zabbix_active_problems_by_unit():
+ZABBIX_PROBLEM_MAX_AGE_DAYS = 7
+
+
+def zabbix_active_problems_by_unit(max_age_days=ZABBIX_PROBLEM_MAX_AGE_DAYS):
     """
-    Every currently-active Zabbix problem, fleet-wide in two calls, grouped
-    by unit. Read-only (problem.get / trigger.get — neither acknowledges or
-    closes anything). Returns ({unit: [problem, ...]}, error).
+    Every currently-active Zabbix problem within the last max_age_days,
+    fleet-wide in two calls, grouped by unit. Read-only (problem.get /
+    trigger.get — neither acknowledges or closes anything). Returns
+    ({unit: [problem, ...]}, error).
+
+    Andrew's own request, 2026-09-16: a problem that's been open for
+    weeks isn't useful NOC-alert noise the way a fresh one is — by the
+    time something has sat open that long, either nobody's chasing it as
+    an active problem or it belongs on a different, slower-moving list
+    entirely, not mixed in with what a tech should look at right now.
+    Filtered by "clock" (problem.get's own open-since timestamp) before
+    the trigger/host lookup, so an old problem also doesn't cost a
+    trigger.get round trip for a host that would just get filtered out
+    anyway. max_age_days=None keeps every open problem, same as before
+    this filter existed, for a caller that genuinely wants the full list.
 
     This used to be event.get(value=1, sort by eventid DESC, limit 500) —
     which is NOT "the 500 currently active problems," it's "the 500 most
@@ -1057,11 +2116,14 @@ def zabbix_active_problems_by_unit():
     fleet, not one per problem (checked live: ~1,400 problems, ~1.2s total
     for both calls combined).
     """
+    params = {
+        "output": ["eventid", "objectid", "name", "severity", "clock"],
+        "recent": False,
+    }
+    if max_age_days is not None:
+        params["time_from"] = int(time.time() - max_age_days * 86400)
     try:
-        problems = _zabbix_call("problem.get", {
-            "output": ["eventid", "objectid", "name", "severity", "clock"],
-            "recent": False,
-        })
+        problems = _zabbix_call("problem.get", params)
     except Exception as exc:
         return None, f"Zabbix problem lookup failed: {exc}"
     problems = problems or []
@@ -1100,6 +2162,44 @@ def zabbix_active_problems_by_unit():
             "clock": int(problem.get("clock") or 0),
         })
     return by_unit, None
+# Same alert SNUC-Watch fires that the camera-outage glyph looks for
+# client-side (see CAMERA_OUTAGE_ALERT_PATTERN in issues_results.js) —
+# kept as one regex here too rather than shipping the pattern only in JS,
+# so the fleet-wide report and the per-unit glyph can't drift apart.
+CAMERA_OUTAGE_ALERT_PATTERN = re.compile(
+    r"camera image buffer.*remained below.*for \d+ minutes", re.IGNORECASE
+)
+def fleet_camera_outage_report():
+    """
+    Fleet-wide list of units with the SNUC-Watch "Camera image buffer on
+    /mnt/ram has remained below X% for N minutes" alert currently open —
+    the server-side, whole-fleet counterpart to the camera-outage glyph's
+    lazy per-unit check, for a tech who wants the full list up front
+    instead of finding these one command-menu open at a time. Read-only.
+    Returns (rows, error).
+    """
+    by_unit, error = zabbix_active_problems_by_unit()
+    if error:
+        return None, error
+    by_unit = by_unit or {}
+
+    rows = []
+    for unit, problems in by_unit.items():
+        matches = [
+            p for p in problems
+            if CAMERA_OUTAGE_ALERT_PATTERN.search(str(p.get("name") or ""))
+        ]
+        if not matches:
+            continue
+        problem = max(matches, key=lambda p: p.get("clock") or 0)
+        rows.append({
+            "unit": unit,
+            "name": problem.get("name"),
+            "clock": problem.get("clock"),
+            "has_scrypted": uses_pve(unit),
+        })
+    rows.sort(key=lambda r: r.get("clock") or 0)
+    return rows, None
 def combined_power_infra_alerts():
     """
     Zabbix's active problems and VRM's active battery alarms, merged by
@@ -1343,6 +2443,142 @@ def unit_network_latency_history(unit, hours=24, loss_aggregate="avg"):
         "resolution": "hourly average" if use_trends else "native (~3min)",
         "charts": charts,
     }, None
+# Same trigger every unit's Router/Switch host in Zabbix carries — checked
+# live, 2026-09-17: "ICMP Ping: Unavailable by ICMP ping" on RD3336-Router
+# fired/resolved 6 times (12 events) in the trailing 7 days.
+_ZABBIX_FLAP_TRIGGER_DESCRIPTION = "ICMP Ping: Unavailable by ICMP ping"
+_ZABBIX_FLAP_DEVICE_SUFFIXES = ("-Router", "-Switch")
+# Zabbix API calls are POSTs (no URL-length limit the way ERP's chunked GET
+# lookups have — see _erp_heads_for_mu_trailers), but a few thousand
+# objectids in one event.get is still worth chunking defensively rather
+# than assuming the server has no size limit of its own.
+_ZABBIX_FLAP_EVENT_CHUNK = 500
+def fleet_zabbix_flap_report(days=7, min_transitions=3, limit=50):
+    """
+    Fleet-wide "who's flapping," read directly from Zabbix's own Router/
+    Switch ICMP-availability trigger history — a genuinely different,
+    complementary signal from unit_history's own Flap Report (see
+    fleet_flap_report). That one only ever sees a unit a tech has
+    actually clicked Validate on (or the handful of always-on scheduled
+    exceptions), so with PAUSE_AUTOMATED_TASKS holding the periodic
+    revalidation jobs off, most of the fleet has no recorded history at
+    all. Caught live, 2026-09-17 (RD3336): visibly flapping the whole
+    time on its own Network Latency graph, with zero unit_history
+    entries because nobody had happened to re-validate it recently.
+    Zabbix, in contrast, has been watching every unit's Router/Switch
+    continuously and independently this whole time regardless of ticket
+    status or the pause, so this reads straight from ITS OWN trigger
+    state history instead of trying to re-derive "flapping" from raw
+    ping-loss numbers here — Zabbix already does that threshold
+    evaluation per poll, at native (~3min) resolution, not diluted by
+    the hourly averaging unit_network_latency_history's own docstring
+    already warns can hide a real, shorter outage.
+
+    Scoped to Router+Switch only (not NUC/SNUC-*/PVE), same reasoning
+    NETWORK_LATENCY_METRICS's own comment gives: those are the two
+    device types every unit in the fleet has, with an identical trigger
+    namespace, so this stays universal instead of branching per device
+    type for a first version.
+
+    "transitions" counts PROBLEM<->RESOLVED flips within the window —
+    the same definition unit_history.flap_summary uses, so the same
+    min_transitions threshold means the same thing in both reports.
+    down_seconds is real downtime duration (summed PROBLEM-to-RESOLVED
+    gaps, open-ended if still down) — something the poll-based Flap
+    Report can't give at all, since it only ever samples point-in-time.
+
+    Returns (units, error). units: [{"unit", "days", "transitions",
+    "down_seconds", "last_seen", "currently_healthy", "timeline",
+    "device"}], worst (most transitions) first. device is "Router",
+    "Switch", or "Router+Switch" depending on which host(s) actually
+    flapped — a tech cares that this unit's connectivity flapped, not
+    which specific device technically carried the trigger.
+    """
+    try:
+        triggers = _zabbix_call("trigger.get", {
+            "output": ["triggerid"],
+            "selectHosts": ["host"],
+            "filter": {"description": _ZABBIX_FLAP_TRIGGER_DESCRIPTION},
+        })
+    except Exception as exc:
+        return None, f"Zabbix trigger lookup failed: {exc}"
+
+    trigger_unit = {}
+    for trigger in triggers or []:
+        hosts = trigger.get("hosts") or []
+        if not hosts:
+            continue
+        host_name = str(hosts[0].get("host") or "")
+        if not host_name.endswith(_ZABBIX_FLAP_DEVICE_SUFFIXES):
+            continue
+        match = _ZABBIX_HOST_UNIT_RE.match(host_name)
+        if not match:
+            continue
+        trigger_unit[trigger["triggerid"]] = (match.group(1).upper(), match.group(2))
+    if not trigger_unit:
+        return [], None
+
+    time_from = int(time.time() - days * 86400)
+    trigger_ids = list(trigger_unit.keys())
+    events_by_unit = {}
+    for start in range(0, len(trigger_ids), _ZABBIX_FLAP_EVENT_CHUNK):
+        chunk = trigger_ids[start:start + _ZABBIX_FLAP_EVENT_CHUNK]
+        try:
+            events = _zabbix_call("event.get", {
+                "output": ["clock", "value", "objectid"],
+                "objectids": chunk,
+                "time_from": time_from,
+                "sortfield": "clock",
+                "sortorder": "ASC",
+            })
+        except Exception as exc:
+            return None, f"Zabbix event lookup failed: {exc}"
+        for event in events or []:
+            unit, device = trigger_unit.get(event.get("objectid"), (None, None))
+            if not unit:
+                continue
+            events_by_unit.setdefault(unit, []).append({
+                "ts": int(event["clock"]),
+                "healthy": event.get("value") == "0",
+                "device": device,
+            })
+
+    now = time.time()
+    results = []
+    for unit, events in events_by_unit.items():
+        events.sort(key=lambda e: e["ts"])
+        transitions = 0
+        previous = None
+        devices = set()
+        down_seconds = 0
+        pending_down_ts = None
+        for event in events:
+            devices.add(event["device"])
+            if previous is not None and event["healthy"] != previous:
+                transitions += 1
+            if not event["healthy"]:
+                pending_down_ts = event["ts"]
+            elif pending_down_ts is not None:
+                down_seconds += event["ts"] - pending_down_ts
+                pending_down_ts = None
+            previous = event["healthy"]
+        if pending_down_ts is not None:
+            down_seconds += now - pending_down_ts
+        if transitions < int(min_transitions):
+            continue
+        last = events[-1]
+        results.append({
+            "unit": unit,
+            "days": days,
+            "transitions": transitions,
+            "down_seconds": round(down_seconds),
+            "last_seen": datetime.fromtimestamp(last["ts"]).strftime("%Y-%m-%d %H:%M:%S"),
+            "currently_healthy": last["healthy"],
+            "timeline": [{"ts": e["ts"], "healthy": e["healthy"]} for e in events],
+            "device": "+".join(sorted(devices)),
+        })
+    results.sort(key=lambda r: (-r["transitions"], -r["down_seconds"], r["unit"]))
+    return results[:int(limit)], None
 _SWITCH_UPTIME_UNIT_SECONDS = {"day": 86400, "hour": 3600, "min": 60, "sec": 1}
 def _parse_switch_uptime_seconds(text):
     """
@@ -1474,7 +2710,133 @@ def _reboot_bounce_note(switch_up_since, loss_points, tolerance_seconds):
         "no elevated router loss anywhere near when the switch came up either — "
         "consistent with a manual/relay bounce, not a network outage that went unlogged"
     )
-def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
+def _verdict_for_window(window_start, window_end, switch_up_since, tolerance_seconds):
+    """
+    Classify ONE loss window against the switch's current uptime, same
+    four-way read unit_power_vs_cell_outage's docstring describes. Returns
+    (verdict, reason, case) — `case` is "power_edge" / "cell_before" /
+    "cell_after_reboot" / "inconclusive", so the caller can still attach
+    the reboot-bounce note only to the case it applies to.
+    """
+    if abs(switch_up_since - window_end) <= tolerance_seconds:
+        return "power_outage", "switch came back up right when pings resumed", "power_edge"
+    if switch_up_since <= window_start - tolerance_seconds:
+        return (
+            "cell_outage",
+            "switch has been up continuously since before the outage began",
+            "cell_before",
+        )
+    if switch_up_since > window_end + tolerance_seconds:
+        # The switch's CURRENT uptime doesn't reach back to this window at
+        # all — it's since rebooted again for some other reason. See the
+        # docstring's third case: this window's own cause didn't coincide
+        # with a switch restart we can see, which points to cellular,
+        # hedged because we can't rule out an unlogged reboot in between.
+        return (
+            "cell_outage",
+            (
+                "switch's current uptime starts well after this loss window ended (it's "
+                "since rebooted again for an unrelated reason) — likely cellular, since "
+                "whatever caused this window didn't coincide with a switch restart, though "
+                "this can't rule out an earlier reboot this check has no record of"
+            ),
+            "cell_after_reboot",
+        )
+    # Switch rebooted somewhere INSIDE the window itself — genuinely
+    # ambiguous (could be power loss mid-outage, could be an unrelated
+    # coincidental reboot); not enough to lean either way.
+    return (
+        "inconclusive",
+        "switch's own uptime doesn't line up with either edge of the loss window",
+        "inconclusive",
+    )
+def _ticket_created_at_epoch(issue_id):
+    """
+    (epoch_seconds, label, error) for when the ERP Issue was opened — used
+    to pick which loss window a ticket is actually about when more than
+    one qualifies. Frappe's own "creation" field has no timezone suffix;
+    this fleet's ERP site (like every other ERP timestamp this codebase
+    already displays — see _ARIZONA_TZ) is configured in Arizona local
+    time, not UTC, so it's parsed as such rather than assumed UTC.
+
+    Fails soft: any lookup/parse problem here should degrade the caller to
+    its duration fallback, not break the whole diagnostic, so this never
+    raises — errors come back as the third tuple element instead.
+    """
+    issue_id = str(issue_id or "").strip()
+    if not issue_id:
+        return None, "", "Missing issue_id"
+    doc, error = _fetch_erp_issue_doc(issue_id)
+    if error:
+        return None, "", error
+    raw = str((doc or {}).get("creation") or "").strip()
+    if not raw:
+        return None, "", f"Issue {issue_id} has no creation timestamp"
+    raw = raw.split(".", 1)[0]  # drop the microseconds Frappe includes
+    try:
+        naive = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None, "", f"Could not parse Issue {issue_id} creation timestamp: {raw}"
+    localized = naive.replace(tzinfo=_ARIZONA_TZ)
+    return localized.timestamp(), localized.strftime("%Y-%m-%d %H:%M %Z"), None
+def _closest_window_to_ticket(scored_windows, ticket_created_at):
+    """
+    Of `scored_windows`, the one whose interval is closest to when the
+    ticket was opened — a window that CONTAINS ticket_created_at wins
+    outright (gap 0); otherwise the smallest gap to either edge wins.
+    Returns None (not a guess) when it can't decide: no windows, or two+
+    windows tie for closest — the caller falls back to duration then.
+    """
+    if ticket_created_at is None or not scored_windows:
+        return None
+    def gap(window):
+        if window["start"] <= ticket_created_at <= window["end"]:
+            return 0.0
+        return min(
+            abs(ticket_created_at - window["start"]),
+            abs(ticket_created_at - window["end"]),
+        )
+    ranked = sorted(scored_windows, key=gap)
+    if len(ranked) >= 2 and gap(ranked[0]) == gap(ranked[1]):
+        return None
+    return ranked[0]
+_SWITCH_UPTIME_CACHE = {}
+_SWITCH_UPTIME_CACHE_LOCK = threading.Lock()
+# Safety ceiling: re-confirm over SSH at least this often even when no new
+# loss window shows up, since a reboot that never dipped router ICMP loss
+# above _POWER_VS_CELL_LOSS_THRESHOLD would otherwise go undetected forever
+# (see unit_power_vs_cell_outage's "cell_after_reboot" case, which already
+# treats that as possible rather than provably absent).
+_SWITCH_UPTIME_CACHE_MAX_AGE_SEC = 6 * 3600
+def _cached_switch_up_since(unit, newest_window_end):
+    """
+    Reuse a prior SSH'd switch uptime instead of asking the switch again,
+    when nothing has happened since that would make the answer stale:
+    every loss window the caller is about to score was already scored as
+    of the last real check, and that check isn't older than the safety
+    ceiling above. `switch_up_since` (a fixed point in time, assuming no
+    reboot) is what carries forward — `switch_uptime_seconds` is just
+    "now minus that", so it grows correctly between checks with no SSH at
+    all. Returns (switch_up_since, uptime_text) or (None, None) on a miss.
+    """
+    now = time.time()
+    with _SWITCH_UPTIME_CACHE_LOCK:
+        cached = _SWITCH_UPTIME_CACHE.get(unit)
+    if not cached:
+        return None, None
+    if cached["checked_at"] < newest_window_end:
+        return None, None
+    if now - cached["checked_at"] > _SWITCH_UPTIME_CACHE_MAX_AGE_SEC:
+        return None, None
+    return cached["switch_up_since"], cached["uptime_text"]
+def _store_switch_up_since(unit, switch_up_since, uptime_text):
+    with _SWITCH_UPTIME_CACHE_LOCK:
+        _SWITCH_UPTIME_CACHE[unit] = {
+            "switch_up_since": switch_up_since,
+            "uptime_text": uptime_text,
+            "checked_at": time.time(),
+        }
+def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14, issue_id=None):
     """
     Power outage vs. cell/carrier outage for a down unit — automates the
     comparison a tech makes by hand: pull the switch's own uptime (when
@@ -1511,6 +2873,21 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
       parse) comes back inconclusive rather than guessed at — a lead,
       same "confidence, not certainty" spirit as the shading/dead-panel
       checks, not a verdict to act on blind.
+
+    When multiple qualifying loss windows fall in range, picking which one
+    the TICKET is actually about — not just which one looks most severe —
+    matters. Andrew's rule, in priority order:
+      1. If an `issue_id` is given, the window whose interval contains (or
+         sits closest to) the ERP ticket's own creation time is the
+         relevant one — that's the direct signal for "which outage is
+         this ticket about," more reliable than a guess based on shape.
+      2. Only when that's inconclusive (no issue_id, the ERP lookup
+         failed, or two windows tie for closest to the ticket's creation
+         time) does it fall back to the window with the LONGER duration —
+         a brief power blip doesn't outrank a longer carrier outage just
+         because it happened more recently.
+    Windows that all agree still point at one verdict regardless of which
+    one gets picked to display.
 
     Returns (info, error).
     """
@@ -1597,65 +2974,124 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
             ),
         }, None
 
-    # A real loss window exists — now it's worth the SSH round trip to
-    # find out when the switch itself last came up.
-    uptime_info, uptime_error = get_robofiber_uptime(unit)
-    if uptime_error:
-        return None, uptime_error
-    uptime_text = (uptime_info or {}).get("uptime") or ""
-    switch_uptime_seconds = _parse_switch_uptime_seconds(uptime_text)
-    if switch_uptime_seconds is None:
-        return None, f"Could not parse switch uptime from: {uptime_text or '(empty)'}"
-
+    # A real loss window exists — worth an SSH round trip to find out when
+    # the switch itself last came up, unless a previous check already
+    # covered every window in range and isn't stale (see
+    # _cached_switch_up_since): a switch's uptime only moves forward
+    # between reboots, so "now minus a previously-confirmed up-since" is
+    # exactly what a fresh SSH would report, at zero extra cost.
+    newest_window_end = windows[-1][1] / 1000
+    switch_up_since, uptime_text = _cached_switch_up_since(unit, newest_window_end)
     now = time.time()
-    switch_up_since = now - switch_uptime_seconds
+    if switch_up_since is None:
+        uptime_info, uptime_error = get_robofiber_uptime(unit)
+        if uptime_error:
+            return None, uptime_error
+        uptime_text = (uptime_info or {}).get("uptime") or ""
+        switch_uptime_seconds = _parse_switch_uptime_seconds(uptime_text)
+        if switch_uptime_seconds is None:
+            return None, f"Could not parse switch uptime from: {uptime_text or '(empty)'}"
+        now = time.time()
+        switch_up_since = now - switch_uptime_seconds
+        _store_switch_up_since(unit, switch_up_since, uptime_text)
+    else:
+        switch_uptime_seconds = now - switch_up_since
+
     switch_uptime_label = _format_switch_uptime_seconds(switch_uptime_seconds)
     switch_up_since_label = datetime.fromtimestamp(switch_up_since, tz=_ARIZONA_TZ).strftime("%Y-%m-%d %H:%M %Z")
 
-    # Most recent window first — same precise edge-matching as always;
-    # older windows (if any) only come into play in the "since rebooted
-    # for some other reason" branch below.
-    window_start_ms, window_end_ms, window_points = windows[-1]
+    # Classify every qualifying window against the switch's (single, known)
+    # current uptime, oldest first — not just the most recent one — so a
+    # mix of verdicts among them can be resolved by duration rather than
+    # blindly trusting whichever happened last.
+    scored_windows = []
+    for w_start_ms, w_end_ms, w_points in windows:
+        w_start = w_start_ms / 1000
+        w_end = w_end_ms / 1000
+        w_verdict, w_reason, w_case = _verdict_for_window(
+            w_start, w_end, switch_up_since, tolerance_seconds
+        )
+        scored_windows.append({
+            "start": w_start,
+            "end": w_end,
+            "points": w_points,
+            "verdict": w_verdict,
+            "reason": w_reason,
+            "case": w_case,
+            "duration": w_end - w_start,
+        })
+
+    # Prefer a definite verdict over "inconclusive" as the pool to pick
+    # from. WHICH window gets picked, when more than one qualifies, is
+    # decided in priority order:
+    #   1. The one closest to (or containing) the ticket's own creation
+    #      time, when issue_id resolves to one and it clearly points at a
+    #      single window — the direct signal for "which outage is this
+    #      ticket about."
+    #   2. Otherwise, the one that lasted LONGER — a brief power blip
+    #      doesn't outrank a longer carrier outage just because it
+    #      happened more recently or because the ticket lookup failed.
+    definite_windows = [w for w in scored_windows if w["verdict"] != "inconclusive"]
+    candidates = definite_windows or scored_windows
+
+    ticket_created_at = None
+    ticket_created_label = ""
+    ticket_lookup_error = None
+    if issue_id:
+        ticket_created_at, ticket_created_label, ticket_lookup_error = _ticket_created_at_epoch(issue_id)
+
+    chosen = _closest_window_to_ticket(candidates, ticket_created_at) if ticket_created_at is not None else None
+    picked_by = "ticket_creation"
+    if chosen is None:
+        chosen = max(candidates, key=lambda w: (w["duration"], w["end"]))
+        picked_by = "duration"
+
+    verdict = chosen["verdict"]
+    reason = chosen["reason"]
+    window_start = chosen["start"]
+    window_end = chosen["end"]
+    window_points = chosen["points"]
     older_window_count = len(windows) - 1
-    window_start = window_start_ms / 1000
-    window_end = window_end_ms / 1000
     window_start_label = datetime.fromtimestamp(window_start, tz=_ARIZONA_TZ).strftime("%Y-%m-%d %H:%M %Z")
     window_end_label = datetime.fromtimestamp(window_end, tz=_ARIZONA_TZ).strftime("%H:%M %Z")
 
-    if abs(switch_up_since - window_end) <= tolerance_seconds:
-        verdict = "power_outage"
-        reason = "switch came back up right when pings resumed"
-    elif switch_up_since <= window_start - tolerance_seconds:
-        verdict = "cell_outage"
-        reason = "switch has been up continuously since before the outage began"
-    elif switch_up_since > window_end + tolerance_seconds:
-        # The switch's CURRENT uptime doesn't reach back to this window
-        # at all — it's since rebooted again for some other reason. See
-        # the docstring's third case: this window's own cause didn't
-        # coincide with a switch restart we can see, which points to
-        # cellular, hedged because we can't rule out an unlogged reboot
-        # in between.
-        verdict = "cell_outage"
-        reason = (
-            "switch's current uptime starts well after this loss window ended (it's "
-            "since rebooted again for an unrelated reason) — likely cellular, since "
-            "whatever caused this window didn't coincide with a switch restart, though "
-            "this can't rule out an earlier reboot this check has no record of"
-        )
-        if older_window_count:
+    other_candidates = [w for w in candidates if w is not chosen]
+    if other_candidates:
+        if picked_by == "ticket_creation":
             reason += (
-                f"; {older_window_count} earlier {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ window(s) "
-                f"also found in the last {hours}h, same read likely applies to those too"
+                f"; picked over {len(other_candidates)} other qualifying window(s) in the last "
+                f"{hours}h as the one matching the ticket's own creation time ({ticket_created_label})"
             )
+        elif ticket_created_at is not None:
+            reason += (
+                f"; the ticket's creation time ({ticket_created_label}) didn't clearly point at one "
+                f"of the {len(other_candidates)} qualifying window(s) over the others, so the "
+                "longest-lasting one was used instead"
+            )
+        elif ticket_lookup_error:
+            reason += (
+                f"; could not check the ticket's creation time ({ticket_lookup_error}), so the "
+                f"longest-lasting of {len(other_candidates)} other qualifying window(s) was used instead"
+            )
+        else:
+            disagreeing = [w for w in other_candidates if w["verdict"] != verdict]
+            if disagreeing:
+                kinds = ", ".join(sorted({w["verdict"].replace("_", " ") for w in disagreeing}))
+                reason += (
+                    f"; {len(disagreeing)} other {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ window(s) in the "
+                    f"last {hours}h read as {kinds} but lasted less time — the longer outage is "
+                    "treated as the relevant one"
+                )
+            elif chosen["case"] == "cell_after_reboot" and older_window_count:
+                reason += (
+                    f"; {older_window_count} earlier {_POWER_VS_CELL_LOSS_THRESHOLD:g}%+ window(s) "
+                    f"also found in the last {hours}h, same read likely applies to those too"
+                )
+
+    if chosen["case"] == "cell_after_reboot":
         bounce_note = _reboot_bounce_note(switch_up_since, loss_points, tolerance_seconds)
         if bounce_note:
             reason += f"; the switch's own reboot {bounce_note}"
-    else:
-        # Switch rebooted somewhere INSIDE the window itself — genuinely
-        # ambiguous (could be power loss mid-outage, could be an
-        # unrelated coincidental reboot); not enough to lean either way.
-        verdict = "inconclusive"
-        reason = "switch's own uptime doesn't line up with either edge of the loss window"
 
     summary = (
         f"{unit} — {verdict.replace('_', ' ')}: {reason}. "
@@ -1680,9 +3116,11 @@ def unit_power_vs_cell_outage(unit, subject="", hours=24 * 14):
         "loss_window_end": window_end,
         "loss_window_points": window_points,
         "loss_threshold": _POWER_VS_CELL_LOSS_THRESHOLD,
+        "window_picked_by": picked_by,
+        "ticket_created_at": ticket_created_at,
         "summary": summary,
     }, None
-def fleet_power_vs_cell_outage_status(units, max_workers=8):
+def fleet_power_vs_cell_outage_status(units, max_workers=8, unit_issue_ids=None):
     """
     Power-vs-cell-outage for a whole list of units at once, concurrently —
     backs the Up Steady list's "Diagnose Power vs Cell" sweep (both the
@@ -1692,6 +3130,15 @@ def fleet_power_vs_cell_outage_status(units, max_workers=8):
     supplies the unit list (in practice, whatever's currently in the
     shared job's Up Steady/false_positives results), since this check has
     nothing to do with VRM installations at all.
+
+    unit_issue_ids is an optional {unit: issue_id} map — Up Steady rows
+    are real ERP tickets too, so when the caller has that mapping handy
+    each unit's check gets it passed straight through to
+    unit_power_vs_cell_outage, which uses it to prefer the loss window
+    matching when the ticket was actually opened over its longest-duration
+    fallback (see that function's docstring). Omit it (or leave a unit out
+    of it) and that unit falls back the same as ever — this is additive,
+    not required.
 
     Lower default concurrency than the VRM fleet checks (8, not 10) —
     each unit that actually has a loss window costs a real SSH connection
@@ -1711,9 +3158,10 @@ def fleet_power_vs_cell_outage_status(units, max_workers=8):
     unique_units = sorted({str(u or "").strip().upper() for u in (units or []) if str(u or "").strip()})
     if not unique_units:
         return [], None
+    unit_issue_ids = unit_issue_ids or {}
 
     def check_one(unit):
-        info, error = unit_power_vs_cell_outage(unit)
+        info, error = unit_power_vs_cell_outage(unit, issue_id=unit_issue_ids.get(unit))
         if error:
             return {"unit": unit, "error": error}
         return info

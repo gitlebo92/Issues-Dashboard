@@ -1,0 +1,3384 @@
+        :root {
+            /* Palette. Every colour in this file resolves through these
+               variables - change a value here, not a rule below. Names are
+               roles, not colours, so a repaint never renames anything. */
+            /* ground */
+            --bg-deepest: #000000;
+            --bg-sunken: #06090b;
+            --bg-panel: #0d1316;
+            --bg-info: #0f2630;
+            /* borders */
+            --border: #1c2a30;
+            --border-strong: #31484f;
+            --border-subtle: #547079;
+            /* idle status light: neutral grey, no phosphor cast, so the
+               'no reading yet' dot cannot be read as amber chrome */
+            --led-idle: #6e7b80;
+            /* text */
+            --text: #dfe7ea;
+            --text-secondary: #bcc9ce;
+            --text-muted: #93a4aa;
+            --text-bright: #f4f9fa;
+            --text-on-accent: #03181c;
+            /* accent */
+            --accent: #2ad6ee;
+            --accent-hover: #5ee5f7;
+            --accent-soft: #8fe9f8;
+            --accent-softer: #bff2fb;
+            --accent-softest: #e4fafd;
+            --info: #5aa8ff;
+            --spark-cyan: #2ad6ee;
+            --spark-violet: #5aa8ff;
+            /* status: ok */
+            --ok: #2ee08a;
+            --ok-text: #5cf0ab;
+            --ok-soft: #96f7cb;
+            --ok-softer: #c6fbe2;
+            --ok-deep: #0d5f3f;
+            /* status: warn */
+            --warn: #ffd426;
+            --warn-text: #ffe05c;
+            --warn-bright: #ffe97d;
+            --warn-soft: #fff0ab;
+            --warn-deep: #a88a08;
+            /* status: caution chrome */
+            --caution: #ff9a1f;
+            --caution-text: #ffbc5c;
+            --caution-border: #a8660f;
+            --caution-deep: #7d4b0a;
+            --caution-deeper: #3f2706;
+            --caution-bg: #231503;
+            --caution-soft: #ffd9ad;
+            --caution-softest: #fff4e6;
+            /* status: alert / danger */
+            --alert: #ff7a1a;
+            --danger: #ff3b5c;
+            --danger-text: #ff8fa3;
+            --danger-soft: #ffd0dd;
+            /* rgb triplets for rgba() tints of the colours above */
+            --bg-deepest-rgb: 0, 0, 0;
+            --bg-sunken-rgb: 6, 9, 11;
+            --accent-rgb: 42, 214, 238;
+            --caution-border-rgb: 168, 102, 15;
+            --ok-rgb: 46, 224, 138;
+            --warn-rgb: 255, 212, 38;
+            --alert-rgb: 255, 122, 26;
+            --danger-rgb: 255, 59, 92;
+            --warn-bright-rgb: 255, 233, 125;
+            --caution-text-rgb: 255, 188, 92;
+            --led-idle-rgb: 110, 123, 128;
+            /* corner radii. Terminal-flat by default; raise these three
+               values to soften every corner in the UI at once. */
+            --radius-sm: 2px;
+            --radius: 3px;
+            --radius-pill: 3px;
+        }
+
+        body {
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
+            margin: 20px;
+            background: var(--bg-sunken);
+            color: var(--text);
+        }
+        .app-nav {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: -8px 0 16px;
+            padding: 10px 14px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+        .app-nav .nav-brand {
+            color: var(--text-bright);
+            font-weight: 700;
+            text-decoration: none;
+            margin-right: auto;
+        }
+        .app-nav .nav-brand:hover { color: var(--accent-soft); }
+        .sandbox-badge {
+            color: var(--accent-soft);
+        }
+        .sandbox-badge-nav {
+            font-weight: 500;
+        }
+        .sandbox-badge-h1 {
+            font-size: 16px;
+        }
+        .app-nav a.nav-link {
+            color: var(--text);
+            text-decoration: none;
+            background: var(--accent);
+            padding: 8px 14px;
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .app-nav a.nav-link:hover { background: var(--accent-hover); }
+        [hidden] { display: none !important; }
+
+        /* ---- Toasts -------------------------------------------------------
+           Replaces notifyError(). Alerts blocked the whole tab until
+           dismissed, which was painful while a long ping was streaming, and
+           every message they showed is already written to the stdout pane
+           and the status line. These are non-blocking, stack, and
+           auto-dismiss (errors stay until clicked).                        */
+        .toast-stack {
+            position: fixed;
+            right: 16px;
+            bottom: 16px;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: min(420px, calc(100vw - 32px));
+            pointer-events: none;
+        }
+        .toast {
+            pointer-events: auto;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--info);
+            border-radius: var(--radius);
+            padding: 10px 34px 10px 12px;
+            font-size: 13px;
+            line-height: 1.4;
+            box-shadow: 0 6px 20px rgba(var(--bg-deepest-rgb), 0.45);
+            position: relative;
+            word-break: break-word;
+            white-space: pre-line;
+            animation: toast-in 140ms ease-out;
+        }
+        .toast.is-error   { border-left-color: var(--danger); }
+        .toast.is-warning { border-left-color: var(--warn); }
+        .toast.is-success { border-left-color: var(--ok); }
+        .toast .toast-close {
+            position: absolute;
+            top: 4px;
+            right: 6px;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 2px 4px;
+        }
+        .toast .toast-close:hover { color: var(--text); }
+        .toast .toast-action {
+            display: block;
+            margin-top: 6px;
+            background: var(--bg-sunken);
+            color: var(--accent);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 3px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .toast .toast-action:hover { background: var(--border); }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .toast { animation: none; }
+            .progress-fill { animation: none !important; }
+        }
+
+        /* ---- Status light glyphs ------------------------------------------
+           Green/orange/red is the classic red-green confusion set, and the
+           state was previously carried by hue alone (the title tooltip
+           helped, but only on hover). A glyph inside the dot makes the
+           lists readable at a glance without one.                          */
+        .speaker-led {
+            position: relative;
+        }
+        .speaker-led::after {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 700;
+            line-height: 1;
+            color: rgba(var(--bg-sunken-rgb), 0.85);
+            pointer-events: none;
+        }
+        .speaker-led.is-up::after      { content: "\2713"; }  /* check  */
+        .speaker-led.is-warning::after { content: "!"; }
+        .speaker-led.is-multi::after   { content: "\00D7"; }  /* times  */
+        .speaker-led.is-down::after    { content: "\00D7"; font-size: 11px; }
+
+        /* ---- Busy indicator -----------------------------------------------
+           Surfaces the per-unit lock on the row, so two people don't start
+           conflicting actions on the same unit.                            */
+        .unit-busy-flag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 6px;
+            padding: 1px 7px;
+            border-radius: var(--radius-pill);
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--caution-deeper);
+            color: var(--caution-soft);
+            border: 1px solid var(--caution-deep);
+            white-space: nowrap;
+        }
+        /* A busy lock held far longer than any real action here should
+           take — likely a crashed/hung job (see UNIT_BUSY_STALE_MS) rather
+           than one still genuinely in progress. Purely a visual flag, not
+           an auto-clear: only "Force Clear Lock" actually releases it, so
+           a tech decides, this just makes the decision easier to notice. */
+        .unit-busy-flag.is-stale {
+            background: rgba(var(--danger-rgb), 0.18);
+            color: var(--danger-text);
+            border-color: rgba(var(--danger-rgb), 0.55);
+        }
+
+        /* ---- Quick actions row --------------------------------------------
+           The handful of actions used constantly, promoted out of the
+           nested command menus. Edit QUICK_ACTIONS in the script below to
+           change which appear.                                             */
+        .quick-actions {
+            display: inline-flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+        /* .quick-btn / .toolbar-btn / .action-btn / .list-revalidate-btn
+           all share the same border+background pill shape by design, not
+           by accident — each is a small, deliberate size variant for its
+           own context (row-level quick action / section toolbar / command
+           menu / list-header revalidate link), not a drifted copy-paste of
+           the others. Keep that in mind before "fixing" a difference
+           between them. */
+        .quick-actions .quick-btn {
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            line-height: 1.6;
+        }
+        .quick-actions .quick-btn:hover:not(:disabled) {
+            background: var(--border-strong);
+            border-color: var(--border-subtle);
+        }
+        .quick-actions .quick-btn:disabled { opacity: 0.5; cursor: default; }
+        h1, h2 { margin-bottom: 8px; }
+        .progress-wrap {
+            margin: 0 0 16px;
+        }
+        .progress-label {
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+        .progress-track {
+            height: 14px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-pill);
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: var(--radius-pill);
+            background-image: linear-gradient(90deg, var(--spark-violet), var(--accent), var(--spark-cyan), var(--ok), var(--spark-violet));
+            background-size: 200% 100%;
+            animation: progress-shift 2.4s linear infinite;
+            transition: width 0.3s ease;
+        }
+        .progress-fill.is-complete {
+            animation: none;
+            background-position: 0% 50%;
+        }
+        @keyframes progress-shift {
+            from { background-position: 0% 50%; }
+            to { background-position: 100% 50%; }
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: 7fr 9fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .stdout-panel {
+            position: sticky;
+            top: 20px;
+            align-self: start;
+        }
+        .header-row {
+            margin-bottom: 4px;
+        }
+        .header-row h1 {
+            margin-top: 0;
+        }
+        /* Compact status pills (sandbox / automation-paused / fleet-polls-
+           still-running / ERP-writes-disabled) — previously four full-
+           width paragraph banners stacked above the stats strip, pushing
+           everything else down a few hundred pixels for text most
+           sessions only need to skim once. Same "condensed status, hover
+           for the full explanation" convention as the command-menu
+           glyphs and driver-check badges elsewhere in this file — the
+           short label is enough day to day, the reasoning is still there
+           on hover, not lost. */
+        .status-pill-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+            margin: 4px 0 10px;
+        }
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: var(--radius-pill);
+            white-space: nowrap;
+            text-decoration: none;
+        }
+        .status-pill.is-caution {
+            background: var(--caution-bg);
+            border: 1px solid var(--warn-deep);
+            color: var(--warn-soft);
+        }
+        .status-pill.is-info {
+            background: var(--bg-info);
+            border: 1px solid var(--accent);
+            color: var(--accent-softer);
+        }
+        .status-pill.is-ok {
+            background: var(--ok-deep);
+            border: 1px solid var(--ok);
+            color: var(--ok-softer);
+        }
+        a.status-pill.is-info:hover {
+            border-color: var(--accent-hover);
+            color: var(--accent-hover);
+        }
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: 1fr; }
+            .stdout-panel { position: static; }
+        }
+        .console-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .console-toolbar input[type="search"] {
+            flex: 1;
+            background: var(--bg-deepest);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+        .console-toolbar input[type="search"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .console-match-count {
+            color: var(--text-muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .console-toolbar button {
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 8px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .console-toolbar button:hover {
+            background: var(--border);
+        }
+        .console {
+            background: var(--bg-deepest);
+            color: var(--ok-soft);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 12px;
+            height: 60vh;
+            overflow-y: auto;
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .console mark {
+            background: var(--warn-deep);
+            color: var(--bg-deepest);
+            border-radius: var(--radius-sm);
+            padding: 0 1px;
+        }
+        .panel {
+            background: var(--bg-panel);
+            border-radius: var(--radius);
+            padding: 16px;
+            overflow: visible;
+        }
+        .panel ul {
+            margin-top: 4px;
+            padding-left: 0;
+            list-style: none;
+            position: relative;
+            z-index: 1;
+            overflow: visible;
+        }
+        .panel ul:has(.command-menu[open]) {
+            z-index: 400;
+        }
+        .panel h2 {
+            font-size: 16px;
+            margin-top: 16px;
+            position: relative;
+            z-index: 0;
+        }
+        .list-toolbar + .list-section h2 {
+            margin-top: 0;
+        }
+        .list-section {
+            position: relative;
+            z-index: 0;
+        }
+        .list-section.menu-open,
+        .list-section:has(.command-menu[open]) {
+            z-index: 400;
+        }
+        .list-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+            position: relative;
+            z-index: 70;
+        }
+        .list-toolbar input[type="search"],
+        .list-toolbar select {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+        .list-toolbar input[type="search"] {
+            flex: 1 1 220px;
+            min-width: 160px;
+            /* Reports mode hides several of this toolbar's other buttons
+               (Clear checkboxes/Pull/Update Weather/Resolve Selected —
+               see applyPanelMode), leaving fewer flex siblings to share
+               the row with — flex-grow:1 then stretched this across
+               most of the toolbar's width instead of just staying a
+               reasonably-sized search box (reported live). */
+            max-width: 320px;
+        }
+        .unit-tools-label {
+            font-weight: 600;
+            margin-right: 8px;
+        }
+        .list-toolbar .panel-mode-select {
+            flex: 0 0 auto;
+            min-width: 120px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 8px 10px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .list-toolbar input[type="search"]:focus,
+        .list-toolbar select:focus,
+        .list-toolbar .panel-mode-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .list-view-toggle {
+            display: inline-flex;
+        }
+        .list-view-toggle button {
+            background: var(--bg-sunken);
+            color: var(--text-muted);
+            border: 1px solid var(--border-strong);
+            padding: 8px 10px;
+            cursor: pointer;
+        }
+        .list-view-toggle button:first-child {
+            border-radius: var(--radius) 0 0 var(--radius);
+        }
+        .list-view-toggle button:last-child {
+            border-left: 0;
+            border-radius: 0 var(--radius) var(--radius) 0;
+        }
+        .list-view-toggle button.is-active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--text-on-accent);
+        }
+        .list-match-count {
+            color: var(--text-muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        /* Base .toolbar-btn — every fleet-report Refresh/"Check whole fleet
+           now" button, the Graphs modal's Refresh/360 Snapshot/Get ART
+           Contacts, Find All Cameras, Schedule Snapshots for Shaded Units,
+           and Force Clear Lock all use this class outside .list-toolbar,
+           where until now there was no unscoped rule for it at all — they
+           rendered as plain unstyled browser-default buttons. This is that
+           missing base; .list-toolbar .toolbar-btn below layers the
+           bigger size the page's own top toolbar wants on top of it. */
+        .toolbar-btn {
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 3px 9px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .toolbar-btn:hover:not(:disabled) {
+            background: var(--border-strong);
+        }
+        .toolbar-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+        .list-toolbar .toolbar-btn {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 8px 10px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .list-toolbar .toolbar-btn:hover {
+            border-color: var(--accent);
+        }
+        .list-category-wrap {
+            position: relative;
+        }
+        .list-category-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 220px;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 8px 10px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .list-category-toggle:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .list-category-toggle-text {
+            flex: 1;
+            text-align: left;
+        }
+        .list-category-options {
+            display: none;
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            z-index: 80;
+            min-width: 100%;
+            background: var(--bg-sunken);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 4px;
+            box-shadow: 0 12px 24px rgba(var(--bg-deepest-rgb), 0.55);
+        }
+        .list-category-wrap.is-open .list-category-options {
+            display: block;
+        }
+        .list-category-option {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            width: 100%;
+            background: transparent;
+            color: var(--text);
+            border: 0;
+            border-radius: var(--radius-sm);
+            padding: 8px 10px;
+            font-size: 14px;
+            text-align: left;
+            cursor: pointer;
+        }
+        .list-category-option:hover,
+        .list-category-option.is-selected {
+            background: var(--bg-info);
+        }
+        .list-category-toggle .complete-badge,
+        .list-category-option .complete-badge {
+            display: inline-block;
+        }
+        /* Multi-select additions: a checkbox and a live count per list. */
+        .list-category-option input[type="checkbox"] {
+            margin: 0 8px 0 0;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .list-category-option .option-label {
+            flex: 1;
+            text-align: left;
+        }
+        .list-category-option .option-count {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-muted);
+            background: var(--bg-panel);
+            border-radius: var(--radius-pill);
+            padding: 1px 7px;
+            min-width: 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+        .list-category-option.is-selected .option-count { color: var(--accent-softest); }
+        .list-category-option.is-empty { opacity: 0.5; }
+        .list-category-option.is-complete .option-count { color: var(--ok-text); }
+        .list-category-actions {
+            display: flex;
+            justify-content: space-between;
+            gap: 6px;
+            border-top: 1px solid var(--border);
+            margin-top: 4px;
+            padding-top: 6px;
+        }
+        .list-category-actions button {
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 4px 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .list-category-actions button:hover { background: var(--border); }
+        .confirm-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(var(--bg-deepest-rgb), 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 3100;
+            padding: 24px;
+        }
+        .confirm-modal.is-open {
+            display: flex;
+        }
+        .confirm-dialog {
+            width: min(440px, 100%);
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px;
+            box-shadow: 0 16px 40px rgba(var(--bg-deepest-rgb), 0.6);
+        }
+        .confirm-dialog h2 {
+            margin: 0 0 10px;
+            font-size: 18px;
+            color: var(--text);
+        }
+        .confirm-dialog p {
+            margin: 0 0 18px;
+            color: var(--text-secondary);
+            font-size: 14px;
+            line-height: 1.45;
+        }
+        .tech-checks-task-list {
+            margin: 0 0 18px;
+            padding-left: 1.25rem;
+            color: var(--text-secondary);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .tech-checks-task-list li {
+            margin-bottom: 0.3rem;
+        }
+        .confirm-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+        .confirm-actions button {
+            border-radius: var(--radius);
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .confirm-cancel {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+        }
+        .confirm-ok {
+            background: var(--accent);
+            color: var(--text-on-accent);
+            border: 1px solid var(--accent);
+        }
+        .confirm-ok:disabled,
+        .confirm-ok.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .panel li {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 0;
+            flex-wrap: wrap;
+            overflow: visible;
+            position: relative;
+            z-index: 0;
+        }
+        .panel li.ticket-row {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: start;
+            padding: 4px 6px;
+            border-radius: var(--radius);
+            border-left: 3px solid transparent;
+            flex-wrap: nowrap;
+        }
+        .panel li.ticket-row.ticket-row-no-rws {
+            grid-template-columns: auto minmax(0, 1fr);
+        }
+        .panel li.ticket-row.menu-open {
+            background: var(--bg-info);
+            border-left-color: var(--accent);
+        }
+        .ticket-row-body {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            grid-column: 2;
+        }
+        .ticket-row-actions {
+            flex-shrink: 0;
+            align-self: center;
+            grid-column: 1;
+        }
+        .ticket-row-rws {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+            align-self: center;
+            grid-column: 3;
+        }
+        .ticket-row-no-rws .ticket-row-body {
+            grid-column: 2;
+        }
+        .unit-tools-hint {
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+        /* Inline unit switcher for a command menu whose ticket lists more
+           than one unit (see ensureMultiUnitChooser) — same input styling
+           as the list toolbar's own select (.list-toolbar select). */
+        .multi-unit-picker {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            padding: 6px 0;
+        }
+        .multi-unit-select {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 6px 8px;
+            font-size: 13px;
+        }
+        .flap-report-note {
+            color: var(--text-muted);
+            font-size: 12px;
+            margin: 2px 0 4px;
+            max-width: 720px;
+        }
+        .ram-folder-reachability-glyph {
+            font-weight: 600;
+            cursor: help;
+        }
+        .flap-report-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 13px;
+            color: var(--text-muted);
+            padding: 6px 0 10px;
+        }
+        .flap-report-controls label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .flap-report-controls input[type="number"] {
+            width: 4em;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 4px;
+        }
+        .flap-report-db-stats {
+            margin-left: auto;
+            font-size: 12px;
+        }
+        .flap-row-stats {
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+        /* Flap Report's per-unit history strip (renderFlapTimelineBar) —
+           each recorded check as a thin tick, positioned by WHEN it
+           happened across the report's own day window (not evenly spaced
+           by check count), so a burst of flapping on one day reads as a
+           cluster of red ticks in one place rather than being smeared
+           evenly across the whole bar. Height-only container; ticks are
+           absolutely positioned inside it. */
+        .flap-timeline-bar {
+            position: relative;
+            width: 100%;
+            max-width: 420px;
+            height: 14px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+        .flap-timeline-bar.is-empty {
+            display: none;
+        }
+        .flap-timeline-point {
+            position: absolute;
+            top: 1px;
+            bottom: 1px;
+            width: 2px;
+            margin-left: -1px;
+        }
+        .flap-timeline-point.is-healthy {
+            background: var(--ok);
+        }
+        .flap-timeline-point.is-unhealthy {
+            background: var(--danger);
+        }
+        /* Fleet report rows (renderFleetReportRow) reuse .ticket-row-body's
+           class for the layout it shares with ticket rows, but a report
+           row's content — the summary line, an optional related-ticket
+           line, an optional graph/forecast line — reads as a short stack
+           of distinct facts, not a run of same-level items that should
+           flow and wrap together the way a ticket row's inline badges do.
+           .ticket-row-body's default flex-wrap put those lines wherever
+           they'd fit given the panel's current width, so the same report
+           read differently line-to-line depending on how long each
+           summary happened to be (reported live: "rows arent as neat as
+           they could be"). This forces one line per fact, always. */
+        .fleet-report-body {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+        }
+        /* Status group headings in the Recovery Emails report
+           (renderRecoveryEmailReport). */
+        .report-group-heading {
+            list-style: none;
+            margin: 12px 0 4px;
+            padding-bottom: 2px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+        .report-group-heading:first-child {
+            margin-top: 0;
+        }
+        .recovery-email-report-link {
+            font-size: 13px;
+        }
+        /* The parent's own gap already spaces stacked lines evenly —
+           .snapshot-task-line's margin-top exists for ticket rows, where
+           it can sit inline alongside other wrapped items with no gap of
+           its own; here it would just double up on top of that gap. */
+        .fleet-report-body .snapshot-task-line {
+            margin-top: 0;
+        }
+        /* Units Unplugged / Shaded Units report rows — the live check
+           result line, colored the same as the corresponding command-menu
+           glyph's status (ok/warn/fail from unit_power_status /
+           unit_shading_status), so a "plugged in" line reads green here
+           the same way it would border green as a glyph. */
+        .flap-row-stats.report-status-ok {
+            color: var(--ok);
+        }
+        .flap-row-stats.report-status-warn {
+            color: var(--caution-text);
+        }
+        .flap-row-stats.report-status-fail {
+            color: var(--danger);
+        }
+        .snapshot-task-line {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 4px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .snapshot-thumb {
+            width: 40px;
+            height: 40px;
+            object-fit: cover;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-strong);
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .experimental-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--caution-text);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-pill);
+            padding: 1px 6px;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+        .related-ticket-badge {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            color: var(--caution-text);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-pill);
+            padding: 1px 6px;
+            flex-shrink: 0;
+        }
+        /* Lets a tech resume mid-wizard when the server-side job state is
+           gone (e.g. after a service restart) but the physical steps were
+           already done by hand — picking a later step just re-points
+           applySecurityFixPhaseUI at it, same as the automatic resume
+           does when a live job IS found. Step 4 needs hostpci0's saved
+           value (Finish sets it), which isn't recoverable once Step 1's
+           own output is gone, hence the manual input that only appears
+           for that one option. */
+        .security-fix-jump {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        .security-fix-jump select,
+        .security-fix-jump input[type="text"] {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 4px;
+            font-size: 12px;
+        }
+        .security-fix-jump input[type="text"] {
+            width: 220px;
+        }
+        .security-fix-log {
+            max-height: 220px;
+            overflow-y: auto;
+            background: rgba(var(--bg-deepest-rgb), 0.25);
+            padding: 8px;
+            border-radius: var(--radius-sm);
+            font-family: "Cascadia Mono", Consolas, "SF Mono", "DejaVu Sans Mono", "Courier New", monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            margin: 8px 0;
+        }
+        .security-fix-force-clear {
+            margin-bottom: 8px;
+        }
+        /* Security Update Fix, Verify step: the grepped VGA/i915 counts
+           used to only exist as two plain lines buried in the scrolling
+           log (see security_update_web_verify) — easy to miss a short
+           count on. Filled pills, same "state at a glance" convention as
+           .command-battery-glyph, so a short count reads as wrong without
+           having to read the numbers. */
+        .driver-check-row {
+            display: flex;
+            gap: 6px;
+            margin: 0 0 8px;
+            flex-wrap: wrap;
+        }
+        .driver-check-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: var(--radius-pill);
+            padding: 2px 8px;
+            color: var(--text-on-accent);
+        }
+        .driver-check-badge.is-ok {
+            background: var(--ok);
+        }
+        .driver-check-badge.is-fail {
+            background: var(--danger);
+            color: var(--caution-softest);
+        }
+        /* ---- Guided tour --------------------------------------------------
+           Read-only by construction: the backdrop swallows every click on
+           the real page (pointer-events: auto) so nothing underneath can be
+           triggered by accident mid-tour, and the highlight ring is
+           pointer-events: none — it only ever points, never intercepts.
+           z-index sits above every existing modal (confirm dialogs top out
+           around 3100, command menus around 2000) so a tour step can point
+           at literally anything, including an open modal. */
+        .tour-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(var(--bg-deepest-rgb), 0.62);
+            z-index: 6000;
+        }
+        .tour-highlight {
+            position: fixed;
+            z-index: 6001;
+            border: 2px solid var(--accent);
+            border-radius: var(--radius);
+            box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.22), 0 0 24px rgba(var(--accent-rgb), 0.35);
+            pointer-events: none;
+            transition: top 0.15s ease, left 0.15s ease, width 0.15s ease, height 0.15s ease, opacity 0.1s ease;
+        }
+        .tour-highlight.is-hidden {
+            opacity: 0;
+        }
+        .tour-callout {
+            position: fixed;
+            z-index: 6002;
+            width: min(340px, calc(100vw - 32px));
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            box-shadow: 0 16px 40px rgba(var(--bg-deepest-rgb), 0.65);
+            padding: 16px;
+            transition: top 0.15s ease, left 0.15s ease;
+        }
+        .tour-callout-eyebrow {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--accent-soft);
+            margin: 0 0 4px;
+        }
+        .tour-callout h3 {
+            margin: 0 0 8px;
+            font-size: 15px;
+            color: var(--text-bright);
+        }
+        .tour-callout p {
+            margin: 0;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+        }
+        .tour-callout-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 14px;
+        }
+        .tour-callout-actions .tour-skip {
+            color: var(--text-muted);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 2px;
+            text-decoration: underline;
+        }
+        .tour-callout-spacer {
+            flex: 1;
+        }
+        .tour-callout-step {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .power-infra-row-stats {
+            color: var(--text-muted);
+            font-size: 13px;
+            display: block;
+        }
+        .power-infra-row-stats .source-tag {
+            font-size: 10px;
+            font-weight: 600;
+            border-radius: var(--radius-sm);
+            padding: 0 5px;
+            margin-right: 4px;
+        }
+        .power-infra-row-stats .source-tag.zabbix {
+            background: rgba(var(--danger-rgb), 0.15);
+            color: var(--danger);
+        }
+        .power-infra-row-stats .source-tag.vrm {
+            background: rgba(var(--caution-border-rgb), 0.2);
+            color: var(--caution-text);
+        }
+        .power-infra-row.is-corroborated {
+            border-left: 3px solid var(--danger);
+        }
+        .command-alarm-glyph {
+            color: var(--caution-text);
+            margin-left: 4px;
+            font-size: 26px;
+            cursor: pointer;
+        }
+        .command-alarm-glyph.is-corroborated {
+            color: var(--danger);
+        }
+        /* Clickable command-menu status glyphs (alarm, power, shading,
+           dead-panel, VRM-freshness, power-vs-cell, battery) get
+           role="button"/tabIndex via wireGlyphKeyboardActivation, so they
+           need a visible keyboard-focus ring same as .stats-chip.is-filter
+           already gets — nothing here relies on :hover alone. */
+        .command-alarm-glyph:focus-visible,
+        .command-power-glyph:focus-visible,
+        .command-shading-glyph:focus-visible,
+        .command-dead-panel-glyph:focus-visible,
+        .command-vrm-freshness-glyph:focus-visible,
+        .command-power-vs-cell-glyph:focus-visible,
+        .command-battery-glyph:focus-visible,
+        .command-menu-uptime:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        /* Same treatment, extended to the app's actual most-common
+           interactive surface — every command-menu/toolbar/confirm button
+           and the custom-drawn checkboxes (appearance: none strips the
+           native focus ring along with the native look, with nothing put
+           back). Previously only the 7 status glyphs above had this. */
+        .action-btn:focus-visible,
+        .toolbar-btn:focus-visible,
+        .confirm-ok:focus-visible,
+        .confirm-cancel:focus-visible,
+        .panel li input[type="checkbox"]:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        /* Plugged-in indicator — a lazy, on-open check (see
+           checkAndApplyPowerGlyph), not a fleet-wide poll like the alarm
+           glyph above, since a real check costs a VRM round trip per unit. */
+        .command-power-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 4px;
+            border-radius: 50%;
+            border: 2px solid var(--border-strong);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            position: relative;
+            cursor: pointer;
+        }
+        .command-power-glyph.is-present {
+            border-color: var(--ok);
+        }
+        .command-power-glyph.is-not_detected {
+            border-color: var(--danger);
+        }
+        .command-power-glyph.is-not_detected::after {
+            content: "×";
+            position: absolute;
+            top: -12px;
+            right: -12px;
+            color: var(--danger);
+            background: var(--bg-panel);
+            border-radius: 50%;
+            width: 17px;
+            height: 17px;
+            font-size: 17px;
+            font-weight: 700;
+            line-height: 17px;
+            text-align: center;
+        }
+        /* Shading is a pure alert (see createCommandMenuElement) — only
+           ever shown, never a quiet "checked, clear" confirmation — so it
+           always reads as attention-worthy, same caution color as the
+           alarm glyph's uncorroborated state. Click opens Battery Graphs
+           (PV power), same "click the indicator to see the graph" pattern
+           as the plug glyph. */
+        .command-shading-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        /* Camera outage glyph — alert-only like shading/dead-panel above:
+           a "camera image buffer... remained below X% for N minutes"
+           Zabbix finding (SNUC-Watch), which means a camera has stopped
+           sending frames. The plain camera glyph plus a line-through
+           reads as "camera, but not working" without needing a second
+           glyph character stacked on top of it. Danger, not caution — a
+           camera that's stopped producing frames is a hardware/software
+           finding, not a "worth a look." */
+        .command-camera-outage-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--danger-text);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        /* A diagonal "no signal" slash reads more clearly at this size
+           than a horizontal text-decoration line-through did (which ran
+           through the emoji's own glyph strokes and was easy to miss) —
+           drawn as its own bar so the angle isn't tied to the text
+           baseline, clipped to the circle by the parent's overflow:hidden. */
+        .command-camera-outage-glyph::after {
+            content: "";
+            position: absolute;
+            top: 50%;
+            left: -5px;
+            right: -5px;
+            height: 2px;
+            background: var(--danger-text);
+            transform: translateY(-50%) rotate(45deg);
+            transform-origin: center;
+        }
+        /* Same alert-only treatment as .command-shading-glyph, just its
+           own color (danger, not caution) — a dead panel is a hardware
+           finding, not a "worth a look" — same as the report's own
+           report-status-fail coloring for this status. */
+        .command-dead-panel-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--danger);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        /* Battery SOC — shown "when available" (see applyBatteryGlyphFromCache;
+           plenty of installations report no SOC at all), so unlike the
+           other glyphs here this one carries its own number rather than
+           relying on color alone to say how much charge is left. Same
+           4-tier scale as the 20%-low-battery reference line already drawn
+           on the SOC graph. */
+        .command-battery-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 26px;
+            height: 26px;
+            padding: 0 4px;
+            margin-left: 4px;
+            border-radius: var(--radius-pill);
+            font-size: 15px;
+            font-weight: 700;
+            line-height: 1;
+            vertical-align: middle;
+            color: var(--text-on-accent);
+            cursor: pointer;
+        }
+        .command-battery-glyph.is-high {
+            background: var(--ok);
+        }
+        .command-battery-glyph.is-medium {
+            background: var(--warn);
+        }
+        .command-battery-glyph.is-low-medium {
+            background: var(--caution);
+        }
+        .command-battery-glyph.is-low {
+            background: var(--danger);
+            color: var(--caution-softest);
+        }
+        /* VRM freshness — pure alert like shading/dead-panel, only ever
+           shown for "stale"/"disconnected" (see
+           applyVrmFreshnessGlyphFromCache). Click jumps to the VRM
+           Disconnected report, same "click the indicator to go see more"
+           pattern as the ⚠ alarm glyph. */
+        .command-vrm-freshness-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .command-vrm-freshness-glyph.is-disconnected {
+            border-color: var(--danger);
+        }
+        /* Power vs Cell Outage — pure alert like shading/dead-panel/VRM
+           freshness above, only ever shown for an actual power_outage or
+           cell_outage verdict (see applyPowerVsCellGlyph; inconclusive and
+           no_recent_outage stay hidden, same "checked, nothing to say"
+           convention). One element, two looks: power gets the same danger
+           color as the dead-panel glyph (a hardware finding), cell gets the
+           same caution color as shading/VRM freshness (worth a look, not a
+           truck roll). Click re-runs the single-unit diagnostic for detail,
+           same as the Diagnostics submenu's own button. */
+        .command-power-vs-cell-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            margin-left: 0;
+            border-radius: 50%;
+            border: 2px solid var(--caution-text);
+            font-size: 15px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .command-power-vs-cell-glyph.is-power_outage {
+            border-color: var(--danger);
+        }
+        .command-power-vs-cell-glyph.is-cell_outage {
+            border-color: var(--caution-text);
+        }
+        /* Same finding as the command-menu glyph above, but on the
+           collapsed row itself — the glyph only shows once a tech opens a
+           unit's Commands menu, which meant a real finding was invisible
+           until you happened to check that exact unit (see the Up Steady
+           sweep's own "which units?" problem). Filled, not outlined, so it
+           reads at a glance in a dense list rather than blending into the
+           row text. Click opens Network Latency Graphs with the loss
+           window highlighted, plus the switch uptime reading from when the
+           sweep ran alongside an extrapolated "right now" figure — see
+           openPowerVsCellRowDetail. */
+        .power-vs-cell-row-badge,
+        .graphs-verdict-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            margin-left: 6px;
+            border-radius: 50%;
+            font-size: 10px;
+            line-height: 1;
+            vertical-align: middle;
+            cursor: pointer;
+        }
+        .power-vs-cell-row-badge.is-power_outage,
+        .graphs-verdict-badge.is-power_outage {
+            background: var(--danger);
+            color: var(--danger-soft);
+        }
+        /* No power/cell verdict (not checked, inconclusive, no recent
+           outage, or a check running/failed): an outlined grey ∿ that
+           still opens the graphs modal, so every ticket has a way in. */
+        .power-vs-cell-row-badge.is-none,
+        .graphs-verdict-badge.is-none {
+            background: transparent;
+            color: var(--text-muted);
+            border: 1px solid var(--led-idle);
+            box-sizing: border-box;
+        }
+        .power-vs-cell-row-badge.is-none:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+        .power-vs-cell-row-badge.is-cell_outage,
+        .graphs-verdict-badge.is-cell_outage {
+            background: var(--caution);
+            color: var(--caution-deeper);
+        }
+        /* Battery Outlook's 5-day forecast — an info glyph, not an alert
+           (see forecastGlyphElement): shown whenever a forecast resolved
+           at all, regardless of risk, so unlike the alert-circle glyphs
+           above this is a plain outlined pill with its own text ("☁ 2/5"),
+           same shape as .command-battery-glyph but neutral-colored since
+           there's no single risk level to color it by — the report row
+           and command-menu status row both use the exact same element via
+           forecastGlyphElement. */
+        .forecast-glyph,
+        .command-forecast-glyph {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            line-height: 1;
+            border-radius: var(--radius-pill);
+            padding: 2px 8px;
+            border: 1px solid var(--border-strong);
+            color: var(--text);
+            cursor: pointer;
+        }
+        /* Row and command-menu versions of this one used to share a size
+           via the selector above — bumping it for the command menu also
+           bumped it on the (already correctly sized) ticket row, so the
+           command-menu version now overrides back up on its own. */
+        .command-forecast-glyph {
+            margin-left: 4px;
+            font-size: 18px;
+            padding: 5px 14px;
+        }
+        /* Opened from the Graphs modal's own Art menu as often as from a
+           ticket row, so it has to land above .confirm-modal's 3100 —
+           same reason as .snapshot-modal. */
+        .site-contacts-modal {
+            z-index: 3200;
+        }
+        .site-contacts-dialog {
+            width: min(760px, 100%);
+        }
+        .site-contacts-dialog .site-contacts-hint {
+            margin: 0 0 8px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        /* One row per report line. Email rows are separate buttons with a
+           hairline box so each is plainly its own target; double-click
+           copies only the addresses (copySiteContactEmails). */
+        .site-contacts-rows {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 60vh;
+            overflow-y: auto;
+            margin: 0 0 14px;
+            padding: 10px;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            line-height: 1.45;
+        }
+        .site-contacts-row {
+            color: var(--text-secondary);
+            overflow-wrap: anywhere;
+        }
+        .site-contacts-row.is-email {
+            display: grid;
+            grid-template-columns: max-content minmax(0, 1fr) auto;
+            align-items: baseline;
+            gap: 10px;
+            width: 100%;
+            margin: 2px 0;
+            padding: 6px 8px;
+            text-align: left;
+            font: inherit;
+            color: var(--text);
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            cursor: copy;
+        }
+        .site-contacts-row.is-email:hover,
+        .site-contacts-row.is-email:focus-visible {
+            border-color: var(--accent);
+            outline: none;
+        }
+        .site-contacts-label {
+            color: var(--accent);
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .site-contacts-emails {
+            overflow-wrap: anywhere;
+        }
+        .site-contacts-copy-hint {
+            color: var(--text-muted);
+        }
+        .site-contacts-row.is-email.just-copied {
+            border-color: var(--ok);
+            background: rgba(var(--ok-rgb), 0.10);
+        }
+        /* Swap the ⧉ for "✓ copied" (font-size 0 hides the glyph, the
+           ::before brings its own size back). */
+        .site-contacts-row.is-email.just-copied .site-contacts-copy-hint {
+            font-size: 0;
+        }
+        .site-contacts-row.is-email.just-copied .site-contacts-copy-hint::before {
+            content: "✓ copied";
+            font-size: 12px;
+            color: var(--ok-text);
+        }
+        .site-contacts-sep {
+            height: 1px;
+            margin: 6px 0;
+            background: var(--border);
+        }
+        .site-contacts-copied {
+            margin-right: auto;
+            align-self: center;
+            color: var(--ok);
+            font-size: 13px;
+        }
+        .site-contacts-copied.is-error {
+            color: var(--danger-text);
+        }
+        @media (max-width: 900px) {
+            .site-contacts-row.is-email {
+                grid-template-columns: minmax(0, 1fr) auto;
+            }
+            .site-contacts-label {
+                grid-column: 1 / -1;
+            }
+        }
+        .tech-stats-dialog {
+            width: min(560px, 100%);
+        }
+        .tech-stats-controls {
+            display: flex;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin: 10px 0;
+        }
+        .tech-stats-controls label {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .tech-stats-controls input,
+        .tech-stats-controls select {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 5px 7px;
+            font-size: 13px;
+        }
+        .tech-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .tech-stats-card {
+            background: var(--bg-sunken);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 10px;
+            text-align: center;
+        }
+        .tech-stats-card h3 {
+            margin: 0 0 6px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        .tech-stats-total {
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--accent);
+            line-height: 1;
+        }
+        .tech-stats-breakdown {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        /* Wide enough for graphs plus the command rail beside them — this
+           modal is where a tech actually works a Power vs Cell ticket, not
+           a quick peek. Charts are fixed-viewBox SVGs scaled to their
+           column, so 1080 keeps axis text near its designed size. */
+        .battery-graphs-dialog {
+            position: relative;
+            width: min(1080px, 100%);
+            max-height: 90vh;
+            overflow-y: auto;
+            box-sizing: border-box;
+        }
+        /* Multi-unit ticket: which unit the modal is showing, and the others
+           one click away (renderGraphsUnitSwitch). */
+        .graphs-unit-switch {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin: -4px 0 10px;
+            font-size: 12px;
+        }
+        .graphs-unit-switch-label {
+            color: var(--text-muted);
+        }
+        .graphs-unit-switch-btn {
+            font: inherit;
+            font-size: 12px;
+            padding: 2px 8px;
+            color: var(--text);
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .graphs-unit-switch-btn:hover,
+        .graphs-unit-switch-btn:focus-visible {
+            border-color: var(--accent);
+            outline: none;
+        }
+        .graphs-unit-switch-btn[aria-pressed="true"] {
+            color: var(--text-on-accent);
+            background: var(--accent);
+            border-color: var(--accent);
+            cursor: default;
+        }
+        .battery-graphs-dialog #graphs_subtitle {
+            margin: 0 0 10px;
+            padding-right: 36px;
+            font-size: 13px;
+        }
+        /* Top-right X, alongside the existing bottom Close button rather
+           than replacing it — a quick-dismiss affordance for a dialog tall
+           enough that the bottom Close button can be a scroll away.
+           Andrew's own request, 2026-10-01. */
+        .modal-close-x {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 26px;
+            height: 26px;
+            line-height: 24px;
+            text-align: center;
+            padding: 0;
+            background: transparent;
+            color: var(--danger-text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            font-size: 18px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .modal-close-x:hover {
+            background: var(--danger-text);
+            color: var(--bg-deepest);
+            border-color: var(--danger-text);
+        }
+        /* Graphs left, commands right. The rail is sticky inside the
+           dialog's own scroll so it stays put while the charts scroll past,
+           and scrolls itself if an expanded submenu outgrows the view. */
+        .graphs-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 260px;
+            gap: 12px;
+            align-items: start;
+        }
+        .graphs-rail {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            position: sticky;
+            top: 0;
+            max-height: calc(90vh - 60px);
+            overflow-y: auto;
+            padding: 6px;
+            background: var(--bg-sunken);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            box-sizing: border-box;
+        }
+        .graphs-device-menu {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .graphs-device-menu:empty {
+            display: none;
+        }
+        /* Notes first in the rail: the one thing here you type into
+           rather than click, and the context the next tech reads first. */
+        .graphs-notes {
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .graphs-rail-heading {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        .graphs-notes .unit-notes-box {
+            margin: 0;
+        }
+        .graphs-notes .unit-notes-box textarea {
+            min-height: 72px;
+            resize: vertical;
+        }
+        /* One hairline panel for the at-a-glance facts. Hidden outright when
+           none of its parts are showing, so non-network graph modes don't
+           get an empty box. */
+        .graphs-summary {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px 10px;
+            margin-bottom: 10px;
+            background: var(--bg-sunken);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+        }
+        .graphs-summary:not(:has(
+            .graphs-verdict:not([hidden]),
+            .graphs-info-line:not([hidden]),
+            .graphs-uptime-refresh-btn:not([hidden]),
+            .command-battery-glyph:not([hidden]),
+            .forecast-glyph:not([hidden]),
+            .graphs-ticket-line:not([hidden]),
+            .graphs-email-status:not([hidden]),
+            .graphs-chip:not([hidden]),
+            .graphs-console:not([hidden]),
+            .graphs-rws-row:not([hidden])
+        )) {
+            display: none;
+        }
+        /* The Power vs Cell finding itself — same look as the ticket row's
+           badge, plus the verdict in words so it never rests on colour
+           alone. Its own class, not .power-vs-cell-row-badge: the sweep
+           poll re-applies every element with that class by data-unit and
+           would hide this one. */
+        .graphs-verdict {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 6px;
+            font-size: 13px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .graphs-verdict .graphs-verdict-badge {
+            align-self: center;
+            margin-left: 0;
+            width: 18px;
+            height: 18px;
+            font-size: 11px;
+            cursor: default;
+        }
+        .graphs-verdict-label {
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .graphs-verdict.is-power_outage .graphs-verdict-label {
+            color: var(--danger-text);
+        }
+        .graphs-verdict.is-cell_outage .graphs-verdict-label {
+            color: var(--caution-text);
+        }
+        .graphs-verdict.is-none .graphs-verdict-label,
+        .graphs-verdict.is-pending .graphs-verdict-label {
+            color: var(--text-secondary);
+        }
+        .graphs-verdict.is-error .graphs-verdict-label {
+            color: var(--danger-text);
+        }
+        /* Short facts after the verdict word (loss window, ticket age). */
+        .graphs-verdict-facts {
+            display: inline-flex;
+            flex-wrap: wrap;
+            gap: 4px 10px;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .graphs-verdict-fact {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+        .graphs-verdict-fact + .graphs-verdict-fact::before {
+            content: "· ";
+            color: var(--text-muted);
+        }
+        .graphs-verdict-more {
+            font: inherit;
+            font-size: 11px;
+            padding: 1px 6px;
+            color: var(--text-muted);
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .graphs-verdict-more:disabled {
+            opacity: 0.5;
+            cursor: progress;
+        }
+        .graphs-verdict-more:hover:not(:disabled),
+        .graphs-verdict-more:focus-visible {
+            color: var(--accent);
+            border-color: var(--accent);
+            outline: none;
+        }
+        /* The sweep's full explanation, behind Details. Its own full row. */
+        .graphs-verdict-text {
+            flex: 1 1 100%;
+            margin: 2px 0 0;
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.45;
+        }
+        /* At-a-glance unit stats (renderGraphsStats and friends). */
+        .graphs-stats {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .graphs-stats:not(:has(> :not([hidden]))) {
+            display: none;
+        }
+        .graphs-stats .command-battery-glyph {
+            flex: 0 0 auto;
+            margin-left: 0;
+            height: 20px;
+            min-width: 22px;
+            font-size: 12px;
+            padding: 0 6px;
+        }
+        .graphs-stats .forecast-glyph {
+            height: 20px;
+            box-sizing: border-box;
+        }
+        .graphs-flap-chip .flap-timeline-bar {
+            width: 70px;
+            height: 8px;
+            margin-left: 4px;
+        }
+        /* Output from actions run inside the modal (renderGraphsConsole). */
+        .graphs-console {
+            border-top: 1px solid var(--border);
+            padding-top: 6px;
+        }
+        .graphs-console-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        .graphs-console-head .graphs-rail-heading {
+            margin-bottom: 0;
+        }
+        .graphs-console-clear {
+            font: inherit;
+            font-size: 11px;
+            padding: 1px 6px;
+            color: var(--text-muted);
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .graphs-console-clear:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+        .graphs-console-body {
+            margin: 0;
+            max-height: 9.5em;
+            overflow-y: auto;
+            padding: 6px 8px;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font: inherit;
+            font-size: 12px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .graphs-summary-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px 16px;
+        }
+        .graphs-summary-actions:not(:has(> :not([hidden]))) {
+            display: none;
+        }
+        .graphs-ticket-line {
+            font-size: 13px;
+        }
+        .graphs-ticket-line a {
+            color: var(--accent);
+        }
+        /* Outage/recovery email status (renderGraphsEmailStatus). Same pill
+           shape as the forecast glyph; the status colour tints border, text
+           and a faint fill, and the words + ✉/✓/? glyph say the same thing
+           for anyone who can't tell the colours apart. */
+        .graphs-email-status,
+        .graphs-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 1;
+            padding: 3px 8px;
+            border-radius: var(--radius-pill);
+            border: 1px solid var(--border-strong);
+            background: transparent;
+            color: var(--text);
+            cursor: pointer;
+        }
+        .graphs-email-status:disabled {
+            cursor: progress;
+        }
+        .graphs-email-status:focus-visible {
+            outline: 1px solid var(--accent);
+            outline-offset: 1px;
+        }
+        .graphs-chip {
+            cursor: default;
+        }
+        .graphs-email-status.is-danger,
+        .graphs-chip.is-danger {
+            color: var(--danger-text);
+            border-color: var(--danger);
+            background: rgba(var(--danger-rgb), 0.12);
+        }
+        .graphs-email-status.is-warn,
+        .graphs-chip.is-warn {
+            color: var(--warn-text);
+            border-color: var(--warn);
+            background: rgba(var(--warn-rgb), 0.10);
+        }
+        .graphs-email-status.is-alert,
+        .graphs-chip.is-alert {
+            color: var(--caution-text);
+            border-color: var(--alert);
+            background: rgba(var(--alert-rgb), 0.10);
+        }
+        .graphs-email-status.is-ok,
+        .graphs-chip.is-ok {
+            color: var(--ok-text);
+            border-color: var(--ok);
+            background: rgba(var(--ok-rgb), 0.08);
+        }
+        .graphs-email-status.is-idle,
+        .graphs-chip.is-idle {
+            color: var(--text-muted);
+            border-color: var(--led-idle);
+            background: rgba(var(--led-idle-rgb), 0.10);
+        }
+        /* Kept beside the rules it overrides (the main 900px block sits
+           earlier in the file and would lose the cascade). Commands go
+           above the graphs on a narrow screen, unstuck. */
+        @media (max-width: 900px) {
+            .graphs-layout {
+                grid-template-columns: minmax(0, 1fr);
+            }
+            .graphs-rail {
+                order: -1;
+                position: static;
+                max-height: none;
+            }
+        }
+        .battery-graphs-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        .battery-graphs-controls select {
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 4px;
+        }
+        .battery-chart-block {
+            margin-bottom: 16px;
+        }
+        .battery-chart-heading {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            font-size: 13px;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+        .battery-chart-heading .battery-chart-range {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+        .battery-chart-container {
+            position: relative;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+        }
+        .battery-chart-svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .battery-chart-line {
+            stroke: var(--accent);
+            stroke-width: 2px;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .battery-chart-grid {
+            stroke: var(--border);
+            stroke-width: 1px;
+        }
+        .battery-chart-axis-label {
+            fill: var(--text-muted);
+            font-size: 9px;
+        }
+        /* "System overview" panel (renderDailyOverviewChart) — Solar in
+           --caution (the theme's amber/orange, already used for the
+           low-battery threshold line below), Battery in --accent, the
+           same pairing VRM's own widget uses (orange bars, blue band). */
+        .daily-overview-solar-bar {
+            fill: var(--caution);
+        }
+        .daily-overview-soc-band {
+            fill: rgba(var(--accent-rgb), 0.18);
+            stroke: none;
+        }
+        .daily-overview-soc-line {
+            fill: none;
+            stroke: var(--accent);
+            stroke-width: 1.5px;
+        }
+        .daily-overview-legend {
+            display: flex;
+            gap: 14px;
+            padding: 4px 8px 6px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .daily-overview-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .daily-overview-legend-swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: var(--radius-sm);
+        }
+        .daily-overview-legend-swatch.is-solar {
+            background: var(--caution);
+        }
+        .daily-overview-legend-swatch.is-battery {
+            background: var(--accent);
+        }
+        .battery-chart-threshold {
+            stroke: var(--caution-text);
+            stroke-width: 1px;
+            stroke-dasharray: 4 3;
+        }
+        .battery-chart-threshold-label {
+            fill: var(--caution-text);
+            font-size: 9px;
+        }
+        /* The specific time window a finding (shading dip, dead-panel
+           comparison window) is about — drawn first, behind the grid and
+           line, so it reads as "this is the period in question" without
+           competing with the data itself. */
+        .battery-chart-highlight {
+            fill: var(--danger);
+            opacity: 0.12;
+        }
+        .battery-chart-highlight-label {
+            fill: var(--danger-text);
+            font-size: 9px;
+        }
+        /* Individual points in time (see renderLineChart's `markers`
+           option) — distinct from the highlight above, which shades a
+           WINDOW/duration. Default (no `kind`): "when the switch came
+           back up" (see openPowerVsCellRowDetail), so it gets the
+           ok/resolution color rather than the highlight's danger one —
+           a solid line, not dashed, so it doesn't read as another
+           threshold reference. */
+        .battery-chart-marker {
+            stroke: var(--ok);
+            stroke-width: 1.5px;
+        }
+        .battery-chart-marker-label {
+            fill: var(--ok-text);
+            font-size: 9px;
+        }
+        /* kind: "ticket-created" — when the ERP ticket itself was opened.
+           Accent-colored and dashed rather than solid: it's a reference
+           point, not a resolution/finding like the plain marker above, so
+           it needs a visibly different line style, not just a different
+           hue (same reasoning as the highlight/marker split itself). */
+        .battery-chart-marker.is-ticket-created {
+            stroke: var(--accent);
+            stroke-dasharray: 3 2;
+        }
+        .battery-chart-marker-label.is-ticket-created {
+            fill: var(--accent);
+        }
+        .battery-chart-crosshair {
+            stroke: var(--text-muted);
+            stroke-width: 1px;
+            stroke-dasharray: 2 2;
+        }
+        .battery-chart-dot {
+            fill: var(--accent);
+            stroke: var(--bg-deepest);
+            stroke-width: 1.5px;
+        }
+        .battery-chart-tooltip {
+            position: absolute;
+            top: 4px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 3px 7px;
+            font-size: 11px;
+            color: var(--text);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .battery-chart-empty {
+            padding: 24px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+        /* Scroll-to-zoom hint — quiet by default (a chart that's easy to
+           miss is better than one that shouts), brightens once actually
+           zoomed so it's obvious there's more of the series off-screen
+           and that double-click gets it back. */
+        .battery-chart-zoom-hint {
+            position: absolute;
+            top: 4px;
+            right: 8px;
+            font-size: 9px;
+            color: var(--text-muted);
+            opacity: 0.55;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .battery-chart-zoom-hint.is-zoomed {
+            color: var(--accent-softer);
+            opacity: 0.9;
+        }
+        .panel li:has(.command-menu[open]),
+        .panel li.menu-open {
+            z-index: 400;
+        }
+        .panel li.checkbox-legend {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: 8px;
+            padding: 0 6px 4px;
+        }
+        .checkbox-legend-rws {
+            grid-column: 3;
+            display: flex;
+            gap: 8px;
+            justify-self: end;
+        }
+        .legend-mark {
+            width: 16px;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 16px;
+            flex-shrink: 0;
+        }
+        .legend-r { color: var(--ok-text); }
+        .legend-w { color: var(--ok-soft); }
+        .legend-s { color: var(--warn-text); }
+        .panel li input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            margin: 0;
+            border: 2px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            background: var(--bg-sunken);
+            cursor: pointer;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .panel li input[type="checkbox"]:checked::after {
+            content: "";
+            position: absolute;
+            left: 4px;
+            top: 0px;
+            width: 4px;
+            height: 8px;
+            border: solid var(--text-on-accent);
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+        .panel li input[type="checkbox"].resolve-box:checked {
+            background: var(--ok-deep);
+            border-color: var(--ok-deep);
+        }
+        .panel li input[type="checkbox"].worked-box:checked {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+        .panel li input[type="checkbox"].skip-box:checked {
+            background: var(--warn-deep);
+            border-color: var(--warn-deep);
+        }
+        .count { color: var(--text-muted); font-size: 13px; font-weight: normal; }
+        .complete-badge {
+            display: none;
+            margin-left: 8px;
+            padding: 1px 8px;
+            border-radius: var(--radius-pill);
+            background: var(--ok-deep);
+            color: var(--ok-softer);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            vertical-align: middle;
+        }
+        .list-section.is-complete .complete-badge {
+            display: inline-block;
+        }
+        h2 .list-revalidate-btn {
+            margin-left: 10px;
+            vertical-align: middle;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 2px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        h2 .list-revalidate-btn:hover:not(:disabled) {
+            border-color: var(--accent);
+        }
+        h2 .list-revalidate-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .ticket-counters {
+            text-align: left;
+            align-self: end;
+            padding-bottom: 8px;
+        }
+        .resolved-counter {
+            color: var(--ok-text);
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .worked-counter {
+            color: var(--ok-soft);
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+            margin-top: 2px;
+        }
+        .skipped-counter {
+            color: var(--warn-text);
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+            margin-top: 2px;
+        }
+        .ticket-label {
+            flex: 1 1 auto;
+            min-width: 0;
+            /* "RD3331(MU8037)/RD3334(MU8036)/RD3332(MU8038)" has no spaces;
+               without this it can't wrap and pushes the row off-screen on a
+               narrow window (worse now that multi-unit tickets get one unit
+               button each on the left). */
+            overflow-wrap: anywhere;
+        }
+        .ticket-row-body .ticket-label {
+            flex: 1 1 200px;
+        }
+        .resolved-row .ticket-label,
+        .worked-row .ticket-label,
+        .skipped-row .ticket-label {
+            opacity: 0.75;
+        }
+        .action-btn {
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .action-btn:hover {
+            background: var(--border-strong);
+        }
+        .action-btn.is-active {
+            background: var(--caution-deep);
+            border-color: var(--caution-border);
+            color: var(--caution-softest);
+        }
+        .action-btn:disabled,
+        .action-btn.is-disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .command-menu {
+            position: relative;
+            flex-shrink: 0;
+            z-index: 1;
+        }
+        .command-menu[open] {
+            z-index: 400;
+        }
+        .command-menu summary {
+            list-style: none;
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .command-menu summary::-webkit-details-marker {
+            display: none;
+        }
+        /* Ticket row's left control: [⚡ RD3079][∿ RD3231][▾]. Each unit
+           button opens the Power vs Cell modal (openPowerVsCellRowDetail);
+           the ▾ is the quick command menu, its summary emptied so only the
+           ::after caret shows. Joined into one segmented control that reads
+           like the old single pill. */
+        .unit-split {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: stretch;
+        }
+        .unit-open-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 8px;
+            color: var(--text);
+            background: var(--border);
+            border: 1px solid var(--border-strong);
+            border-radius: 0;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .unit-split > :first-child,
+        .unit-split > :first-child > summary {
+            border-top-left-radius: var(--radius-sm);
+            border-bottom-left-radius: var(--radius-sm);
+        }
+        .unit-split > * + * {
+            margin-left: -1px; /* share the hairline between segments */
+        }
+        .unit-open-btn:hover,
+        .unit-open-btn:focus-visible {
+            background: var(--border-strong);
+            border-color: var(--accent);
+            outline: none;
+            position: relative; /* hover border sits above its neighbours */
+            z-index: 1;
+        }
+        .unit-open-btn .power-vs-cell-row-badge {
+            margin-left: 0;
+        }
+        .command-menu.is-caret summary {
+            padding: 4px 6px;
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+        }
+        .command-menu.is-caret summary::after {
+            content: "▾";
+        }
+        .command-menu.is-caret summary:hover {
+            border-color: var(--accent);
+        }
+        .command-menu summary::after {
+            content: " ▾";
+            font-size: 10px;
+        }
+        .command-menu[open] summary {
+            background: var(--border-strong);
+        }
+        .command-menu-items {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 4px);
+            z-index: 2000;
+            opacity: 1;
+            /* A fixed width rather than min-width alone: this used to size
+               to whatever child happened to be widest (one longer button
+               label stretching every short one — "Snap", "Ping" — to
+               match it), which read as empty space around short labels.
+               A fixed width plus the 2-column submenu grid below actually
+               uses that room instead of just reserving it. */
+            width: 300px;
+            max-width: calc(100vw - 24px);
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 6px;
+            background: var(--bg-sunken);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            box-shadow: 0 8px 24px rgba(var(--bg-deepest-rgb), 0.65);
+        }
+        .command-menu-items .action-btn {
+            display: block;
+            width: 100%;
+            text-align: left;
+            box-sizing: border-box;
+        }
+        .command-menu-context {
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .command-menu-context strong {
+            color: var(--text);
+            display: block;
+        }
+        .command-menu-context span {
+            color: var(--text-muted);
+            display: block;
+            margin-top: 2px;
+        }
+        /* Plug/alarm status row, top of the expanded menu — same glyphs as
+           before (see .command-alarm-glyph / .command-power-glyph), just
+           living here instead of on the collapsed summary button. Both
+           still start hidden and stay that way when there's nothing to
+           report (no VRM entry / no active alert), so the row can end up
+           empty; it takes up no visible space either way since it has no
+           border/background of its own. */
+        .command-menu-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        /* Graphs modal info line — set by openGraphsModal's optional 7th
+           argument, persists across a Window/Refresh change the same way
+           graphsHighlightRange/graphsMarkers do (not tied to loadGraphs'
+           own subtitle rebuild). Currently just switch uptime
+           (openPowerVsCellRowDetail, and the plain Network Latency Graphs
+           button), shown once next to the graph rather than only in the
+           toast/console line, which scroll away. */
+        .graphs-info-line {
+            font-size: 12px;
+            white-space: pre-line;
+            margin: 0;
+        }
+        /* Wraps #graphs_info_line + its refresh button so the button sits
+           right next to the "Current uptime (est.)" line instead of below
+           it — see #graphs_uptime_refresh's own comment. */
+        .graphs-info-line-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .graphs-info-line-row:not(:has(> :not([hidden]))) {
+            display: none;
+        }
+        /* Uptime text with its refresh button right beside it. The
+           battery/forecast pills moved to .graphs-stats below it. */
+        .graphs-info-line-row .graphs-info-line {
+            flex: 0 1 auto;
+            min-width: 0;
+        }
+        /* Refetches switch uptime without leaving the graph — same
+           /issues/robofiber-uptime/ call the row-level "Switch Uptime"
+           quick action uses, just feeding the result back into this
+           modal's own info line instead of the console/toast. Shown only
+           in network mode (openPowerVsCellRowDetail and the plain Network
+           Latency Graphs button are the only two callers that ever pass an
+           uptime infoLine — see openGraphsModal). Andrew's own request,
+           2026-09-30: re-reading uptime a few times while a graph is open
+           shouldn't require closing the modal to hit the row's own button. */
+        .graphs-uptime-refresh-btn {
+            background: var(--border);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            width: 22px;
+            height: 22px;
+            line-height: 1;
+            font-size: 13px;
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+        .graphs-uptime-refresh-btn:hover:not(:disabled) {
+            background: var(--border-strong);
+            color: var(--accent);
+        }
+        .graphs-uptime-refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+        /* Color rules pinned to the element's own id, not just
+           .graphs-info-line — .confirm-dialog p (class+element,
+           specificity 0,1,1) otherwise beats a plain .graphs-info-line
+           (0,1,0) and silently wins, always rendering --text-secondary
+           regardless of tier. Caught live, 2026-09-22: a fresh (1h50m)
+           switch uptime correctly got no is-warn/is-danger class, but the
+           BASE --ok-text green never showed either — every tier, healthy
+           or not, was being overridden the same way. #graphs_info_line
+           (0,1,0 -> effectively an id selector, always wins) fixes all
+           three. Same SWITCH_UPTIME_WARN_DAYS/DANGER_DAYS tiers as
+           .command-menu-uptime (see openPowerVsCellRowDetail) — reused
+           for other graph modes too (shading, dead panel), which never
+           add either class, so the default green stays correct for those. */
+        #graphs_info_line {
+            color: var(--ok-text);
+            margin: 0;
+        }
+        #graphs_info_line.is-warn {
+            color: var(--caution-text);
+        }
+        #graphs_info_line.is-danger {
+            color: var(--danger-text);
+        }
+        /* Resolved/Worked/Skipped, shown only when this modal was opened
+           from a ticket row that has them (currently just the Power vs
+           Cell Outage badge — see setGraphsRwsSource) — mirrors that row's
+           own R/W checkboxes exactly, so a tech can triage without closing
+           the graph to go find the row again. */
+        .graphs-rws-row {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin: 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .graphs-rws-row label {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
+        /* Diagnostic Header — the one thing above even the status row.
+           Alert-only, same convention as the shading/dead-panel glyphs:
+           empty and hidden on a clean unit, never a quiet "all OK" line. */
+        .command-diagnostic-header {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px;
+            margin-bottom: 6px;
+            background: var(--caution-bg);
+            border: 1px solid var(--caution-border);
+            border-radius: var(--radius-sm);
+        }
+        .diagnostic-header-row {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .diagnostic-header-row + .diagnostic-header-row {
+            padding-top: 6px;
+            border-top: 1px solid var(--caution-deep);
+        }
+        .diagnostic-header-text {
+            font-size: 12px;
+            line-height: 1.4;
+            color: var(--caution-softest);
+        }
+        .diagnostic-header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+        .diagnostic-header-actions .action-btn {
+            width: auto;
+            flex: 0 0 auto;
+        }
+        .diagnostic-header-schedule {
+            display: inline-flex;
+            align-items: center;
+        }
+        .diagnostic-header-schedule-status {
+            font-size: 11px;
+            color: var(--caution-soft);
+        }
+        .command-menu-status .command-alarm-glyph,
+        .command-menu-status .command-power-glyph {
+            margin-left: 0;
+        }
+        /* Switch uptime line — NOT alert-only, unlike the status-row glyphs
+           and Diagnostic Header above: it's informational (from the Up
+           Steady sweep's own switch-uptime read, not a finding), so it
+           shows for any unit the sweep has data on, outage or not. Hidden
+           entirely when there's no cached reading (units outside Up
+           Steady, or before the sweep has ever run for this one). */
+        .command-menu-uptime {
+            font-size: 11px;
+            color: var(--ok-text);
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+        }
+        .command-menu-uptime:hover {
+            text-decoration: underline;
+        }
+        .command-menu-uptime.is-loading {
+            cursor: default;
+            opacity: 0.7;
+            text-decoration: none;
+        }
+        /* SWITCH_UPTIME_WARN_DAYS / SWITCH_UPTIME_DANGER_DAYS (20d / 50d) —
+           a switch that's been up this long hasn't rebooted for anything in
+           weeks, worth flagging on sight. --danger-text (not --danger,
+           which is tuned for fills/borders) is the theme's own readable-
+           on-dark text variant, same pairing --caution-text already uses. */
+        .command-menu-uptime.is-warn {
+            color: var(--caution-text);
+        }
+        .command-menu-uptime.is-danger {
+            color: var(--danger-text);
+        }
+        /* Flap graph — same per-unit history strip as the Flap Report
+           (renderFlapTimelineBar/.flap-timeline-bar), shown inline here only
+           when checkAndApplyFlapRow finds this unit currently flapping. */
+        .command-menu-flap {
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .command-recent {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            padding-bottom: 6px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .command-recent-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-right: 2px;
+        }
+        .command-recent .command-recent-btn {
+            font-size: 11px;
+            padding: 2px 8px;
+        }
+        .unit-busy-banner {
+            margin-top: 6px;
+            padding: 6px 8px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            line-height: 1.4;
+            background: rgba(var(--caution-border-rgb), 0.15);
+            border: 1px solid var(--caution-border);
+            color: var(--caution-text);
+        }
+        .unit-busy-banner button {
+            margin-top: 4px;
+            font-size: 11px;
+            padding: 2px 6px;
+        }
+        .unit-notes-box {
+            margin-top: 6px;
+        }
+        .unit-notes-box textarea {
+            width: 100%;
+            box-sizing: border-box;
+            min-height: 44px;
+            resize: vertical;
+            font-size: 12px;
+            font-family: inherit;
+            background: var(--bg-sunken);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 4px 6px;
+        }
+        .unit-notes-box .note-status {
+            font-size: 11px;
+            color: var(--border-subtle);
+            margin-left: 6px;
+        }
+        /* "Search commands" box at the top of the row command menu and the
+           Graphs modal's command rail (createCommandSearch). Same 12px
+           scale as the .action-btn rows it filters. */
+        .command-search {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-bottom: 4px;
+        }
+        .command-search input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 4px 8px;
+            font: inherit;
+            font-size: 12px;
+            color: var(--text);
+            background: var(--bg-deepest);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+        }
+        .command-search input::placeholder {
+            color: var(--text-muted);
+        }
+        .command-search input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .command-search-empty {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .graphs-rail .command-search {
+            margin-bottom: 0;
+        }
+        .command-submenu {
+            position: relative;
+        }
+        .command-submenu > summary {
+            list-style: none;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            width: 100%;
+            box-sizing: border-box;
+            text-align: left;
+        }
+        .command-submenu > summary::-webkit-details-marker {
+            display: none;
+        }
+        .command-submenu > summary::after {
+            content: " ▸";
+            font-size: 10px;
+            float: right;
+        }
+        .command-submenu[open] > summary {
+            background: var(--border);
+        }
+        .command-menu-items .command-submenu[open] {
+            z-index: 5;
+        }
+        .command-submenu-items {
+            /* Row + wrap, not a rigid column: short labels ("Snap", "Ping
+               Router") pair up two-to-a-row instead of each claiming a
+               full-width row's worth of empty space to its right; a
+               longer label ("Network Latency Graphs (Experimental)")
+               still gets its own row because flex respects its actual
+               content width — no fixed column count to fight. */
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin-top: 4px;
+            padding: 4px;
+            background: var(--bg-deepest);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+        }
+        .command-submenu-items .action-btn {
+            display: block;
+            width: auto;
+            flex: 1 1 44%;
+        }
+        /* A nested submenu toggle (e.g. Graphs, inside Diagnostics) is a
+           different kind of control than a plain action button — it
+           expands further rather than running something — so it keeps
+           its own full row rather than competing for half of one. */
+        .command-submenu-items > .command-submenu {
+            flex: 1 1 100%;
+        }
+        .command-browser-toggle {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 4px;
+            padding-bottom: 4px;
+            border-bottom: 1px solid var(--border);
+        }
+        .command-browser-toggle button {
+            flex: 1;
+            background: var(--bg-panel);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 2px 6px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .command-browser-toggle button.is-active {
+            background: var(--border);
+            border-color: var(--text-muted);
+        }
+        .command-browser-toggle button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        .camera-launch-list {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        /* One dot+label pair per camera on a collapsed multi-camera outage
+           row (see groupCameraOutageEntries) — the dot reuses .speaker-led
+           as-is, this just adds room for a short label next to it. */
+        .camera-strip-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+        .camera-strip-led-label {
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+        .speaker-led {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: var(--led-idle);
+            box-shadow: 0 0 6px rgba(var(--led-idle-rgb), 0.8);
+        }
+        .speaker-led.is-up {
+            background: var(--ok);
+            box-shadow: 0 0 8px rgba(var(--ok-rgb), 0.95);
+        }
+        .speaker-led.is-down {
+            background: var(--danger);
+            box-shadow: 0 0 8px rgba(var(--danger-rgb), 0.95);
+        }
+        .speaker-led.is-warning {
+            background: var(--warn);
+            box-shadow: 0 0 8px rgba(var(--warn-rgb), 0.95);
+        }
+        .speaker-led.is-multi {
+            background: var(--alert);
+            box-shadow: 0 0 8px rgba(var(--alert-rgb), 0.95);
+        }
+        /* The command menu's status row gets a CLONE of this same LED
+           (see createCommandMenuElement's rowLed.cloneNode) sitting next
+           to the other status glyphs, which are now much bigger — sized
+           up here so the clone matches them, without touching the
+           original dot's own (correctly-sized) footprint on the ticket
+           row itself. */
+        .command-menu-status .speaker-led {
+            width: 22px;
+            height: 22px;
+        }
+        .command-menu-status .speaker-led::after {
+            font-size: 14px;
+        }
+        .command-menu-status .speaker-led.is-down::after {
+            font-size: 16px;
+        }
+        .wx-icon {
+            width: 18px;
+            height: 14px;
+            flex-shrink: 0;
+            position: relative;
+            display: inline-block;
+            opacity: 0.95;
+            cursor: pointer;
+        }
+        .wx-icon:hover {
+            opacity: 1;
+            filter: brightness(1.15);
+        }
+        .wx-icon.wx-loading {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+        .wx-icon.wx-pending {
+            opacity: 0.35;
+            background: var(--border-subtle);
+            border-radius: var(--radius-sm);
+        }
+        .wx-icon.wx-sun {
+            background:
+                linear-gradient(var(--caution), var(--caution)) center / 2px 100% no-repeat,
+                linear-gradient(var(--caution), var(--caution)) center / 100% 2px no-repeat;
+        }
+        .wx-icon.wx-sun::before {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 6px;
+            height: 6px;
+            margin: -3px 0 0 -3px;
+            border-radius: 50%;
+            background: var(--warn-bright);
+            box-shadow: 0 0 4px rgba(var(--warn-bright-rgb), 0.95);
+            z-index: 1;
+        }
+        .wx-icon.wx-sun::after {
+            content: "";
+            position: absolute;
+            inset: -1px;
+            background:
+                linear-gradient(var(--caution), var(--caution)) center / 2px 100% no-repeat,
+                linear-gradient(var(--caution), var(--caution)) center / 100% 2px no-repeat;
+            transform: rotate(45deg);
+        }
+        .wx-icon.wx-cloud::before,
+        .wx-icon.wx-cloud-mostly::before,
+        .wx-icon.wx-sun-cloud::before,
+        .wx-icon.wx-cloud-rain::before,
+        .wx-icon.wx-cloud-snow::before,
+        .wx-icon.wx-cloud-lightning::before,
+        .wx-icon.wx-fog::before {
+            content: "";
+            position: absolute;
+            left: 1px;
+            right: 1px;
+            top: 3px;
+            height: 7px;
+            border-radius: var(--radius);
+            background: var(--text-secondary);
+            box-shadow: 3px -2px 0 1px var(--text-muted), -3px -1px 0 0 var(--text-muted);
+        }
+        /* Partly cloudy: bright sun clearly beside / behind cloud */
+        .wx-icon.wx-sun-cloud::after {
+            content: "";
+            position: absolute;
+            width: 7px;
+            height: 7px;
+            right: -1px;
+            top: -1px;
+            border-radius: 50%;
+            background: var(--warn-bright);
+            box-shadow: 0 0 5px rgba(var(--warn-bright-rgb), 0.95);
+            z-index: -1;
+        }
+        /* Mostly cloudy: larger gray cloud, tiny sun barely peeking */
+        .wx-icon.wx-cloud-mostly::before {
+            background: var(--text-muted);
+            box-shadow: 4px -2px 0 2px var(--border-subtle), -4px -1px 0 1px var(--border-subtle);
+            height: 8px;
+            top: 2px;
+        }
+        .wx-icon.wx-cloud-mostly::after {
+            content: "";
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            left: 1px;
+            top: 0;
+            border-radius: 50%;
+            background: var(--caution-text);
+            box-shadow: 0 0 3px rgba(var(--caution-text-rgb), 0.7);
+            z-index: -1;
+            opacity: 0.85;
+        }
+        .wx-icon.wx-cloud-rain::after,
+        .wx-icon.wx-cloud-snow::after {
+            content: "";
+            position: absolute;
+            left: 4px;
+            right: 4px;
+            bottom: 0;
+            height: 4px;
+            background:
+                radial-gradient(circle at 20% 50%, var(--info) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, var(--info) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, var(--info) 1.2px, transparent 1.4px);
+        }
+        .wx-icon.wx-cloud-snow::after {
+            background:
+                radial-gradient(circle at 20% 50%, var(--text) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 50% 80%, var(--text) 1.2px, transparent 1.4px),
+                radial-gradient(circle at 80% 40%, var(--text) 1.2px, transparent 1.4px);
+        }
+        .wx-icon.wx-fog::before {
+            height: 2px;
+            top: 4px;
+            box-shadow: 0 3px 0 var(--text-muted), 0 6px 0 var(--border-subtle);
+            background: var(--text-muted);
+            border-radius: var(--radius-sm);
+        }
+        .wx-icon.wx-cloud-lightning::after {
+            content: "";
+            position: absolute;
+            left: 7px;
+            top: 7px;
+            width: 4px;
+            height: 7px;
+            background: var(--warn-bright);
+            clip-path: polygon(40% 0, 100% 0, 55% 45%, 90% 45%, 0 100%, 35% 50%, 5% 50%);
+            animation: wx-bolt-flash 1.2s ease-in-out infinite;
+            filter: drop-shadow(0 0 3px var(--warn-text));
+        }
+        .wx-icon.wx-cloud-lightning::before {
+            animation: wx-cloud-drift 2.4s ease-in-out infinite;
+        }
+        @keyframes wx-bolt-flash {
+            0%, 70%, 100% { opacity: 0.15; }
+            75%, 85% { opacity: 1; }
+            80% { opacity: 0.35; }
+        }
+        @keyframes wx-cloud-drift {
+            0%, 100% { transform: translateX(0); }
+            50% { transform: translateX(1px); }
+        }
+        .snapshot-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(var(--bg-deepest-rgb), 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            /* Above .confirm-modal's 3100 (see the guided-tour comment
+               further down) — Fisheye Snapshot/Camera Grid/360 Snapshot can
+               all be opened from a command menu or the Graphs modal itself,
+               and need to land on top of it, not behind it. Caught live:
+               360 Snapshot opened from the Graphs modal rendered faded out
+               behind it instead of on top. */
+            z-index: 3200;
+            padding: 24px;
+        }
+        .snapshot-modal.is-open {
+            display: flex;
+        }
+        .snapshot-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            max-width: 95vw;
+        }
+        .snapshot-toolbar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .snapshot-viewport {
+            max-width: 95vw;
+            max-height: calc(90vh - 48px);
+            overflow: hidden;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-deepest);
+            cursor: grab;
+            touch-action: none;
+            line-height: 0;
+        }
+        .snapshot-viewport.is-panning {
+            cursor: grabbing;
+        }
+        .snapshot-modal img {
+            max-width: 95vw;
+            max-height: calc(90vh - 48px);
+            transform-origin: 0 0;
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+        .snapshot-modal .snapshot-status {
+            color: var(--text);
+            font-size: 16px;
+        }
+        /* Camera snapshot grid (non-Scrypted camera-outage follow-up) —
+           same overlay shape as .snapshot-modal, own panel since this one
+           has a variable-count grid instead of a single centered image. */
+        .camera-grid-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(var(--bg-deepest-rgb), 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            /* Same reasoning as .snapshot-modal above — must outrank
+               .confirm-modal's 3100 now that 360 Snapshot opens from
+               inside the Graphs modal. */
+            z-index: 3200;
+            padding: 24px;
+        }
+        .camera-grid-modal.is-open {
+            display: flex;
+        }
+        .camera-grid-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-width: 95vw;
+            max-height: 90vh;
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            padding: 16px;
+            overflow: auto;
+        }
+        .camera-grid-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .camera-grid-title {
+            color: var(--text);
+            font-size: 14px;
+        }
+        .camera-grid-body {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+            color: var(--text-muted);
+        }
+        .camera-grid-tile {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 6px;
+            background: var(--bg-deepest);
+        }
+        .camera-grid-tile img {
+            width: 100%;
+            aspect-ratio: 4 / 3;
+            object-fit: contain;
+            background: var(--bg-deepest);
+            border-radius: var(--radius-sm);
+        }
+        .camera-grid-tile-label {
+            color: var(--text);
+            font-size: 12px;
+        }
+        .camera-grid-tile-status {
+            color: var(--danger-text);
+            font-size: 11px;
+            min-height: 14px;
+        }
+        .camera-grid-tile-status.is-info {
+            color: var(--text-muted);
+        }
+        /* A tile whose snapshot fetch just failed (img error) — the SAME
+           visual signal a dead camera should give here, distinct from the
+           others still refreshing normally next to it. */
+        .camera-grid-tile.is-down {
+            border-color: var(--danger-text);
+        }
+        .camera-grid-tile.is-down img {
+            opacity: 0.35;
+        }
+        .nav-links {
+            margin-top: 10px;
+        }
+        a { color: var(--accent-soft); }
+        .empty { color: var(--text-muted); }
+        .meta {
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+        .undiagnosed-row {
+            color: var(--danger-soft);
+        }
+        /* Brief flash on the row a Graphs modal (currently just Power vs
+           Cell Outage) scrolls back to on close — see
+           scrollToGraphsSourceRow — so it's obvious which row you just
+           came back to, not just that the page jumped somewhere. */
+        .just-viewed-row {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .undiagnosed-badge {
+            color: var(--danger-soft);
+            font-weight: bold;
+            font-size: 12px;
+        }
+        .new-ticket-badge {
+            color: var(--ok-text);
+            font-size: 12px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .discarded-list li {
+            display: block;
+            color: var(--text-muted);
+            padding: 4px 0;
+        }
+        .discarded-reason {
+            color: var(--danger-text);
+            font-size: 12px;
+        }
+        /* Per-unit Commands buttons in front of a Miscellaneous ticket
+           (renderDiscardedList); each turns into the usual command menu
+           pill once clicked. */
+        .discarded-commands {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        .discarded-commands .command-menu {
+            display: inline-block;
+        }
+        .stats-strip {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 4px 0 12px;
+        }
+        .stats-chip {
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 4px 10px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .stats-chip strong {
+            color: var(--text);
+            font-size: 13px;
+        }
+        .stats-chip.is-warning {
+            border-color: var(--caution-border);
+            color: var(--caution-text);
+        }
+        .stats-delta {
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .stats-delta.is-up {
+            color: var(--danger);
+        }
+        .stats-delta.is-down {
+            color: var(--ok);
+        }
+        .stats-chip.is-warning strong {
+            color: var(--caution-text);
+        }
+        /* Chips that filter the lists below. The strip keeps its summary look;
+           these only add affordance and a selected state. */
+        .stats-chip.is-filter {
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+        .stats-chip.is-filter:hover:not(:disabled) {
+            background: var(--border);
+            border-color: var(--border-subtle);
+        }
+        .stats-chip.is-filter:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .stats-chip.is-filter.is-active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--text-on-accent);
+        }
+        .stats-chip.is-filter.is-active strong { color: var(--text-on-accent); }
+        .stats-chip.is-filter.is-active:hover { background: var(--accent-hover); }
+        /* Empty lists hold their position but read as inactive. */
+        .stats-chip.is-filter.is-empty {
+            opacity: 0.45;
+            cursor: default;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .stats-chip.is-filter { transition: none; }
+        }

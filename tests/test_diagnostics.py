@@ -189,6 +189,19 @@ class UnitHistoryDatabase(unittest.TestCase):
         self.assertEqual(summary["transitions"], 3)
         self.assertTrue(summary["currently_healthy"])
 
+    def test_flap_summary_timeline_is_chronological_and_matches_checks(self):
+        # The Flap Report's per-unit status bar renders this directly — it
+        # has to be in the same chronological order flap_summary itself
+        # counts transitions in, and line up 1:1 with "checks".
+        for category in ("truly_down", "truly_down", "false_positives", "truly_down", "false_positives"):
+            unit_history.record("RD2TIMELINE", "validate_quick", category=category)
+        summary = unit_history.flap_summary("RD2TIMELINE")
+        self.assertEqual(len(summary["timeline"]), summary["checks"])
+        healthy_sequence = [point["healthy"] for point in summary["timeline"]]
+        self.assertEqual(healthy_sequence, [False, False, True, False, True])
+        timestamps = [point["ts"] for point in summary["timeline"]]
+        self.assertEqual(timestamps, sorted(timestamps))
+
     def test_steadily_down_unit_has_no_transitions(self):
         for _ in range(6):
             unit_history.record("RD3", "validate_quick", category="truly_down")
@@ -458,6 +471,16 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
     # by weeks). Mocks only the network-backed pieces
     # (get_robofiber_uptime / unit_network_latency_history); the
     # comparison logic itself runs for real.
+    def setUp(self):
+        # unit_power_vs_cell_outage caches a confirmed switch_up_since per
+        # unit (work_tool.diagnostics._SWITCH_UPTIME_CACHE) so a repeat
+        # sweep with nothing new to explain skips the SSH round trip. Every
+        # test here reuses the same unit ("RD9999"), so without clearing
+        # this between tests, a later test's mocked get_robofiber_uptime
+        # would never even get called — it'd silently reuse an earlier
+        # test's cached value instead.
+        work_tool.diagnostics._SWITCH_UPTIME_CACHE.clear()
+
     def _loss_points(self, start_dt, end_dt):
         points = [{"t": int((start_dt - dt.timedelta(minutes=30)).timestamp() * 1000), "v": 5.0}]
         t = start_dt
@@ -560,6 +583,117 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertEqual(info["verdict"], "cell_outage")
         self.assertIn("since rebooted again", info["reason"])
 
+    def test_longer_window_wins_when_windows_disagree(self):
+        # Two qualifying windows that read DIFFERENTLY: an old, 2-day cell
+        # outage (switch was still up minutes ago, long after this window
+        # ended, so it reads as cell_after_reboot) and a short, 20-minute
+        # window that lines up exactly with the switch's own recent
+        # reboot (power_outage). The most recent window alone would say
+        # "power outage" — Andrew's rule says the longer one (cell) is the
+        # relevant verdict instead.
+        now = dt.datetime.now(dt.timezone.utc)
+        switch_up_since = now - dt.timedelta(minutes=10)
+
+        cell_start = now - dt.timedelta(days=10)
+        cell_end = cell_start + dt.timedelta(days=2)
+        power_end = switch_up_since
+        power_start = power_end - dt.timedelta(minutes=20)
+
+        points = self._loss_points(cell_start, cell_end) + self._loss_points(power_start, power_end)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 0 Days 0 Hours 10 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": points}}}, None),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "cell_outage")
+        self.assertIn("power outage", info["reason"])
+        self.assertIn("relevant one", info["reason"])
+        # The chosen window is the long-ago cell outage, not the recent
+        # power-shaped one.
+        self.assertAlmostEqual(info["loss_window_start"], cell_start.timestamp(), delta=200)
+
+    def test_ticket_creation_time_overrides_duration(self):
+        # Same two disagreeing windows as the duration test above, but this
+        # time the ticket was opened right in the middle of the SHORT
+        # power window. Andrew's rule: the ticket's own creation time is
+        # the real signal for which outage it's about, and outranks the
+        # longer-duration fallback.
+        now = dt.datetime.now(dt.timezone.utc)
+        switch_up_since = now - dt.timedelta(minutes=10)
+
+        cell_start = now - dt.timedelta(days=10)
+        cell_end = cell_start + dt.timedelta(days=2)
+        power_end = switch_up_since
+        power_start = power_end - dt.timedelta(minutes=20)
+
+        points = self._loss_points(cell_start, cell_end) + self._loss_points(power_start, power_end)
+        ticket_opened = power_start + (power_end - power_start) / 2
+        creation_text = ticket_opened.astimezone(work_tool.diagnostics._ARIZONA_TZ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 0 Days 0 Hours 10 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": points}}}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "_fetch_erp_issue_doc",
+                return_value=({"creation": creation_text}, None),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999", issue_id="ISS-1")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "power_outage")
+        self.assertEqual(info["window_picked_by"], "ticket_creation")
+        self.assertAlmostEqual(info["loss_window_start"], power_start.timestamp(), delta=200)
+        self.assertIn("matching the ticket's own creation time", info["reason"])
+
+    def test_ticket_lookup_failure_falls_back_to_duration(self):
+        # Same setup, but the ERP Issue lookup itself fails — should
+        # degrade to the duration fallback (cell outage, the longer
+        # window) rather than erroring the whole diagnostic out.
+        now = dt.datetime.now(dt.timezone.utc)
+        switch_up_since = now - dt.timedelta(minutes=10)
+
+        cell_start = now - dt.timedelta(days=10)
+        cell_end = cell_start + dt.timedelta(days=2)
+        power_end = switch_up_since
+        power_start = power_end - dt.timedelta(minutes=20)
+
+        points = self._loss_points(cell_start, cell_end) + self._loss_points(power_start, power_end)
+
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 0 Days 0 Hours 10 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": points}}}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "_fetch_erp_issue_doc",
+                return_value=(None, "ISS-1 was not found in ERP"),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999", issue_id="ISS-1")
+        self.assertIsNone(error)
+        self.assertEqual(info["verdict"], "cell_outage")
+        self.assertEqual(info["window_picked_by"], "duration")
+        self.assertIn("could not check the ticket's creation time", info["reason"])
+
     def test_no_recent_outage_when_no_high_loss_window(self):
         with (
             mock.patch.object(
@@ -614,6 +748,86 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
             info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
         self.assertIsNone(error)
         self.assertEqual(info["verdict"], "no_recent_outage")
+
+    def test_repeat_sweep_with_same_window_skips_ssh_uptime(self):
+        # The redundant-check case this cache exists for: a scheduled
+        # sweep re-runs against the same already-explained loss window
+        # (still inside the 14-day lookback) and shouldn't SSH again for
+        # an answer it already has.
+        start = dt.datetime(2026, 9, 9, 15, 31, tzinfo=dt.timezone.utc)
+        end = dt.datetime(2026, 9, 10, 18, 50, tzinfo=dt.timezone.utc)
+        points = self._loss_points(start, end)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 18 Days 0 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": points}}}, None),
+            ),
+        ):
+            first, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                side_effect=AssertionError("SSH should not have been called again"),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": points}}}, None),
+            ),
+        ):
+            second, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(second["verdict"], first["verdict"])
+        self.assertEqual(second["switch_up_since"], first["switch_up_since"])
+
+    def test_new_window_after_cached_check_still_ssh_uptime(self):
+        # A cached answer only covers windows it already scored — a
+        # genuinely new loss window (possibly from a fresh reboot) must
+        # still trigger a real SSH check, not reuse the stale cache.
+        old_start = dt.datetime(2026, 9, 9, 15, 31, tzinfo=dt.timezone.utc)
+        old_end = dt.datetime(2026, 9, 10, 18, 50, tzinfo=dt.timezone.utc)
+        with (
+            mock.patch.object(
+                work_tool.diagnostics, "get_robofiber_uptime",
+                return_value=({"uptime": "Uptime: 18 Days 0 Hours 0 Mins 0 Secs"}, None),
+            ),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": self._loss_points(old_start, old_end)}}}, None),
+            ),
+        ):
+            work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+
+        # Back-date the cached checked_at, as if that first check happened
+        # right after the old window — anything after that point is a
+        # window the cache hasn't seen yet.
+        cached = work_tool.diagnostics._SWITCH_UPTIME_CACHE["RD9999"]
+        cached["checked_at"] = old_end.timestamp() + 3600
+
+        new_start = old_end + dt.timedelta(hours=2)
+        new_end = old_end + dt.timedelta(hours=3)
+        combined_points = self._loss_points(old_start, old_end) + self._loss_points(new_start, new_end)
+        calls = []
+
+        def fake_uptime(unit):
+            calls.append(unit)
+            return {"uptime": "Uptime: 0 Days 0 Hours 45 Mins 0 Secs"}, None
+
+        with (
+            mock.patch.object(work_tool.diagnostics, "get_robofiber_uptime", side_effect=fake_uptime),
+            mock.patch.object(
+                work_tool.diagnostics, "unit_network_latency_history",
+                return_value=({"charts": {"router_loss": {"points": combined_points}}}, None),
+            ),
+        ):
+            info, error = work_tool.diagnostics.unit_power_vs_cell_outage("RD9999")
+        self.assertIsNone(error)
+        self.assertEqual(calls, ["RD9999"])
 
     def test_default_window_is_two_weeks_not_three_days(self):
         # Reported live: RD3122's switch had been up 5+ days with nothing
@@ -720,6 +934,44 @@ class PowerVsCellOutageVerdict(unittest.TestCase):
         self.assertAlmostEqual(info["loss_window_end"], end.timestamp(), delta=200)
 
 
+class FleetPowerVsCellOutageIssueIds(unittest.TestCase):
+    # Up Steady rows are real ERP tickets too — fleet_power_vs_cell_outage_status
+    # takes an optional {unit: issue_id} map and must pass each unit's own
+    # issue_id straight through to unit_power_vs_cell_outage, not mix them
+    # up or drop the ones with no mapping.
+    def test_each_unit_gets_its_own_mapped_issue_id(self):
+        seen = {}
+
+        def fake_check(unit, issue_id=None):
+            seen[unit] = issue_id
+            return {"unit": unit, "verdict": "no_recent_outage"}, None
+
+        with mock.patch.object(
+            work_tool.diagnostics, "unit_power_vs_cell_outage", side_effect=fake_check
+        ):
+            rows, error = work_tool.diagnostics.fleet_power_vs_cell_outage_status(
+                ["RD3076", "RD3132"],
+                unit_issue_ids={"RD3076": "ISS-1"},
+            )
+        self.assertIsNone(error)
+        self.assertEqual(seen, {"RD3076": "ISS-1", "RD3132": None})
+        self.assertEqual({row["unit"] for row in rows}, {"RD3076", "RD3132"})
+
+    def test_missing_unit_issue_ids_defaults_to_none_for_everyone(self):
+        seen = {}
+
+        def fake_check(unit, issue_id=None):
+            seen[unit] = issue_id
+            return {"unit": unit, "verdict": "no_recent_outage"}, None
+
+        with mock.patch.object(
+            work_tool.diagnostics, "unit_power_vs_cell_outage", side_effect=fake_check
+        ):
+            rows, error = work_tool.diagnostics.fleet_power_vs_cell_outage_status(["RD3076"])
+        self.assertIsNone(error)
+        self.assertEqual(seen, {"RD3076": None})
+
+
 class RebootBounceNote(unittest.TestCase):
     def test_no_note_when_no_data_near_reboot(self):
         # No Zabbix points at all near the reboot — a data gap, not
@@ -737,6 +989,88 @@ class RebootBounceNote(unittest.TestCase):
         note = work_tool.diagnostics._reboot_bounce_note(1000.0, loss_points, 900)
         self.assertIsNotNone(note)
         self.assertIn("bounce", note)
+
+
+class NucDiskHealthSummary(unittest.TestCase):
+    """
+    _summarize_nuc_disk_health turns the NUC's PowerShell JSON into a verdict.
+    Base case is RD1009's real output (2026-10-05): three healthy drives and
+    the RAM drive's routine "write cache disabled" warning.
+    """
+
+    NOW = dt.datetime(2026, 10, 5, 18, 0, tzinfo=dt.timezone.utc)
+
+    def _rd1009(self):
+        return {
+            "Disks": [
+                {"DeviceId": "2", "Name": "Miray RAM Drive", "Media": "Unspecified", "Bus": "SCSI",
+                 "Health": "Healthy", "Operational": "OK", "SizeGB": 1},
+                {"DeviceId": "1", "Name": "HP SSD EX900 250GB", "Media": "SSD", "Bus": "NVMe",
+                 "Health": "Healthy", "Operational": "OK", "SizeGB": 233},
+                {"DeviceId": "0", "Name": "ST2000LM015-2E8174", "Media": "HDD", "Bus": "SATA",
+                 "Health": "Healthy", "Operational": "OK", "SizeGB": 1863},
+            ],
+            "Reliability": [
+                {"DeviceId": "1", "Temperature": 51, "TemperatureMax": 70, "Wear": 0},
+                {"DeviceId": "0", "Temperature": 44, "Wear": 0, "ReadErrorsTotal": 52,
+                 "ReadErrorsUncorrected": 0, "PowerOnHours": 53537},
+            ],
+            "Predict": {"Instance": "SCSI\\Disk&Ven_&Prod_ST2000LM015-2E81\\4&31bbc50&0&020000_0",
+                        "PredictFailure": False, "Reason": 0},
+            "Events": {"Provider": "disk", "Id": 34, "Level": 3, "Time": "2026-10-05T17:14:34Z",
+                       "Message": "The driver disabled the write cache on device \\Device\\Harddisk2\\DR2."},
+        }
+
+    def _summarize(self, parsed):
+        return work_tool.diagnostics._summarize_nuc_disk_health("RD1009", parsed, now=self.NOW)
+
+    def test_rd1009_is_healthy_and_single_objects_are_handled(self):
+        # Predict and Events come back as bare objects (one item each).
+        info = self._summarize(self._rd1009())
+        self.assertEqual(info["status"], "ok")
+        seagate = next(d for d in info["disks"] if d["name"].startswith("ST2000"))
+        self.assertIs(seagate["predict_failure"], False)
+        self.assertEqual(seagate["read_errors_total"], 52)
+        self.assertEqual(info["events"][0]["disk"], "Miray RAM Drive")
+        self.assertEqual(info["events"][0]["tier"], "other")
+
+    def test_recent_bad_block_fails(self):
+        parsed = self._rd1009()
+        parsed["Events"] = [
+            {"Provider": "disk", "Id": 7, "Level": 2, "Time": "2026-10-04T09:00:00Z",
+             "Message": "The device, \\Device\\Harddisk0\\DR0, has a bad block."},
+            {"Provider": "disk", "Id": 7, "Level": 2, "Time": "2026-10-03T09:00:00Z",
+             "Message": "The device, \\Device\\Harddisk0\\DR0, has a bad block."},
+        ]
+        info = self._summarize(parsed)
+        self.assertEqual(info["status"], "fail")
+        self.assertIn("2x bad block", info["reasons"][0])
+        self.assertEqual(info["events"][0]["disk"], "ST2000LM015-2E8174")
+
+    def test_old_critical_event_only_warns(self):
+        parsed = self._rd1009()
+        parsed["Events"] = [{"Provider": "Microsoft-Windows-Ntfs", "Id": 55, "Level": 2,
+                             "Time": "2026-08-01T00:00:00Z", "Message": "A corruption was discovered."}]
+        info = self._summarize(parsed)
+        self.assertEqual(info["status"], "warn")
+
+    def test_storage_reset_is_a_warning(self):
+        parsed = self._rd1009()
+        parsed["Events"] = [{"Provider": "stornvme", "Id": 129, "Level": 3,
+                             "Time": "2026-10-05T10:00:00Z", "Message": "Reset to device was issued."}]
+        info = self._summarize(parsed)
+        self.assertEqual(info["status"], "warn")
+        self.assertEqual(info["events"][0]["meaning"], "drive stopped responding and was reset")
+
+    def test_unhealthy_drive_predict_fail_or_uncorrected_errors_fail(self):
+        for mutate in (
+            lambda p: p["Disks"][2].update(Health="Warning"),
+            lambda p: p["Predict"].update(PredictFailure=True),
+            lambda p: p["Reliability"][1].update(ReadErrorsUncorrected=3),
+        ):
+            parsed = self._rd1009()
+            mutate(parsed)
+            self.assertEqual(self._summarize(parsed)["status"], "fail")
 
 
 if __name__ == "__main__":

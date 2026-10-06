@@ -24,6 +24,7 @@ import paramiko
 import threading
 import socket
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from requests.auth import HTTPDigestAuth, HTTPBasicAuth
@@ -42,6 +43,50 @@ from ._core import (  # noqa: F401  (re-exported dependencies)
     env_path,
     username,
 )
+
+
+@contextmanager
+def _ssh_client(host, username, password, timeout=30):
+    """
+    Open an SSH connection the way every security_update_web_* step does
+    (AutoAddPolicy, no agent/keys, an explicit timeout) — factored out
+    after the SSH-timeout fix (2026-09-23) had to be applied by hand to
+    12 near-identical connect() calls in this file; a future change to
+    this setup now only needs to happen once. Closes the connection on
+    the way out regardless of what the caller did inside the `with`.
+    """
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host, username=username, password=password,
+            timeout=timeout, allow_agent=False, look_for_keys=False,
+        )
+        yield client
+    finally:
+        client.close()
+
+
+def _ssh_exec(client, command, timeout=30):
+    """
+    Run one command over an already-open connection from _ssh_client.
+    Returns (output, errors, exit_status) as decoded text/int — the
+    read-and-decode boilerplate every step below repeated on its own.
+    Callers that need to run more than one command over the same
+    connection (e.g. a script, then a follow-up reboot) call this more
+    than once inside the same `with _ssh_client(...) as client:` block.
+    """
+    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    output = stdout.read().decode("utf-8")
+    errors = stderr.read().decode("utf-8")
+    exit_status = stdout.channel.recv_exit_status()
+    return output, errors, exit_status
+
+
+def _bash_script(commands):
+    """Wrap a list of shell commands as the `bash << 'EOF' ... EOF` heredoc
+    every multi-command step below sends over SSH."""
+    return "bash << 'EOF'\n" + "\n".join(commands) + "\nEOF"
 
 
 def security_update_fix_part_1(unit):
@@ -70,8 +115,8 @@ def security_update_fix_part_1(unit):
     pveSshClient = paramiko.SSHClient()
     pveSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        pveSshClient.connect(hostname=ip, username=pveSshUsername, password=pveSshPass)
-        stdin, stdout, stderr = pveSshClient.exec_command(f"bash << 'EOF'\n{pvescript}\nEOF")
+        pveSshClient.connect(hostname=ip, username=pveSshUsername, password=pveSshPass, timeout=30)
+        stdin, stdout, stderr = pveSshClient.exec_command(f"bash << 'EOF'\n{pvescript}\nEOF", timeout=30)
         output = stdout.read().decode("utf-8").strip()
         errors = stderr.read().decode("utf-8").strip()
         output = output.splitlines()
@@ -96,26 +141,37 @@ def security_update_fix_step_2(unit):
     load_dotenv(env_path)
     scryptSshUsername = os.getenv("scryptuserssh")
     scryptSshPass = os.getenv("scryptpass")
+    scryptSshPassQ = shlex.quote(scryptSshPass or "")
     ip = None
     errors = ""
     unattended_fix_cmd = f"""
     if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
-        echo '{scryptSshPass}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
+        echo {scryptSshPassQ} | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
     fi
     """
+    # See security_update_web_step2's identical fix for why this can't be a
+    # hardcoded build number — purges every installed 6.8.0-*-generic
+    # kernel package except the one held below (138, known-good).
+    purge_kernels_cmd = (
+        "PURGE_PKGS=$(dpkg-query -W -f='${Package}\\n' "
+        "'linux-image-6.8.0-*-generic' 'linux-headers-6.8.0-*-generic' 2>/dev/null "
+        "| grep -v -- '-138-generic' || true); "
+        f"if [ -n \"$PURGE_PKGS\" ]; then echo {scryptSshPassQ} | sudo -S apt purge -y $PURGE_PKGS; "
+        "else echo 'No non-6.8.0-138-generic kernel packages installed to purge'; fi"
+    )
     commands = [
             "set -e",
-            f"echo '{scryptSshPass}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
-            f"echo '{scryptSshPass}' | sudo -S apt install -f -y",
-            f"echo '{scryptSshPass}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
-            f"echo '{scryptSshPass}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
-            f"echo '{scryptSshPass}' | sudo -S update-grub",
+            purge_kernels_cmd,
+            f"echo {scryptSshPassQ} | sudo -S apt install -f -y",
+            f"echo {scryptSshPassQ} | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
+            f"echo {scryptSshPassQ} | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
+            f"echo {scryptSshPassQ} | sudo -S update-grub",
             "ls /boot/vmlinuz-* /boot/initrd.img-*",
-            f"echo '{scryptSshPass}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
-            f"echo '{scryptSshPass}' | sudo -S apt-mark showhold",
+            f"echo {scryptSshPassQ} | sudo -S dpkg -l | grep -E '^i[^i]' || true",
+            f"echo {scryptSshPassQ} | sudo -S apt-mark showhold",
             unattended_fix_cmd,
-            f"echo '{scryptSshPass}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
-            f"echo '{scryptSshPass}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true"
+            f"echo {scryptSshPassQ} | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
+            f"echo {scryptSshPassQ} | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true"
         ]
     scryptedscript = "\n".join(commands)
 
@@ -129,8 +185,8 @@ def security_update_fix_step_2(unit):
     scryptedSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
-        scryptedSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptedSshClient.exec_command(f"bash << 'EOF'\n{scryptedscript}\nEOF")
+        scryptedSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass, timeout=30)
+        stdin, stdout, stderr = scryptedSshClient.exec_command(f"bash << 'EOF'\n{scryptedscript}\nEOF", timeout=30)
         output = stdout.read().decode("utf-8")
         errors = stderr.read().decode("utf-8")
 
@@ -145,7 +201,7 @@ def security_update_fix_step_2(unit):
         print(f"Rebooting {unit}...")
 
         scryptedSshClient.exec_command(
-            f"echo '{scryptSshPass}' | sudo -S reboot")
+            f"echo {scryptSshPassQ} | sudo -S reboot", timeout=30)
         return unit
     except Exception as e:
         print(f"exception: {e}")
@@ -156,6 +212,7 @@ def security_update_fix_step_3(unit, version):
     load_dotenv(env_path)
     scryptSshUsername = os.getenv("scryptuserssh")
     scryptSshPass = os.getenv("scryptpass")
+    scryptSshPassQ = shlex.quote(scryptSshPass or "")
     pveSshUsername = os.getenv("pvesshuser")
     pveSshPass = os.getenv("pvepass")
     scrypt_ip = None
@@ -164,7 +221,7 @@ def security_update_fix_step_3(unit, version):
     errors2 = ""
     commands = [
         "set -e",
-        f"echo '{scryptSshPass}' | sudo -S uname -r "
+        f"echo {scryptSshPassQ} | sudo -S uname -r "
     ]
     commands2 = [
         "set -e",
@@ -190,28 +247,28 @@ def security_update_fix_step_3(unit, version):
 
     try:
 
-        scryptSshClient.connect(hostname=scrypt_ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
+        scryptSshClient.connect(hostname=scrypt_ip, username=scryptSshUsername, password=scryptSshPass, timeout=30)
+        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF", timeout=30)
         output = stdout.read().decode("utf-8")
         errors = stderr.read().decode("utf-8")
 
         output = output.splitlines()
         if errors:
             print(f"errors: {errors}")
-            
+
 
         for line in output:
             print(line)
         print("Shutting down...")
-        
-        scryptSshClient.exec_command(f"echo '{scryptSshPass}' | sudo -S shutdown -h now")
+
+        scryptSshClient.exec_command(f"echo {scryptSshPassQ} | sudo -S shutdown -h now", timeout=30)
         scryptSshClient.close()
 
         input("Once unit has fully shut down press enter to continue: ")
         try:
             print(f"Set hostpci version to: {version}")
-            pveSshClient.connect(hostname=pve_ip, username=pveSshUsername, password=pveSshPass)
-            stdin2, stdout2, stderr2 = pveSshClient.exec_command(f"bash << 'EOF'\n{cmdscript2}\nEOF")
+            pveSshClient.connect(hostname=pve_ip, username=pveSshUsername, password=pveSshPass, timeout=30)
+            stdin2, stdout2, stderr2 = pveSshClient.exec_command(f"bash << 'EOF'\n{cmdscript2}\nEOF", timeout=30)
             output2 = stdout2.read().decode("utf-8")
             output2 = output2.splitlines()
             errors2 = stderr2.read().decode("utf-8")
@@ -234,6 +291,7 @@ def security_update_step_4(unit):
     load_dotenv(env_path)
     scryptSshUsername = os.getenv("scryptuserssh")
     scryptSshPass = os.getenv("scryptpass")
+    scryptSshPassQ = shlex.quote(scryptSshPass or "")
     company = os.getenv("company")
     ip = None
     errors = ""
@@ -241,10 +299,10 @@ def security_update_step_4(unit):
     drivers_loaded = True
 
     commands = [
-        f"echo {scryptSshPass} | sudo -S lspci -nn | grep -i VGA",
-        f"echo {scryptSshPass} | sudo -S lsmod | grep i915",
+        f"echo {scryptSshPassQ} | sudo -S lspci -nn | grep -i VGA",
+        f"echo {scryptSshPassQ} | sudo -S lsmod | grep i915",
     ]
-    cmd2 = f"echo {scryptSshPass} | sudo -S dmesg | grep -i i915 | tail -20"
+    cmd2 = f"echo {scryptSshPassQ} | sudo -S dmesg | grep -i i915 | tail -20"
     cmdscript = "\n".join(commands)
     scryptSshClient = paramiko.SSHClient()
     scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -258,8 +316,8 @@ def security_update_step_4(unit):
         return False
     ip = row[12]
     try:
-        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
+        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass, timeout=30)
+        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF", timeout=30)
         errors = stderr.read().decode("utf-8")
         output = stdout.read().decode("utf-8")
 
@@ -272,7 +330,7 @@ def security_update_step_4(unit):
             if "i915" in line:
                 i915_counter += 1
         print("DUCK-DB Restarted..")
-        stdin2, stdout2, stderr2 = scryptSshClient.exec_command(f"{cmd2}")
+        stdin2, stdout2, stderr2 = scryptSshClient.exec_command(f"{cmd2}", timeout=30)
         errors2 = stderr2.read().decode("utf-8")
         output2 = stdout2.read().decode("utf-8")
 
@@ -298,6 +356,7 @@ def refresh_platform_services(unit):
     load_dotenv(env_path)
     scryptSshUsername = os.getenv("scryptuserssh")
     scryptSshPass = os.getenv("scryptpass")
+    scryptSshPassQ = shlex.quote(scryptSshPass or "")
     company = os.getenv("company")
     ip = None
     errors = ""
@@ -310,51 +369,40 @@ def refresh_platform_services(unit):
     # they are; systemctl restart blocks until systemd reports it started,
     # so the next line in this script doesn't run until docker actually is.
     commands = [
-        f"echo {scryptSshPass} | sudo -S systemctl restart docker.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-database.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-watchdog.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-web.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-metadata.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-images.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-indexer.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-capture.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-rtsp.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-smtp.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-alarms.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-events.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-onvif.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-monitor.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-snmp.service",
-        f"echo {scryptSshPass} | sudo -S systemctl restart {company}-cache.service"
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart docker.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-database.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-watchdog.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-web.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-metadata.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-images.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-indexer.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-capture.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-rtsp.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-smtp.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-alarms.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-events.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-onvif.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-monitor.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-snmp.service",
+        f"echo {scryptSshPassQ} | sudo -S systemctl restart {company}-cache.service"
     ]
 
-    cmdscript = "\n".join(commands)
     row = _net_row_for_unit(unit)
     if row is None or len(row) <= 12 or not str(row[12]).strip():
         print(f"No Scrypted IP for {unit} in net sheet")
         return False
     ip = row[12]
-    scryptSshClient = paramiko.SSHClient()
-    scryptSshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
     try:
-        scryptSshClient.connect(hostname=ip, username=scryptSshUsername, password=scryptSshPass)
-        stdin, stdout, stderr = scryptSshClient.exec_command(f"bash << 'EOF'\n{cmdscript}\nEOF")
-        errors = stderr.read().decode("utf-8")
-        output = stdout.read().decode("utf-8")
-        output = output.splitlines()
-
-        if errors:
-            print(f"errors: {errors}")
-        for line in output:
-            print(line)
-        return True
+        with _ssh_client(ip, scryptSshUsername, scryptSshPass) as client:
+            output, errors, _exit_status = _ssh_exec(client, _bash_script(commands), timeout=60)
     except Exception as e:
         print(f"exception: {e}")
         return False
-
-    finally:
-        scryptSshClient.close()
+    if errors:
+        print(f"errors: {errors}")
+    for line in output.splitlines():
+        print(line)
+    return True
 def _security_fix_ip_pair(unit):
     """PVE + Scrypted IPs for the security update fix flow, via the modern netsheet helpers."""
     row = ensure_unit_net_info(unit, needed_indexes=(11, 12))
@@ -390,33 +438,25 @@ def security_update_web_step1(unit):
         "qm set 101 --delete hostpci0",
         "qm set 101 --vga std",
     ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     log_lines = []
     version = None
     try:
-        client.connect(
-            hostname=pve_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8").strip().splitlines()
-        errors = stderr.read().decode("utf-8").strip()
-        if errors:
-            log_lines.append(f"stderr: {errors}")
-        for line in output:
-            log_lines.append(line)
-            if "hostpci" in line and "delete" not in line:
-                version = line.split(":", 1)[1].strip()
-        if version is None:
-            return False, f"Could not find hostpci configuration for {unit}", None
-        log_lines.append(f"Saved hostpci0 version: {version}")
-        return True, "\n".join(log_lines), version
+        with _ssh_client(pve_ip, username, password) as client:
+            output, errors, _exit_status = _ssh_exec(client, _bash_script(commands))
     except Exception as exc:
         return False, f"Step 1 failed: {exc}", None
-    finally:
-        client.close()
+    output = output.strip().splitlines()
+    errors = errors.strip()
+    if errors:
+        log_lines.append(f"stderr: {errors}")
+    for line in output:
+        log_lines.append(line)
+        if "hostpci" in line and "delete" not in line:
+            version = line.split(":", 1)[1].strip()
+    if version is None:
+        return False, f"Could not find hostpci configuration for {unit}", None
+    log_lines.append(f"Saved hostpci0 version: {version}")
+    return True, "\n".join(log_lines), version
 def security_update_web_step2(unit):
     """
     Security update fix, step 2: on Scrypted, purge the vulnerable kernel
@@ -432,55 +472,64 @@ def security_update_web_step2(unit):
     username, password = _scrypted_ssh_credentials()
     if not username or not password:
         return False, "Set scryptuserssh and scryptpass in .env"
+    passwordQ = shlex.quote(password)
 
     unattended_fix_cmd = f"""
     if ! grep -q '"linux-image";' /etc/apt/apt.conf.d/50unattended-upgrades; then
-        echo '{password}' | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
+        echo {passwordQ} | sudo -S sed -i 's|^Unattended-Upgrade::Package-Blacklist {{|Unattended-Upgrade::Package-Blacklist {{\\n\\t"linux-image";\\n\\t"linux-headers";\\n\\t"linux-generic";\\n\\t"linux-modules";\\n\\t"linux-tools";|' /etc/apt/apt.conf.d/50unattended-upgrades
     fi
     """
+    # The vulnerable build number isn't fixed fleet-wide — caught live,
+    # 2026-09-29 (RD3338): this used to hardcode "6.8.0-139-generic", but
+    # RD3338 had already drifted to 6.8.0-142-generic (unattended-upgrades
+    # presumably got past the blacklist before this same step re-applies
+    # it below), so purging 139 was a silent no-op — nothing installed by
+    # that exact name — leaving whatever actually-installed kernel(s) the
+    # unit had untouched. Now purges every installed 6.8.0-*-generic
+    # image/headers package EXCEPT the one being held below (138, the
+    # known-good GPU-passthrough build — see this module's own docstring),
+    # covering the currently-booted kernel and any other stale ones that
+    # piled up, not just whichever single version happened to be current
+    # when this line was written.
+    purge_kernels_cmd = (
+        "PURGE_PKGS=$(dpkg-query -W -f='${Package}\\n' "
+        "'linux-image-6.8.0-*-generic' 'linux-headers-6.8.0-*-generic' 2>/dev/null "
+        "| grep -v -- '-138-generic' || true); "
+        f"if [ -n \"$PURGE_PKGS\" ]; then echo {passwordQ} | sudo -S apt purge -y $PURGE_PKGS; "
+        "else echo 'No non-6.8.0-138-generic kernel packages installed to purge'; fi"
+    )
     commands = [
         "set -e",
-        f"echo '{password}' | sudo -S apt purge -y linux-image-6.8.0-139-generic linux-headers-6.8.0-139-generic",
-        f"echo '{password}' | sudo -S apt install -f -y",
-        f"echo '{password}' | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
-        f"echo '{password}' | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
-        f"echo '{password}' | sudo -S update-grub",
+        purge_kernels_cmd,
+        f"echo {passwordQ} | sudo -S apt install -f -y",
+        f"echo {passwordQ} | sudo -S apt-mark hold linux-image-6.8.0-138-generic linux-headers-6.8.0-138-generic",
+        f"echo {passwordQ} | sudo -S sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=0|' /etc/default/grub",
+        f"echo {passwordQ} | sudo -S update-grub",
         "ls /boot/vmlinuz-* /boot/initrd.img-*",
-        f"echo '{password}' | sudo -S dpkg -l | grep -E '^i[^i]' || true",
-        f"echo '{password}' | sudo -S apt-mark showhold",
+        f"echo {passwordQ} | sudo -S dpkg -l | grep -E '^i[^i]' || true",
+        f"echo {passwordQ} | sudo -S apt-mark showhold",
         unattended_fix_cmd,
-        f"echo '{password}' | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
-        f"echo '{password}' | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true",
+        f"echo {passwordQ} | sudo -S grep -A8 'Package-Blacklist' /etc/apt/apt.conf.d/50unattended-upgrades || true",
+        f"echo {passwordQ} | sudo -S unattended-upgrade --dry-run --debug 2>&1 | grep -i 'blacklist\\|linux-' || true",
     ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8")
-        errors = stderr.read().decode("utf-8")
-        exit_status = stdout.channel.recv_exit_status()
-        log_lines = output.splitlines()
-        if errors:
-            # apt/update-grub write normal progress messages to stderr; only a
-            # non-zero exit status (the script has `set -e`) means a command
-            # actually failed.
-            log_lines.append(f"stderr (informational unless the script failed): {errors}")
-        if exit_status != 0:
-            return False, "Step 2 error (command failed, exit status %d):\n%s" % (
-                exit_status, "\n".join(log_lines)
-            )
-        client.exec_command(f"echo '{password}' | sudo -S reboot")
-        log_lines.append(f"Rebooting {unit}...")
-        return True, "\n".join(log_lines)
+        with _ssh_client(scrypted_ip, username, password) as client:
+            output, errors, exit_status = _ssh_exec(client, _bash_script(commands), timeout=120)
+            log_lines = output.splitlines()
+            if errors:
+                # apt/update-grub write normal progress messages to stderr; only a
+                # non-zero exit status (the script has `set -e`) means a command
+                # actually failed.
+                log_lines.append(f"stderr (informational unless the script failed): {errors}")
+            if exit_status != 0:
+                return False, "Step 2 error (command failed, exit status %d):\n%s" % (
+                    exit_status, "\n".join(log_lines)
+                )
+            _ssh_exec(client, f"echo {passwordQ} | sudo -S reboot", timeout=30)
+            log_lines.append(f"Rebooting {unit}...")
+            return True, "\n".join(log_lines)
     except Exception as exc:
         return False, f"Step 2 failed: {exc}"
-    finally:
-        client.close()
 def security_update_web_shutdown(unit):
     """
     Security update fix, checkpoint: confirm the running kernel on Scrypted
@@ -497,28 +546,20 @@ def security_update_web_shutdown(unit):
     username, password = _scrypted_ssh_credentials()
     if not username or not password:
         return False, "Set scryptuserssh and scryptpass in .env"
+    passwordQ = shlex.quote(password)
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"echo '{password}' | sudo -S uname -r")
-        output = stdout.read().decode("utf-8").strip()
-        errors = stderr.read().decode("utf-8").strip()
-        log_lines = []
-        if errors:
-            log_lines.append(f"stderr: {errors}")
-        log_lines.append(f"Running kernel: {output}")
-        log_lines.append("Shutting down...")
-        client.exec_command(f"echo '{password}' | sudo -S shutdown -h now")
-        return True, "\n".join(log_lines)
+        with _ssh_client(scrypted_ip, username, password) as client:
+            output, errors, _exit_status = _ssh_exec(client, f"echo {passwordQ} | sudo -S uname -r")
+            log_lines = []
+            if errors.strip():
+                log_lines.append(f"stderr: {errors.strip()}")
+            log_lines.append(f"Running kernel: {output.strip()}")
+            log_lines.append("Shutting down...")
+            _ssh_exec(client, f"echo {passwordQ} | sudo -S shutdown -h now")
+            return True, "\n".join(log_lines)
     except Exception as exc:
         return False, f"Shutdown step failed: {exc}"
-    finally:
-        client.close()
 def security_update_web_finish(unit, version):
     """
     Security update fix, finish: on PVE, reassign hostpci0 to the version
@@ -543,30 +584,21 @@ def security_update_web_finish(unit, version):
         f"qm set 101 --hostpci0 {version}",
         "qm start 101",
     ]
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            hostname=pve_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        output = stdout.read().decode("utf-8").splitlines()
-        errors = stderr.read().decode("utf-8").strip()
-        exit_status = stdout.channel.recv_exit_status()
-        if errors:
-            output.append(f"stderr (informational unless the script failed): {errors}")
-        if exit_status != 0:
-            return False, "Finish step error (command failed, exit status %d):\n%s" % (
-                exit_status, "\n".join(output)
-            )
-        message = "\n".join(output) if output else f"Set hostpci0 to {version} and started VM 101"
-        return True, message
+        with _ssh_client(pve_ip, username, password) as client:
+            output_text, errors, exit_status = _ssh_exec(client, _bash_script(commands))
     except Exception as exc:
         return False, f"Finish step failed: {exc}"
-    finally:
-        client.close()
+    output = output_text.splitlines()
+    errors = errors.strip()
+    if errors:
+        output.append(f"stderr (informational unless the script failed): {errors}")
+    if exit_status != 0:
+        return False, "Finish step error (command failed, exit status %d):\n%s" % (
+            exit_status, "\n".join(output)
+        )
+    message = "\n".join(output) if output else f"Set hostpci0 to {version} and started VM 101"
+    return True, message
 _VGA_CONTROLLERS_EXPECTED = 2
 _I915_ENTRIES_EXPECTED = 7
 def security_update_web_verify(unit):
@@ -595,52 +627,41 @@ def security_update_web_verify(unit):
     if not username or not password:
         return False, "Set scryptuserssh and scryptpass in .env", False, empty_counts
 
+    passwordQ = shlex.quote(password)
     commands = [
-        f"echo '{password}' | sudo -S lspci -nn | grep -i VGA",
-        f"echo '{password}' | sudo -S lsmod | grep i915",
+        f"echo {passwordQ} | sudo -S lspci -nn | grep -i VGA",
+        f"echo {passwordQ} | sudo -S lsmod | grep i915",
     ]
-    cmd2 = f"echo '{password}' | sudo -S dmesg | grep -i i915 | tail -20"
-    script = "\n".join(commands)
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    cmd2 = f"echo {passwordQ} | sudo -S dmesg | grep -i i915 | tail -20"
     vga_counter = 0
     i915_counter = 0
     log_lines = []
     try:
-        client.connect(
-            hostname=scrypted_ip, username=username, password=password,
-            timeout=30, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = client.exec_command(f"bash << 'EOF'\n{script}\nEOF")
-        primary_output = stdout.read().decode("utf-8")
-        primary_errors = stderr.read().decode("utf-8")
-        if primary_errors:
-            log_lines.append(f"stderr: {primary_errors}")
-        for line in primary_output.splitlines():
-            if "VGA compatible controller" in line:
-                vga_counter += 1
-            if "i915" in line:
-                i915_counter += 1
-        stdin2, stdout2, stderr2 = client.exec_command(cmd2)
-        secondary_output = stdout2.read().decode("utf-8")
-        secondary_errors = stderr2.read().decode("utf-8")
-        if secondary_errors:
-            log_lines.append(f"stderr: {secondary_errors}")
-        log_lines.extend(secondary_output.splitlines())
-        log_lines.append(f"VGA controllers: {vga_counter}")
-        log_lines.append(f"i915 entries: {i915_counter}")
-        drivers_loaded = vga_counter == _VGA_CONTROLLERS_EXPECTED and i915_counter == _I915_ENTRIES_EXPECTED
-        if not drivers_loaded:
-            log_lines.append("Some drivers did not load")
-        counts = {
-            "vga_counter": vga_counter, "vga_expected": _VGA_CONTROLLERS_EXPECTED,
-            "i915_counter": i915_counter, "i915_expected": _I915_ENTRIES_EXPECTED,
-        }
-        return True, "\n".join(log_lines), drivers_loaded, counts
+        with _ssh_client(scrypted_ip, username, password) as client:
+            primary_output, primary_errors, _es1 = _ssh_exec(client, _bash_script(commands))
+            if primary_errors:
+                log_lines.append(f"stderr: {primary_errors}")
+            for line in primary_output.splitlines():
+                if "VGA compatible controller" in line:
+                    vga_counter += 1
+                if "i915" in line:
+                    i915_counter += 1
+            secondary_output, secondary_errors, _es2 = _ssh_exec(client, cmd2)
     except Exception as exc:
         return False, f"Verify step failed: {exc}", False, empty_counts
-    finally:
-        client.close()
+    if secondary_errors:
+        log_lines.append(f"stderr: {secondary_errors}")
+    log_lines.extend(secondary_output.splitlines())
+    log_lines.append(f"VGA controllers: {vga_counter}")
+    log_lines.append(f"i915 entries: {i915_counter}")
+    drivers_loaded = vga_counter == _VGA_CONTROLLERS_EXPECTED and i915_counter == _I915_ENTRIES_EXPECTED
+    if not drivers_loaded:
+        log_lines.append("Some drivers did not load")
+    counts = {
+        "vga_counter": vga_counter, "vga_expected": _VGA_CONTROLLERS_EXPECTED,
+        "i915_counter": i915_counter, "i915_expected": _I915_ENTRIES_EXPECTED,
+    }
+    return True, "\n".join(log_lines), drivers_loaded, counts
 def restart_platform_services(unit):
     """Web-safe wrapper: restart all Scrypted platform services for unit, return (ok, message)."""
     unit = str(unit or "").strip()

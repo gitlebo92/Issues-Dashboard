@@ -762,6 +762,123 @@ class PersistentObstructionV1(unittest.TestCase):
         self.assertFalse(found)
 
 
+class CompressedWindowV1(unittest.TestCase):
+    # COMPRESSED_WINDOW_V1: a trailer whose whole productive day compresses
+    # into a short window with a hard (not gradual) edge on both sides —
+    # the square-wave shape neither detect_solar_shading (no baseline left
+    # to dip against when every affected hour is chronically low) nor
+    # detect_persistent_obstruction (needs a productive NEIGHBOR hour,
+    # which doesn't exist when several consecutive hours are suppressed)
+    # can see. Runs on 15-minute slots, not hours — see the function's own
+    # docstring for why hourly averaging launders a real sharp edge into a
+    # misleadingly gradual one.
+    def _slot_points(self, day_start, slot_watts):
+        """slot_watts: {slot_index: watts} for one day, slot = 15-min bucket."""
+        return [
+            (int((day_start + slot * 15 * 60) * 1000), watts)
+            for slot, watts in slot_watts.items()
+        ]
+
+    def test_narrow_hard_edged_window_is_detected(self):
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        points = []
+        for d in range(1, 22):
+            day_start = base_day - d * 86400
+            # Core window: slots 72-75 (18:00-19:00 UTC), all near-peak.
+            # Border slots 71/76 tight (20W, ratio 0.05) on 15 of 21 days;
+            # loose (150W, ratio 0.375) on the other 6 — still a clear
+            # majority, matching _COMPRESSED_WINDOW_MIN_DAY_FRACTION.
+            border = 20 if d <= 15 else 150
+            slots = {72: 380, 73: 400, 74: 390, 75: 385, 71: border, 76: border}
+            points.extend(self._slot_points(day_start, slots))
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=points):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertTrue(found)
+        self.assertIn("18:00-18:45", detail)
+        self.assertEqual(window["hours_utc"], [18])
+        self.assertIsNotNone(confidence)
+
+    def test_wide_window_is_not_flagged(self):
+        # A 5-hour productive span with the same hard edges — too wide to
+        # read as "compressed," regardless of how sharp the edges are.
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        points = []
+        for d in range(1, 22):
+            day_start = base_day - d * 86400
+            slots = {h: 400 for h in range(64, 84)}  # 16:00-21:00 UTC (5h)
+            slots[63] = 20
+            slots[84] = 20
+            points.extend(self._slot_points(day_start, slots))
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=points):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertFalse(found)
+        self.assertIn("too wide", detail)
+
+    def test_gradual_taper_is_not_flagged(self):
+        # Same narrow window, but the bordering slots still hold a quarter
+        # of peak (and stay under the productive bar, so they don't just
+        # get folded into the window itself) — a normal dawn/dusk taper,
+        # not a hard obstruction edge.
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        points = []
+        for d in range(1, 22):
+            day_start = base_day - d * 86400
+            slots = {72: 380, 73: 400, 74: 390, 75: 385, 71: 100, 76: 100}
+            points.extend(self._slot_points(day_start, slots))
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=points):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertFalse(found)
+        self.assertIn("gradual", detail)
+
+    def test_inconsistent_days_not_flagged(self):
+        # The median edge is tight enough to clear the aggregate gate, but
+        # only about half the days actually hold the tight edge — not
+        # chronic enough to trust as a real, standing obstruction.
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        points = []
+        for d in range(1, 22):
+            day_start = base_day - d * 86400
+            border = 20 if d <= 11 else 170
+            slots = {72: 380, 73: 400, 74: 390, 75: 385, 71: border, 76: border}
+            points.extend(self._slot_points(day_start, slots))
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=points):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertFalse(found)
+        self.assertIn("doesn't hold consistently", detail)
+
+    def test_not_enough_productive_time_returns_none(self):
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        points = []
+        for d in range(1, 22):
+            day_start = base_day - d * 86400
+            points.extend(self._slot_points(day_start, {72: 50, 73: 60, 74: 55}))
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=points):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertIsNone(found)
+
+    def test_no_history_returns_none(self):
+        with mock.patch.object(work_tool.weather, "_vrm_pv_history_points", return_value=None):
+            found, detail, confidence, window = work_tool.detect_compressed_daylight_window(
+                "site1", "tok", days=21,
+            )
+        self.assertIsNone(found)
+
+
 class VerifyShadingDipNow(unittest.TestCase):
     # The shading-snapshot scheduler's pre-capture re-check (see
     # shading_snapshots.py): is the dip this task was scheduled around
@@ -792,12 +909,13 @@ class VerifyShadingDipNow(unittest.TestCase):
         recent = [(int((base_day + 15 * 3600) * 1000), 30)]
         p1, p2, p3 = self._patched(ceiling, recent)
         with p1, p2, p3:
-            is_dip, detail, current_watts, typical_watts = work_tool.verify_shading_dip_now(
-                "MU8024", "", 15,
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8024", "",
             )
         self.assertTrue(is_dip)
         self.assertEqual(current_watts, 30)
         self.assertEqual(typical_watts, 460)
+        self.assertEqual(worst_hour, 15)
 
     def test_does_not_confirm_when_reading_is_normal(self):
         now = time.time()
@@ -808,21 +926,253 @@ class VerifyShadingDipNow(unittest.TestCase):
         recent = [(int((base_day + 15 * 3600) * 1000), 440)]
         p1, p2, p3 = self._patched(ceiling, recent)
         with p1, p2, p3:
-            is_dip, detail, current_watts, typical_watts = work_tool.verify_shading_dip_now(
-                "MU8024", "", 15,
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8024", "",
             )
         self.assertFalse(is_dip)
 
-    def test_unproductive_hour_returns_none_not_a_guess(self):
+    def test_confirms_a_modest_real_world_dip_below_the_aggregate_ratio(self):
+        # Live regression, MU8074, 2026-09-16: detect_solar_shading flagged
+        # this unit (64% confidence), but the scheduler's pre-capture
+        # re-check reused _SHADE_DEFICIT_RATIO (needs < 35% of typical) and
+        # rejected every one of its 3 attempts against a 186W-vs-201W-
+        # typical (93%) reading — a real deficit, just nowhere near that
+        # severe. _SHADE_VERIFY_DEFICIT_RATIO exists so a modest, genuine
+        # dip like this one still gets a photo instead of exhausting every
+        # attempt on a bar calibrated for the aggregate detector instead.
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        ceiling = [
+            (int((base_day - d * 86400 + 15 * 3600) * 1000), 201) for d in range(1, 22)
+        ]
+        recent = [(int((base_day + 15 * 3600) * 1000), 186)]
+        p1, p2, p3 = self._patched(ceiling, recent)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8074", "",
+            )
+        self.assertTrue(is_dip)
+        self.assertEqual(current_watts, 186)
+        self.assertEqual(typical_watts, 201)
+
+    def test_finds_the_dip_at_whichever_hour_it_actually_is(self):
+        # Live regression, MU8087, 2026-09-16: a task's fixed target hour
+        # (23:00 UTC / 4pm MST) had drifted nearly 4 hours from the real,
+        # ongoing dip the trailer's own graph showed around 19:00 UTC
+        # (noon-1pm MST) the same day — pinning to one fixed hour (or even
+        # a small tolerance window around it) would have missed this
+        # entirely. This trailer produces normally at both hours; only one
+        # is actually dipping right now, and the check must find that one
+        # without anything pointing it there directly.
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        ceiling = []
+        for d in range(1, 22):
+            ceiling.append((int((base_day - d * 86400 + 19 * 3600) * 1000), 371))
+            ceiling.append((int((base_day - d * 86400 + 23 * 3600) * 1000), 300))
+        recent = [
+            (int((base_day + 19 * 3600) * 1000), 25),   # the real, ongoing dip
+            (int((base_day + 23 * 3600) * 1000), 290),  # normal at the stale hour
+        ]
+        p1, p2, p3 = self._patched(ceiling, recent)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8087", "",
+            )
+        self.assertTrue(is_dip)
+        self.assertEqual(current_watts, 25)
+        self.assertEqual(typical_watts, 371)
+        self.assertEqual(worst_hour, 19)
+        self.assertIn("19:00 UTC", detail)
+
+    def test_unproductive_hour_is_excluded_not_guessed(self):
+        # An hour whose own history never clears the productive floor is
+        # excluded from consideration entirely, even with a low current
+        # reading — a low ratio against a near-zero typical is noise, not
+        # evidence of shading (see _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS).
         now = time.time()
         base_day = int(now // 86400) * 86400
         ceiling = [
             (int((base_day - d * 86400 + 3 * 3600) * 1000), 5) for d in range(1, 22)
         ]
+        recent = [(int((base_day + 3 * 3600) * 1000), 1)]
+        p1, p2, p3 = self._patched(ceiling, recent)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8024", "",
+            )
+        self.assertIsNone(is_dip)
+
+    def test_no_current_reading_returns_none_not_a_guess(self):
+        now = time.time()
+        base_day = int(now // 86400) * 86400
+        ceiling = [
+            (int((base_day - d * 86400 + 15 * 3600) * 1000), 460) for d in range(1, 22)
+        ]
         p1, p2, p3 = self._patched(ceiling, [])
         with p1, p2, p3:
-            is_dip, detail, current_watts, typical_watts = work_tool.verify_shading_dip_now(
-                "MU8024", "", 3,
+            is_dip, detail, current_watts, typical_watts, worst_hour = work_tool.verify_shading_dip_now(
+                "MU8024", "",
+            )
+        self.assertIsNone(is_dip)
+
+
+def _make_day_points(day_start_ts, low, high, count=6):
+    """Test helper: `count` points spread through one day, alternating
+    high/low so the day's own min/max band comes out to exactly high-low."""
+    points = []
+    for i in range(count):
+        val = high if i % 2 == 0 else low
+        points.append((int((day_start_ts + i * 3 * 3600) * 1000), val))
+    return points
+
+
+class SocDailyBands(unittest.TestCase):
+    # Pure bucketing half of UNPLUGGED_V3 (_vrm_soc_daily_band_status) —
+    # groups (timestamp_ms, soc_pct) points into {date: (min, max, count)}
+    # by UTC calendar day, no network involved.
+    def test_buckets_by_utc_calendar_day_and_tracks_min_max_count(self):
+        base_day = int(time.time() // 86400) * 86400
+        points = _make_day_points(base_day, low=95, high=100, count=5)
+        by_day = work_tool.weather._soc_daily_bands(points)
+        self.assertEqual(len(by_day), 1)
+        (lo, hi, count), = by_day.values()
+        self.assertEqual(lo, 95)
+        self.assertEqual(hi, 100)
+        self.assertEqual(count, 5)
+
+
+class SocDailyBandVerdict(unittest.TestCase):
+    # Pure verdict half of UNPLUGGED_V3 — given daily (min, max, count)
+    # bands, decides plugged_in / recently_unplugged / inconclusive. See
+    # _SOC_BAND_FLAT_MAX_PCT's own comment in weather.py for the reasoning.
+    def _bands(self, day_specs):
+        # day_specs: list of (days_ago, low, high, count), oldest last.
+        base_day = int(time.time() // 86400) * 86400
+        by_day = {}
+        for days_ago, low, high, count in day_specs:
+            points = _make_day_points(base_day - days_ago * 86400, low, high, count)
+            by_day.update(work_tool.weather._soc_daily_bands(points))
+        return by_day
+
+    def test_plugged_in_when_baseline_and_recent_both_thin(self):
+        specs = [(d, 98, 100, 6) for d in range(0, 12)]  # today .. 11 days ago
+        status, detail = work_tool.weather._soc_daily_band_verdict(self._bands(specs))
+        self.assertEqual(status, "plugged_in")
+        self.assertIn("thin", detail)
+
+    def test_recently_unplugged_when_recent_days_widen_after_thin_baseline(self):
+        # Live regression, MU9049, 2026-09-16: SOC pinned ~95-100% for
+        # weeks (thin baseline), then sagged into a real daily swing for
+        # the last couple days — a unit with no charger telemetry at all
+        # to catch this any other way.
+        specs = [(d, 98, 100, 6) for d in range(2, 12)]  # 10 thin baseline days
+        specs += [(0, 70, 95, 6), (1, 72, 96, 6)]  # 2 recent, widened days
+        status, detail = work_tool.weather._soc_daily_band_verdict(self._bands(specs))
+        self.assertEqual(status, "recently_unplugged")
+        self.assertIn("widened", detail)
+
+    def test_inconclusive_when_not_enough_history(self):
+        specs = [(d, 98, 100, 6) for d in range(0, 5)]  # only 5 days total
+        status, _detail = work_tool.weather._soc_daily_band_verdict(self._bands(specs))
+        self.assertEqual(status, "inconclusive")
+
+    def test_inconclusive_when_baseline_never_looked_maintained(self):
+        # A trailer that's ALWAYS cycled on solar alone looks like this
+        # too — this must never call that "not plugged in" on its own.
+        specs = [(d, 20, 100, 6) for d in range(2, 12)]  # normal daily cycling
+        specs += [(0, 98, 100, 6), (1, 98, 100, 6)]  # even if recent days are thin
+        status, detail = work_tool.weather._soc_daily_band_verdict(self._bands(specs))
+        self.assertEqual(status, "inconclusive")
+        self.assertIn("doesn't look externally maintained", detail)
+
+    def test_days_with_too_few_points_are_excluded(self):
+        # A sparse day (below _SOC_BAND_MIN_POINTS_PER_DAY) shouldn't count
+        # toward either the baseline or the required history length, even
+        # if its own min/max happens to look thin. 8 well-sampled days plus
+        # 1 sparse one would clear the 9-day minimum if the sparse day
+        # counted; excluded, it falls one day short.
+        specs = [(d, 98, 100, 6) for d in range(0, 8)]
+        specs.append((8, 98, 100, 2))  # too sparse to count
+        status, _detail = work_tool.weather._soc_daily_band_verdict(self._bands(specs))
+        self.assertEqual(status, "inconclusive")
+
+
+class VerifyCompressedWindowDipNow(unittest.TestCase):
+    # COMPRESSED_WINDOW_V1's own re-check, sibling of VerifyShadingDipNow
+    # above — needed because the plain function's whole-hour "productive
+    # hour" gate misreads a compressed window's precise-minute border (see
+    # the function's own docstring). Built from the real live case that
+    # exposed the bug: RD3096/MU7022, 2026-09-15 — a 21-day-aggregate
+    # window edge at 19:15 UTC, but that specific day's real cutover
+    # landed at 19:40-19:55, ~30 minutes later.
+    def _patched(self, points):
+        return (
+            mock.patch.object(
+                work_tool.weather, "_vrm_credentials", return_value=("user1", "tok", None)
+            ),
+            mock.patch.object(
+                work_tool.weather, "_resolve_vrm_site",
+                return_value=("site1", "MU7022", 60, "America/Denver", None),
+            ),
+            mock.patch.object(
+                work_tool.weather, "_vrm_pv_history_points", return_value=points,
+            ),
+        )
+
+    def test_confirms_a_dip_even_though_the_drift_missed_the_aggregate_edge(self):
+        # Mirrors the real RD3096 case: aggregate window edge at 19:15 UTC
+        # (945-1155 minutes), but today's actual peak ran to 19:40 and
+        # crashed by 19:55 — the newest reading (19:55, near the 19:15
+        # edge within tolerance) must still read as a dip against the
+        # RECENT peak (757W at 19:40), not get fooled by the drift.
+        base_day = int(time.time() // 86400) * 86400
+        points = [
+            (int((base_day + 18 * 3600 + 40 * 60) * 1000), 757),
+            (int((base_day + 19 * 3600 + 55 * 60) * 1000), 100),
+        ]
+        p1, p2, p3 = self._patched(points)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, reference_watts = work_tool.verify_compressed_window_dip_now(
+                "RD3096", "", 945, 1155,
+            )
+        self.assertTrue(is_dip)
+        self.assertEqual(current_watts, 100)
+        self.assertEqual(reference_watts, 757)
+
+    def test_no_dip_when_current_reading_still_near_recent_peak(self):
+        base_day = int(time.time() // 86400) * 86400
+        points = [
+            (int((base_day + 18 * 3600 + 40 * 60) * 1000), 700),
+            (int((base_day + 19 * 3600 + 30 * 60) * 1000), 650),
+        ]
+        p1, p2, p3 = self._patched(points)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, reference_watts = work_tool.verify_compressed_window_dip_now(
+                "RD3096", "", 945, 1155,
+            )
+        self.assertFalse(is_dip)
+        self.assertIn("cleared", detail)
+
+    def test_returns_none_when_newest_reading_is_far_from_the_window_edge(self):
+        # A check run in the middle of the night, nowhere near this
+        # window's expected 19:15 edge, has nothing meaningful to verify —
+        # "output crashed since a few hours ago" would be trivially true
+        # at 3am every single day, so this must stay silent instead.
+        base_day = int(time.time() // 86400) * 86400
+        points = [(int((base_day + 3 * 3600) * 1000), 5)]
+        p1, p2, p3 = self._patched(points)
+        with p1, p2, p3:
+            is_dip, detail, current_watts, reference_watts = work_tool.verify_compressed_window_dip_now(
+                "RD3096", "", 945, 1155,
+            )
+        self.assertIsNone(is_dip)
+
+    def test_returns_none_when_no_history_available(self):
+        p1, p2, p3 = self._patched([])
+        with p1, p2, p3:
+            is_dip, detail, current_watts, reference_watts = work_tool.verify_compressed_window_dip_now(
+                "RD3096", "", 945, 1155,
             )
         self.assertIsNone(is_dip)
 
@@ -1194,6 +1544,60 @@ class ResolveUnitWeatherCoords(unittest.TestCase):
         self.assertEqual(source, "")
         self.assertIn("No GPS on site address or trailer", error)
         self.assertIn("MU9062", error)
+
+
+class AcSpikeInferenceMinimumExcess(unittest.TestCase):
+    """
+    _vrm_pv_ceiling_and_recent_spike's "charge power above same-instant
+    solar = AC" fallback, with VRM stubbed out. Regression for RD3543/MU8030
+    (2026-10-05): 13W into a 0% battery against 8W of solar read as "plugged
+    in, 92%" while its own VRM dashboard showed the charger Off and no grid.
+    """
+
+    def _run(self, points):
+        """points: [(battery_watts, solar_watts)], one per 15 min, newest last."""
+        now_ms = int(time.time() * 1000)
+        t0 = now_ms - (len(points) - 1) * 15 * 60 * 1000
+        bc, bv, pvp = [], [], []
+        for i, (battery_w, solar_w) in enumerate(points):
+            t = t0 + i * 15 * 60 * 1000
+            bv.append([t, 25.0])
+            bc.append([t, battery_w / 25.0])
+            pvp.append([t, solar_w])
+        response = mock.Mock()
+        response.json.return_value = {
+            "success": True,
+            "records": {"bc": bc, "bv": bv, "PVP": pvp, "ScW": []},
+        }
+        weather = work_tool.weather
+        with mock.patch.object(weather, "_vrm_pv_history_points", return_value=[[now_ms, 300]]), \
+                mock.patch.object(weather, "_vrm_pv_ceiling_by_hour", return_value=({}, 300.0)), \
+                mock.patch.object(weather.requests, "get", return_value=response):
+            return weather._vrm_pv_ceiling_and_recent_spike("123", "token")
+
+    def test_tiny_gap_on_tiny_numbers_is_not_ac(self):
+        # The RD3543 reading: 13W vs 8W is a big ratio, but only 5W.
+        status, _detail, _confidence, has_recent = self._run([(5, 4), (13, 8), (6, 5)])
+        self.assertIsNone(status)
+        self.assertTrue(has_recent)
+
+    def test_gap_under_the_floor_on_bigger_numbers_is_not_ac(self):
+        # MU7007 in the fleet comparison: 140W vs 122W solar.
+        status, *_ = self._run([(140, 122)])
+        self.assertIsNone(status)
+
+    def test_real_ac_charge_is_still_caught(self):
+        # Several hundred watts with almost no sun — a real charger.
+        status, detail, confidence, _ = self._run([(20, 15), (450, 40), (30, 20)])
+        self.assertEqual(status, "present")
+        self.assertIn("450W", detail)
+        self.assertGreaterEqual(confidence, 90)
+
+    def test_just_over_the_floor_is_present_but_low_confidence(self):
+        # Clears both the 15% margin and the 50W floor, but only just.
+        status, _detail, confidence, _ = self._run([(200, 145)])
+        self.assertEqual(status, "present")
+        self.assertLess(confidence, 70)
 
 
 if __name__ == "__main__":

@@ -9,9 +9,9 @@ Add new code to the focused module it belongs to, not to `_core`.
 """
 
 from . import _core
-from . import locks, weather, diagnostics, security_update
+from . import locks, weather, diagnostics, security_update, recovery_email
 
-_SUBMODULES = (_core, locks, weather, diagnostics, security_update)
+_SUBMODULES = (_core, locks, weather, diagnostics, security_update, recovery_email)
 
 # Re-export every public and private name. `import *` is not enough: callers
 # (and the tests) reach for underscore-prefixed helpers like _net_row_for_unit,
