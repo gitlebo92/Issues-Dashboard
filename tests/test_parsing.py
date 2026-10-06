@@ -471,5 +471,25 @@ class SiteSearchFallbacks(unittest.TestCase):
         self.assertIn('site name = "Switch"', error)
 
 
+class NoSiteMessage(unittest.TestCase):
+    def test_refurb_status_reads_as_warehoused(self):
+        message = work_tool._no_site_message(
+            "SC-RD3565",
+            {"component_status": "Refurb - Physical", "warehouse": "DEN - SC"},
+        )
+        self.assertIn("SC-RD3565 is warehoused in DEN - SC", message)
+        self.assertIn("Refurb - Physical", message)
+
+    def test_other_status_keeps_plain_message(self):
+        self.assertEqual(
+            work_tool._no_site_message("SC-MU9008", {"component_status": "Deployed"}),
+            "Component SC-MU9008 has no Site",
+        )
+        self.assertEqual(
+            work_tool._no_site_message("SC-MU9008", None),
+            "Component SC-MU9008 has no Site",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

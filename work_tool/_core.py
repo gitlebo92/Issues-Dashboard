@@ -7255,7 +7255,7 @@ def _fetch_erp_component_site_map(names, cache, headers=None, quiet=False):
             f"{erp_base_url()}/api/resource/Component",
             headers=headers,
             params={
-                "fields": json.dumps(["name", "site"]),
+                "fields": json.dumps(["name", "site", "component_status", "warehouse"]),
                 "filters": json.dumps([["name", "in", chunk]]),
                 "limit_page_length": len(chunk),
             },
@@ -7308,9 +7308,26 @@ def resolve_shield_site_id(unit, subject=""):
         try_bare=bool(parent_source),
     )
     if not site:
-        return "", f"Component {found_name or site_source} has no Site"
+        return "", _no_site_message(found_name or site_source, cache.get(found_name))
     _store_site_id_cache(unit_name, subject_text, site)
     return site, None
+def _no_site_message(component_name, doc):
+    """
+    Why a Component has no Site, in words a tech can act on. A Refurb
+    status means the unit is warehoused (Andrew, 2026-10-06) — e.g.
+    RD3565 after its Termination: trailer and Site both cleared, sitting
+    in DEN - SC — so say that rather than a bare "has no Site", which
+    reads like broken ERP data.
+    """
+    status = str((doc or {}).get("component_status") or "").strip()
+    warehouse = str((doc or {}).get("warehouse") or "").strip()
+    if status.lower().startswith("refurb"):
+        where = f" in {warehouse}" if warehouse else ""
+        return (
+            f"{component_name} is warehoused{where} ({status}) — "
+            "it has no trailer or Site in ERP, so there is no site to open"
+        )
+    return f"Component {component_name} has no Site"
 def _site_from_prefetched_component(name, cache, try_bare=False):
     candidates = _component_lookup_names(name, try_bare=try_bare)
     for candidate in candidates:
