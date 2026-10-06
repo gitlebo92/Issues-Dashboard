@@ -464,6 +464,9 @@
             el.title = weatherTitle + " — click for site weather";
             el.classList.remove("wx-pending");
             el.classList.remove("wx-loading");
+            if (el.id === "graphs_wx_icon") {
+                renderGraphsWeatherText(data);
+            }
         }
 
         function runGetWeatherForEntry(entry, triggerEl) {
@@ -4755,6 +4758,90 @@
             no_recent_outage: { glyph: "✓", label: "No recent outage", tone: "none" },
         };
 
+        // Current site weather inside the verdict card (Andrew's request,
+        // 2026-10-06): sun vs cloud is half of reading a power-vs-cell call
+        // on a solar trailer. The icon carries data-unit like a row's
+        // .wx-icon, so refreshTicketWeather fetches and fills it through
+        // the same shared cache; applyWeatherToIcon then calls
+        // renderGraphsWeatherText for the words. Shown only once weather
+        // has actually arrived — an empty placeholder would read as "no
+        // weather". The row keeps its own icon.
+        const graphsWeatherWrapEl = document.getElementById("graphs_verdict_wx");
+        const graphsWeatherIconEl = document.getElementById("graphs_wx_icon");
+        const graphsWeatherTextEl = document.getElementById("graphs_wx_text");
+
+        function renderGraphsWeatherText(data) {
+            if (!graphsWeatherWrapEl || !data) {
+                return;
+            }
+            graphsWeatherTextEl.textContent = [data.temperature_label, data.conditions]
+                .filter(Boolean).join(" ");
+            graphsWeatherWrapEl.title = graphsWeatherIconEl.title;
+            graphsWeatherWrapEl.hidden = false;
+        }
+
+        function renderGraphsWeather(unit, subject) {
+            if (!graphsWeatherWrapEl) {
+                return;
+            }
+            graphsWeatherWrapEl.hidden = true;
+            graphsWeatherTextEl.textContent = "";
+            graphsWeatherIconEl.className = "wx-icon wx-pending";
+            if (!unit) {
+                delete graphsWeatherIconEl.dataset.unit;
+                return;
+            }
+            graphsWeatherIconEl.dataset.unit = unit;
+            graphsWeatherIconEl.dataset.subject = subject || "";
+            const cached = weatherByUnit[unit];
+            if (cached) {
+                applyWeatherToIcon(graphsWeatherIconEl, cached);
+                if (Date.now() - (cached._fetchedAt || 0) <= WEATHER_CACHE_MS) {
+                    return;
+                }
+            }
+            // Just this unit, not refreshTicketWeather: that batches every
+            // row still waiting on weather, and the modal would sit blank
+            // until the slowest of them resolved. Same endpoint and server
+            // cache, so it costs Open-Meteo nothing extra.
+            fetch("/issues/weather-bulk-units", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ units: [{ unit: unit, subject: subject || "" }] }),
+            })
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const payload = data && data.ok && (data.units || {})[unit];
+                    if (!payload) {
+                        return; // no resolvable GPS — leave the weather out
+                    }
+                    payload._fetchedAt = Date.now();
+                    weatherByUnit[unit] = payload;
+                    document.querySelectorAll('.wx-icon[data-unit="' + unit + '"]').forEach(function (el) {
+                        applyWeatherToIcon(el, payload);
+                    });
+                })
+                .catch(function () {});
+        }
+
+        if (graphsWeatherWrapEl) {
+            graphsWeatherWrapEl.setAttribute("role", "button");
+            graphsWeatherWrapEl.tabIndex = 0;
+            const runGraphsWeather = function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (graphsUnit) {
+                    runGetWeatherForEntry({ unit: graphsUnit, ticketSubject: graphsSubject }, graphsWeatherIconEl);
+                }
+            };
+            graphsWeatherWrapEl.addEventListener("click", runGraphsWeather);
+            graphsWeatherWrapEl.addEventListener("keydown", function (event) {
+                if (event.key === "Enter" || event.key === " ") {
+                    runGraphsWeather(event);
+                }
+            });
+        }
+
         // null/unknown hides the line (every opener but the row badge).
         function renderGraphsVerdict(info) {
             if (!graphsVerdictLineEl) {
@@ -5121,10 +5208,72 @@
                     if (!response.ok || !data.ok) {
                         throw new Error(data.error || ("HTTP " + response.status));
                     }
+                    rememberRecoveryEmailStatus(data);
                     return data;
                 });
             });
         }
+
+        // ---- Row ✉ glyph ------------------------------------------------------
+        // The same status on the ticket row's unit button, so a unit that
+        // needs an email is visible without opening the modal (Andrew's
+        // request, 2026-10-06). Alert-only like the shading/dead-panel
+        // glyphs: shown just for the three states where something has to be
+        // sent; "awaiting recovery" and "emails sent" stay modal-only. The
+        // suffix (! / ?) says which state it is, so it never rests on colour.
+        // Click opens the ERP ticket the email belongs on, which is the ART
+        // report's ticket and not always the row's own (RD3083, 2026-10-06).
+        const RECOVERY_EMAIL_ROW_GLYPH = {
+            needs_initial_email: { text: "✉!", tier: "danger" },
+            needs_recovery_email: { text: "✉", tier: "warn" },
+            potential_false_positive: { text: "✉?", tier: "alert" },
+        };
+        const RECOVERY_EMAIL_ROW_POLL_MS = 5 * 60 * 1000;
+        let recoveryEmailRowStatus = null;
+
+        function rememberRecoveryEmailStatus(data) {
+            // A check that has never finished has nothing to show; keep
+            // whatever the last good result was.
+            if (!data || !data.by_unit || !data.checked_at) {
+                return;
+            }
+            recoveryEmailRowStatus = data;
+            document.querySelectorAll(".unit-email-glyph").forEach(applyRowEmailGlyph);
+        }
+
+        function applyRowEmailGlyph(el) {
+            const unit = String(el.dataset.unit || "").toUpperCase();
+            const info = recoveryEmailRowStatus && unit ? recoveryEmailRowStatus.by_unit[unit] : null;
+            const glyph = info && RECOVERY_EMAIL_ROW_GLYPH[info.status];
+            if (!glyph) {
+                el.hidden = true;
+                el.dataset.url = "";
+                return;
+            }
+            const display = RECOVERY_EMAIL_STATUS_DISPLAY[info.status];
+            el.hidden = false;
+            el.textContent = glyph.text;
+            el.className = "unit-email-glyph is-" + glyph.tier;
+            el.dataset.url = info.url || "";
+            const lines = [display.text.replace(/^\S+\s/, "") + " — " + display.detail];
+            if (info.subject) {
+                lines.push("Ticket: " + info.subject + (info.issue_id ? " (" + info.issue_id + ")" : ""));
+            }
+            if (recoveryEmailRowStatus.checked_at) {
+                lines.push("Checked " + new Date(recoveryEmailRowStatus.checked_at * 1000).toLocaleString() + " (runs hourly)");
+            }
+            lines.push(info.url ? "(click to open that ticket in ERP)" : "(click to open the unit)");
+            el.title = lines.join("\n");
+        }
+
+        function pollRecoveryEmailStatusForRows() {
+            fetchRecoveryEmailStatus()
+                .catch(function () {})
+                .finally(function () {
+                    window.setTimeout(pollRecoveryEmailStatusForRows, RECOVERY_EMAIL_ROW_POLL_MS);
+                });
+        }
+        pollRecoveryEmailStatusForRows();
 
         function stopGraphsEmailPoll() {
             if (graphsEmailPollTimer) {
@@ -5414,6 +5563,7 @@
             graphs360Btn.hidden = false;
             loadGraphsNotes(graphsUnit);
             loadGraphsEmailStatus(graphsUnit);
+            renderGraphsWeather(graphsUnit, graphsSubject);
             if (graphsCommandSearch) {
                 graphsCommandSearch.clear();
             }
@@ -5461,6 +5611,8 @@
             graphsEmailRequestId += 1;
             graphsPowerVsCellRequestId += 1;
             stopGraphsEmailPoll();
+            // Drop the modal's weather icon out of the bulk refresh.
+            renderGraphsWeather("");
             scrollToGraphsSourceRow();
             clearGraphsRwsSource();
         }
@@ -16489,7 +16641,26 @@
                         const unitText = document.createElement("span");
                         unitText.className = "unit-open-label";
                         unitText.textContent = badgeUnit;
+                        // Outage/recovery email still to send — see
+                        // applyRowEmailGlyph. Its click opens the ERP
+                        // ticket instead of the modal, when there is one.
+                        const emailGlyph = document.createElement("span");
+                        emailGlyph.className = "unit-email-glyph";
+                        emailGlyph.dataset.unit = badgeUnit;
+                        emailGlyph.hidden = true;
+                        emailGlyph.addEventListener("click", function (event) {
+                            const url = emailGlyph.dataset.url;
+                            if (!url) {
+                                return; // falls through to the button: opens the modal
+                            }
+                            event.stopPropagation();
+                            if (!openBlankTab(url)) {
+                                notifyError("Pop-up blocked. Allow pop-ups for this site to open the ticket.");
+                            }
+                        });
+                        applyRowEmailGlyph(emailGlyph);
                         openBtn.appendChild(powerVsCellBadge);
+                        openBtn.appendChild(emailGlyph);
                         openBtn.appendChild(unitText);
                         openBtn.addEventListener("click", function (event) {
                             event.stopPropagation();

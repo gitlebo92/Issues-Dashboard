@@ -1864,6 +1864,24 @@
             content: "· ";
             color: var(--text-muted);
         }
+        /* Site weather in the verdict card (renderGraphsWeather). */
+        .graphs-verdict-wx:not([hidden]) {
+            display: inline-flex;
+            align-items: center;
+            align-self: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+        .graphs-verdict-wx:hover .graphs-verdict-wx-text,
+        .graphs-verdict-wx:focus-visible .graphs-verdict-wx-text {
+            color: var(--text);
+        }
+        .graphs-verdict-wx:focus-visible {
+            outline: 1px solid var(--accent);
+            outline-offset: 1px;
+        }
         .graphs-verdict-more {
             font: inherit;
             font-size: 11px;
@@ -2470,6 +2488,27 @@
         }
         .unit-open-btn .power-vs-cell-row-badge {
             margin-left: 0;
+        }
+        /* Email still to send (applyRowEmailGlyph): bare glyph in the
+           status colour, with ! / ? carrying the same meaning in text. */
+        .unit-email-glyph {
+            /* ✉ draws tiny in the mono stack; 16px matches the badge. */
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .unit-email-glyph.is-danger {
+            color: var(--danger-text);
+        }
+        .unit-email-glyph.is-warn {
+            color: var(--warn-text);
+        }
+        .unit-email-glyph.is-alert {
+            color: var(--caution-text);
+        }
+        .unit-email-glyph:hover {
+            filter: brightness(1.2);
         }
         .command-menu.is-caret summary {
             padding: 4px 6px;

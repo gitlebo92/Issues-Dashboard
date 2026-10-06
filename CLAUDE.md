@@ -46,7 +46,7 @@ work on the code without breaking a live NOC tool.
   `flask_endpoints.py`). The hourly recovery email status check is the
   same kind of exception: it runs right after each hourly ART report
   download, only pings units and reads the spreadsheet (it never sends an
-  email), and feeds the Graphs modal's email indicator — see
+  email), and feeds the Graphs modal's email pill and the row's ✉ glyph — see
   `_run_recovery_email_status_check` and `work_tool/recovery_email.py`.
   None of them start in sandbox at all though — their
   whole scheduler is skipped there (`WORK_TOOL_ENV != "sandbox"` at the

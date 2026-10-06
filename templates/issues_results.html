@@ -519,6 +519,13 @@
                     <span id="graphs_verdict_badge" class="graphs-verdict-badge"></span>
                     <span id="graphs_verdict_label" class="graphs-verdict-label"></span>
                     <span id="graphs_verdict_facts" class="graphs-verdict-facts"></span>
+                    <!-- Current site weather (renderGraphsWeather). The icon
+                         is a normal .wx-icon, so the bulk weather refresh
+                         fills it like any row's. -->
+                    <span id="graphs_verdict_wx" class="graphs-verdict-wx" hidden>
+                        <span id="graphs_wx_icon" class="wx-icon wx-pending"></span>
+                        <span id="graphs_wx_text" class="graphs-verdict-wx-text"></span>
+                    </span>
                     <button type="button" id="graphs_verdict_more" class="graphs-verdict-more" aria-expanded="false" aria-controls="graphs_verdict_text">Details</button>
                     <button type="button" id="graphs_verdict_recheck" class="graphs-verdict-more" hidden title="Run the Power vs Cell check for this unit again (read-only: switch uptime + Zabbix ping history)">Re-check</button>
                     <p id="graphs_verdict_text" class="graphs-verdict-text" hidden></p>
