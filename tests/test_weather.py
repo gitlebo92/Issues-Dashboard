@@ -1602,3 +1602,17 @@ class AcSpikeInferenceMinimumExcess(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenMeteoCurrentNetworkFailure(unittest.TestCase):
+    """A transient network error must come back as (None, error) for that
+    one location, not escape and 500 the whole /issues/weather-bulk batch."""
+
+    def test_connection_error_is_returned_not_raised(self):
+        import requests
+        with mock.patch.object(work_tool.weather, "_open_meteo_blocked", return_value=False), \
+                mock.patch.object(work_tool.weather.requests, "get",
+                                  side_effect=requests.ConnectionError("reset")):
+            weather, error = work_tool.weather._fetch_open_meteo_current(33.4, -112.0)
+        self.assertIsNone(weather)
+        self.assertIn("reset", error)

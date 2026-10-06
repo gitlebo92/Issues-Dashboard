@@ -13,6 +13,7 @@ import os
 import sys
 import re
 import json
+import shutil
 import asyncio
 import subprocess
 import tempfile
@@ -105,13 +106,69 @@ def list_busy_units():
             }
             for info in _unit_busy.values()
         ]
-_unit_notes_lock = threading.Lock()
-def _unit_notes_path():
+# ---- Default data dir ------------------------------------------------------
+# These paths used to be built from __file__, which was the repo root while
+# this was work_tool.py. The package split moved __file__ into work_tool/, so
+# the default quietly became work_tool/data/live/ instead of the data/live/
+# that unit_history, tech_stats and shading_snapshots all use. The default is
+# pinned to the repo root again, and _adopt_legacy_data_file carries over
+# whatever was written to the package-local dir in the meantime.
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_LEGACY_PACKAGE_DATA_DIR = os.path.join(_PACKAGE_DIR, "data", "live")
+_legacy_adopt_lock = threading.Lock()
+def _default_data_dir():
     data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
     if not data_dir:
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
+        data_dir = os.path.join(os.path.dirname(_PACKAGE_DIR), "data", "live")
     os.makedirs(data_dir, exist_ok=True)
-    return os.path.join(data_dir, "unit_notes.json")
+    return data_dir
+def _merge_entries_by_updated_at(current, legacy):
+    """Merge two {key: {..., "updated_at": iso}} dicts, keeping the newer
+    entry per key. ISO timestamps from isoformat() sort as strings."""
+    merged = dict(current)
+    for key, entry in legacy.items():
+        mine = merged.get(key)
+        if not isinstance(mine, dict) or str((entry or {}).get("updated_at") or "") > str(mine.get("updated_at") or ""):
+            merged[key] = entry
+    return merged
+def _adopt_legacy_data_file(name, merge_json=False):
+    """
+    Move work_tool/data/live/<name> into the default data dir, once. JSON
+    stores are merged entry by entry (newer updated_at wins) so neither
+    copy's notes or ticket flags are lost; anything else is taken only if
+    it is newer than the copy already there. The old file is renamed to
+    <name>.migrated rather than deleted. Fails soft: on any error the old
+    file stays put and the next call tries again.
+    """
+    if (os.getenv("WORK_TOOL_DATA_DIR") or "").strip():
+        return
+    legacy = os.path.join(_LEGACY_PACKAGE_DATA_DIR, name)
+    if not os.path.isfile(legacy):
+        return
+    with _legacy_adopt_lock:
+        if not os.path.isfile(legacy):
+            return
+        target = os.path.join(_default_data_dir(), name)
+        try:
+            if merge_json and os.path.isfile(target):
+                with open(target, "r", encoding="utf-8") as f:
+                    current = json.load(f)
+                with open(legacy, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                merged = _merge_entries_by_updated_at(current, old)
+                tmp_path = target + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, indent=2, sort_keys=True)
+                os.replace(tmp_path, target)
+            elif not os.path.isfile(target) or os.path.getmtime(legacy) > os.path.getmtime(target):
+                shutil.copy2(legacy, target)
+            os.replace(legacy, legacy + ".migrated")
+        except (OSError, ValueError) as exc:
+            print(f"Could not move {legacy} into {target}: {exc}")
+_unit_notes_lock = threading.Lock()
+def _unit_notes_path():
+    _adopt_legacy_data_file("unit_notes.json", merge_json=True)
+    return os.path.join(_default_data_dir(), "unit_notes.json")
 def _load_unit_notes():
     try:
         with open(_unit_notes_path(), "r", encoding="utf-8") as f:
@@ -154,11 +211,8 @@ def set_unit_note(unit, text):
 # many tickets are actively marked right now, not by history.
 _ticket_state_lock = threading.Lock()
 def _ticket_state_path():
-    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
-    if not data_dir:
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
-    os.makedirs(data_dir, exist_ok=True)
-    return os.path.join(data_dir, "ticket_state.json")
+    _adopt_legacy_data_file("ticket_state.json", merge_json=True)
+    return os.path.join(_default_data_dir(), "ticket_state.json")
 def _load_ticket_state():
     try:
         with open(_ticket_state_path(), "r", encoding="utf-8") as f:

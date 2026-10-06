@@ -172,21 +172,27 @@ def _open_meteo_mark_blocked():
 def _fetch_open_meteo_current(lat, lon):
     if _open_meteo_blocked():
         return None, "Open-Meteo rate-limited earlier — backing off, will retry automatically"
-    response = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "current": (
-                "temperature_2m,weather_code,wind_speed_10m,"
-                "relative_humidity_2m,cloud_cover"
-            ),
-            "temperature_unit": "fahrenheit",
-            "wind_speed_unit": "mph",
-            "timezone": "auto",
-        },
-        timeout=20,
-    )
+    # A DNS blip or connection reset used to escape from here uncaught and
+    # 500 the whole /issues/weather-bulk batch; returning an error drops
+    # just this one location, like the daily-outlook fetch below.
+    try:
+        response = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "current": (
+                    "temperature_2m,weather_code,wind_speed_10m,"
+                    "relative_humidity_2m,cloud_cover"
+                ),
+                "temperature_unit": "fahrenheit",
+                "wind_speed_unit": "mph",
+                "timezone": "auto",
+            },
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return None, f"Open-Meteo current weather failed: {exc}"
     if response.status_code == 429:
         _open_meteo_mark_blocked()
         return None, "Open-Meteo rate limit hit — backing off"
@@ -436,7 +442,7 @@ _UNIT_WEATHER_CACHE_LOCK = threading.Lock()
 # without a second Open-Meteo call for what is, for weather purposes, the
 # same spot.
 _UNIT_WEATHER_COORD_ROUND_DECIMALS = 2
-def get_weather_for_units(unit_subject_pairs, force=False):
+def get_weather_for_units(unit_subject_pairs, force=False, max_workers=10):
     """
     Current weather for a batch of units, using each one's own resolved
     GPS (site address, else attached MU trailer Component — see
@@ -464,13 +470,15 @@ def get_weather_for_units(unit_subject_pairs, force=False):
         return {}, None
 
     # Resolve coordinates first (ERP-only, no Open-Meteo yet) so units
-    # sharing a location can share one fetch below.
+    # sharing a location can share one fetch below. Each resolve is several
+    # blocking ERP round trips, so they run on a pool the same way
+    # fleet_battery_outlook_status resolves its installations.
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(wanted)))) as pool:
+        resolved = list(pool.map(lambda pair: _resolve_unit_weather_coords(*pair), wanted))
     coords_by_unit = {}
     group_by_unit = {}
-    for unit, subject in wanted:
-        lat, lon, coord_source, site_id, site_name, trailer, _error_detail = (
-            _resolve_unit_weather_coords(unit, subject)
-        )
+    for (unit, _subject), result in zip(wanted, resolved):
+        lat, lon, coord_source, site_id, site_name, trailer, _error_detail = result
         if lat is None:
             coords_by_unit[unit] = None
             continue

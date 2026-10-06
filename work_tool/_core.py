@@ -9359,12 +9359,12 @@ def _read_spreadsheet_rows(report_path):
     return rows
 def art_recovery_report_path():
     """Persistent path for the hourly ART NOC outage spreadsheet."""
-    data_dir = (os.getenv("WORK_TOOL_DATA_DIR") or "").strip()
-    if not data_dir:
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "live")
-    art_dir = os.path.join(data_dir, "art")
+    from .locks import _adopt_legacy_data_file, _default_data_dir
+    art_dir = os.path.join(_default_data_dir(), "art")
     os.makedirs(art_dir, exist_ok=True)
-    return os.path.join(art_dir, "Shield_NOC_Outage_no_initial_email.xlsx")
+    name = "Shield_NOC_Outage_no_initial_email.xlsx"
+    _adopt_legacy_data_file(os.path.join("art", name))
+    return os.path.join(art_dir, name)
 def _parse_html_table_rows(html_text):
     """Parse the first HTML table into a list of row lists."""
     from html.parser import HTMLParser
