@@ -16,6 +16,8 @@ python-dotenv>=1.0
 urllib3>=2.0
 openpyxl>=3.1
 
-# Optional. Only needed for Linux -> Scrypted -> "Set No Audio", which
-# imports it lazily and reports a clear message when it is missing.
-# scrypted-sdk
+# Linux -> Scrypted -> "Set No Audio" (and the Scrypted diagnostics) import
+# this lazily. Koushik Dutta's official client (koush/scrypted,
+# packages/python-client). The live service runs as SYSTEM, so install it
+# system-wide too: PYTHONNOUSERSITE=1 python -m pip install -r requirements.txt
+scrypted-sdk>=0.1.1
