@@ -26,7 +26,6 @@
         const panelModeEl = document.getElementById("panel_mode");
         const clearCheckboxesBtn = document.getElementById("clear_checkboxes");
         const pullErpBtn = document.getElementById("pull_erp");
-        const updateWeatherBtn = document.getElementById("update_weather");
         const clearCheckboxesModal = document.getElementById("clear_checkboxes_modal");
         const clearCheckboxesCancel = document.getElementById("clear_checkboxes_cancel");
         const clearCheckboxesConfirm = document.getElementById("clear_checkboxes_confirm");
@@ -532,7 +531,7 @@
         }
 
         // Same "el.setAttribute('role','button') + tabIndex=0 + Enter/Space
-        // keydown" treatment as wireWeatherIconClick below, factored out for
+        // keydown" treatment the weather icon used to have, factored out for
         // the six command-menu status glyphs (alarm/power/shading/
         // dead-panel/VRM-freshness/power-vs-cell) — they're plain <span>s
         // with a click listener already attached at creation, so rather
@@ -546,27 +545,6 @@
                 if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     el.click();
-                }
-            });
-        }
-
-        function wireWeatherIconClick(el, entry) {
-            if (!el || el.dataset.wxWired === "1") {
-                return;
-            }
-            el.dataset.wxWired = "1";
-            el.setAttribute("role", "button");
-            el.tabIndex = 0;
-            el.addEventListener("click", function (event) {
-                event.preventDefault();
-                event.stopPropagation();
-                runGetWeatherForEntry(entry, el);
-            });
-            el.addEventListener("keydown", function (event) {
-                if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    runGetWeatherForEntry(entry, el);
                 }
             });
         }
@@ -590,56 +568,6 @@
             ).forEach(function (el) {
                 applyWeatherToIcon(el, payload);
             });
-            const row = menuButton && menuButton.closest
-                ? menuButton.closest("li.ticket-row")
-                : null;
-            if (!row) {
-                return;
-            }
-            let iconEl = row.querySelector(".wx-icon");
-            if (!iconEl) {
-                const rowBody = row.querySelector(".ticket-row-body");
-                if (!rowBody) {
-                    return;
-                }
-                iconEl = document.createElement("span");
-                iconEl.className = "wx-icon wx-pending";
-                iconEl.dataset.unit = unit;
-                iconEl.dataset.subject = entry.ticketSubject || entry.subject || "";
-                iconEl.setAttribute("aria-hidden", "true");
-                const label = rowBody.querySelector(".ticket-label");
-                if (label) {
-                    rowBody.insertBefore(iconEl, label);
-                } else {
-                    rowBody.appendChild(iconEl);
-                }
-                wireWeatherIconClick(iconEl, entry);
-            }
-            applyWeatherToIcon(iconEl, payload);
-        }
-
-        function appendWeatherIcon(rowBody, entry) {
-            const unit = entry && entry.unit;
-            if (!unit) {
-                return;
-            }
-            const el = document.createElement("span");
-            el.className = "wx-icon wx-pending";
-            el.dataset.unit = unit;
-            // Carried along so refreshTicketWeather's bulk request can
-            // pass it to _resolve_unit_weather_coords, same as any other
-            // per-unit weather call — the icon's own subject context, not
-            // used to parse a region out of it any more.
-            el.dataset.subject = entry.ticketSubject || entry.subject || "";
-            el.setAttribute("aria-hidden", "true");
-            const cached = weatherByUnit[unit];
-            if (cached) {
-                applyWeatherToIcon(el, cached);
-            } else {
-                el.title = unit + " weather — click for site weather";
-            }
-            wireWeatherIconClick(el, entry);
-            rowBody.appendChild(el);
         }
 
         function scheduleTicketWeatherRefresh() {
@@ -2221,9 +2149,6 @@
             if (clearCheckboxesBtn) {
                 clearCheckboxesBtn.hidden = projectsMode || reportsMode;
             }
-            if (updateWeatherBtn) {
-                updateWeatherBtn.hidden = reportsMode;
-            }
             if (resolveSelectedBtn) {
                 resolveSelectedBtn.hidden = reportsMode;
             }
@@ -2485,19 +2410,6 @@
         pullErpBtn.addEventListener("click", function () {
             pollForNewIssues({ force: true, manual: true });
         });
-        if (updateWeatherBtn) {
-            updateWeatherBtn.addEventListener("click", function () {
-                if (updateWeatherBtn.disabled) {
-                    return;
-                }
-                updateWeatherBtn.disabled = true;
-                updateWeatherBtn.textContent = "Updating…";
-                refreshTicketWeather({ force: true }).finally(function () {
-                    updateWeatherBtn.disabled = false;
-                    updateWeatherBtn.textContent = "Update Weather";
-                });
-            });
-        }
         clearCheckboxesCancel.addEventListener("click", closeClearCheckboxesModal);
         clearCheckboxesConfirm.addEventListener("click", clearTicketCheckboxes);
         clearCheckboxesModal.addEventListener("click", function (event) {
@@ -16587,7 +16499,8 @@
                     rowBody.appendChild(panelLed);
                 }
 
-                appendWeatherIcon(rowBody, entry);
+                // Weather moved off the row into the Graphs modal's verdict
+                // card (Andrew's request, 2026-10-07) — see renderGraphsWeather.
 
                 const label = document.createElement("span");
                 label.className = "ticket-label";
@@ -18505,8 +18418,8 @@
             },
             {
                 selector: "#pull_erp",
-                title: "Pull, checkboxes, weather",
-                body: "Pull Issues (or Pull Projects, depending on the page) refreshes straight from ERP on demand. Clear checkboxes resets every Resolved/Worked/Skipped box at once. Update Weather refreshes the weather icon on every visible ticket. Resolve Selected finalizes every Resolved-checked ticket in one batch.",
+                title: "Pull and checkboxes",
+                body: "Pull Issues (or Pull Projects, depending on the page) refreshes straight from ERP on demand. Clear checkboxes resets every Resolved/Worked/Skipped box at once. Resolve Selected finalizes every Resolved-checked ticket in one batch.",
                 before: function () { tourSetPanelMode("issues"); },
             },
             {
