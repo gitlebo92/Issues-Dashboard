@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -489,6 +490,48 @@ class NoSiteMessage(unittest.TestCase):
             work_tool._no_site_message("SC-MU9008", None),
             "Component SC-MU9008 has no Site",
         )
+
+
+class FuzedUnit(unittest.TestCase):
+    """Fuzed = MU with no RD/FD head paired to it (e.g. MU1034): no fisheye."""
+
+    def setUp(self):
+        import work_tool._core as core
+        self.core = core
+        core._MU_HAS_HEAD_CACHE.clear()
+
+    def _heads(self, by_mu, error=None):
+        return mock.patch.object(self.core, "_erp_heads_for_mu_trailers", return_value=(by_mu, error))
+
+    def test_mu_without_head_is_fuzed_and_skips_fisheye(self):
+        with self._heads({}):
+            self.assertTrue(work_tool.is_fuzed_unit("MU1034"))
+            self.assertEqual(
+                work_tool.open_camera_targets_for_unit("MU1034"),
+                {"camera1", "camera2", "camera3", "camera4"},
+            )
+
+    def test_mu_paired_with_rd_is_not_fuzed(self):
+        with self._heads({"MU6007": ["RD3231"]}):
+            self.assertFalse(work_tool.is_fuzed_unit("MU6007"))
+
+    def test_high_numbered_fuzed_mu_is_not_caught_by_3300_rule(self):
+        with self._heads({}):
+            self.assertNotIn("fisheye", work_tool.open_camera_targets_for_unit("MU8067"))
+
+    def test_heads_are_never_fuzed(self):
+        with self._heads({}) as lookup:
+            self.assertFalse(work_tool.is_fuzed_unit("RD3076"))
+            lookup.assert_not_called()
+
+    def test_erp_failure_falls_back_to_blank_fisheye_column(self):
+        blank = ["MU1034", "r", "s", "n", "", "", "c1", "c2", "c3", "c4", "", "", ""]
+        with self._heads({}, error="ERP down"),                 mock.patch.object(self.core, "_net_row_for_unit", return_value=blank):
+            self.assertTrue(work_tool.is_fuzed_unit("MU1034"))
+        fisheye = list(blank)
+        fisheye[5] = "10.0.0.5"
+        with self._heads({}, error="ERP down"),                 mock.patch.object(self.core, "_net_row_for_unit", return_value=fisheye):
+            self.assertFalse(work_tool.is_fuzed_unit("MU1035"))
 
 
 if __name__ == "__main__":

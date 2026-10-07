@@ -1449,6 +1449,8 @@ CAMERA_ENDPOINTS = {
 HIGH_UNIT_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2"})
 # ACRD = RD/FD with no MU trailer attached: fisheye + C1–C3 only (never C4).
 ACRD_OPEN_CAMERA_TARGETS = frozenset({"fisheye", "camera1", "camera2", "camera3"})
+# Fuzed = MU with no RD head (is_fuzed_unit): no fisheye, C1–C4.
+FUZED_OPEN_CAMERA_TARGETS = frozenset({"camera1", "camera2", "camera3", "camera4"})
 _RD_MU_PARENT_CACHE = {}
 _RD_MU_PARENT_CACHE_TTL_SEC = 300
 def ping_camera(unit, target):
@@ -1660,14 +1662,45 @@ def is_tippy_unit(unit):
     mu_code = _erp_parent_mu_code(code)
     digits = re.sub(r"\D", "", mu_code or "")
     return bool(digits) and 6000 <= int(digits) <= 6999
+_MU_HAS_HEAD_CACHE = {}
+def is_fuzed_unit(unit):
+    """
+    "Fuzed" units are an MU#### with no RD/FD head paired to it — the head
+    is fused into the trailer, so there is effectively no RD (Andrew,
+    2026-10-07, e.g. MU1034). No fisheye; cameras are typically Hikvision
+    (see is_hikvision_unit). Not to be confused with Tippy above, and an MU
+    that IS some RD's trailer (RD3231(MU6007)) is neither.
+
+    Asks ERP whether any head has this MU as its parent_component (cached
+    like _erp_parent_mu_code). If ERP can't answer, falls back to the net
+    sheet: no fisheye IP means no fisheye to check.
+    """
+    code = _normalize_netsheet_unit(unit)
+    if not code.startswith("MU"):
+        return False
+    now = time.time()
+    cached = _MU_HAS_HEAD_CACHE.get(code)
+    if cached and cached[1] > now:
+        return not cached[0]
+    by_mu, error = _erp_heads_for_mu_trailers([code])
+    if error:
+        row = _net_row_for_unit(code)
+        return not (row and len(row) > 5 and str(row[5] or "").strip())
+    has_head = bool(by_mu.get(code))
+    _MU_HAS_HEAD_CACHE[code] = (has_head, now + _RD_MU_PARENT_CACHE_TTL_SEC)
+    return not has_head
 def open_camera_targets_for_unit(unit):
     """Open Cameras targets for a unit.
 
+    - Fuzed (MU with no RD/FD head): C1–C4, no fisheye. Checked first: the
+      >3300 rule below is about RD numbering and would wrongly catch MU8###.
     - Units above 3300: fisheye + C1/C2 only (C3/C4 duplicate C1/C2 in netsheet).
     - ACRD (RD/FD with no MU parent in ERP): fisheye + C1–C3 only (never C4).
     - Tippy (RD/FD paired with an MU6### trailer): same fisheye + C1–C3, never C4.
     - Otherwise: all configured camera endpoints.
     """
+    if is_fuzed_unit(unit):
+        return FUZED_OPEN_CAMERA_TARGETS
     n = unit_number(unit)
     if n is not None and n > 3300:
         return HIGH_UNIT_OPEN_CAMERA_TARGETS
