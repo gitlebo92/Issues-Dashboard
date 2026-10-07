@@ -110,6 +110,15 @@ class IsCameraViewTicket(unittest.TestCase):
             "Prineville Apartments",
         ))
 
+    def test_dirty_lens_with_no_erp_subtype(self):
+        # Caught live 2026-10-07: UNDIAGNOSED "Dirty Lens" (no "Camera" in
+        # it) fell through to connectivity and landed in Offline compute.
+        self.assertTrue(work_tool._is_camera_view_ticket(
+            "", "",
+            "SLC-RD3351(MU9068)-Dirty Lens-10/07/26-S&L Inc-Millcreek Canyon Road Project",
+        ))
+        self.assertTrue(work_tool._is_camera_view_ticket("", "", "PHX - RD3076 - Blurry Lens C2"))
+
     def test_blurry_and_dark_subject_fallbacks(self):
         self.assertTrue(work_tool._is_camera_view_ticket("", "", "Blurry Camera on RD3534"))
         self.assertTrue(work_tool._is_camera_view_ticket("", "", "Dark Views - RD3534"))

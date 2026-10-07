@@ -5097,8 +5097,10 @@ def _is_camera_view_subject(subject):
         # subtype), so the subtype check below never fired, and "Dirty
         # Camera Lens" didn't match any of the patterns above either —
         # it ran full outage validation instead of routing to Camera View.
-        r"\bdirty\s+camera",
-        r"\bblurry\s+camera",
+        # "lens" too: "SLC-RD3351(MU9068)-Dirty Lens-10/07/26-..." (also
+        # UNDIAGNOSED) landed in Offline compute because its NUC was down.
+        r"\bdirty\s+(?:camera|lens)",
+        r"\bblurry\s+(?:camera|lens)",
         r"\bdark\s+views?\b",
     )
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
