@@ -15038,6 +15038,50 @@
         // re-renders both, so ticking a box lights the matching chip and
         // clicking a chip ticks the matching box.
         // "mid-maintenance" is a unit count, not a list, so it stays inert.
+        // ---- Project Progress check ---------------------------------------
+        // Built server-side by work_tool/project_progress.py on the regular
+        // ERP pull (Andrew's request, 2026-10-07). NOC done is green with a
+        // check; stalled / not started is orange with words and the idle
+        // days, so it never rests on colour alone. Plain "in progress"
+        // returns null and the row keeps its old (45%) / (Open) text.
+        const PROJECT_PROGRESS_LISTS = ["projects_open", "projects_in_progress"];
+        const PROJECT_PROGRESS_DISPLAY = {
+            noc_done: { glyph: "✓", tier: "ok", word: "", tip: "NOC's tasks are done (83.3% or more)." },
+            stalled: { glyph: "⏳", tier: "attention", word: "stalled",
+                tip: "Between 10% and 82% and unchanged in ERP for over 2 days — may have been forgotten." },
+            not_started: { glyph: "○", tier: "attention", word: "not started",
+                tip: "At 10% or less and unchanged in ERP for over 2 days — may never have been picked up." },
+        };
+
+        function projectProgressSpan(entry) {
+            const display = entry && PROJECT_PROGRESS_DISPLAY[entry.progressStatus];
+            if (!display) {
+                return null;
+            }
+            const el = document.createElement("span");
+            el.className = "project-progress is-" + display.tier;
+            const pct = entry.percentCompleteLabel || "0%";
+            const idle = entry.progressIdleDays;
+            el.textContent = display.glyph + " " + pct
+                + (display.word ? " · " + display.word + (idle != null ? " " + idle + "d" : "") : "");
+            el.title = display.tip
+                + (idle != null ? "\nLast changed in ERP " + idle + " day(s) ago." : "");
+            return el;
+        }
+
+        function projectsNeedingAttentionCount() {
+            let count = 0;
+            PROJECT_PROGRESS_LISTS.forEach(function (listId) {
+                (listState[listId] || []).forEach(function (entry) {
+                    const display = PROJECT_PROGRESS_DISPLAY[entry.progressStatus];
+                    if (display && display.tier === "attention") {
+                        count += 1;
+                    }
+                });
+            });
+            return count;
+        }
+
         function renderStatsStrip() {
             if (!statsStripEl) {
                 return;
@@ -15114,6 +15158,17 @@
             busyChip.className = "stats-chip" + (busyUnitsCount ? " is-warning" : "");
             busyChip.innerHTML = "<strong>" + busyUnitsCount + "</strong> mid-maintenance";
             statsStripEl.appendChild(busyChip);
+
+            // Read-only, like the mid-maintenance chip: a count, not a filter.
+            const staleProjects = projectsNeedingAttentionCount();
+            if (staleProjects) {
+                const projectChip = document.createElement("div");
+                projectChip.className = "stats-chip is-warning";
+                projectChip.innerHTML = "<strong>" + staleProjects + "</strong> project"
+                    + (staleProjects === 1 ? "" : "s") + " need attention";
+                projectChip.title = "NOC projects stalled or not started for over 2 days (see the Projects lists)";
+                statsStripEl.appendChild(projectChip);
+            }
 
             const nextStatsCounts = { __total__: downTotal };
             DOWN_STATS_LISTS.forEach(function (item) {
@@ -15513,6 +15568,8 @@
                     : null,
                 percentCompleteLabel: isObject ? (item.percent_complete_label || "") : "",
                 modified: isObject ? (item.modified || "") : "",
+                progressStatus: isObject ? (item.progress_status || "") : "",
+                progressIdleDays: isObject && item.progress_idle_days != null ? item.progress_idle_days : null,
                 vrmMu: isObject ? (item.vrm_mu || "") : "",
                 vrmUrl: isObject ? (item.vrm_url || "") : "",
                 holdKind: isObject ? (item.hold_kind || "") : "",
@@ -16593,14 +16650,12 @@
                         if (entry.erpStatus) {
                             metaBits.push(entry.erpStatus);
                         }
-                    } else if (id === "projects_in_progress") {
-                        if (entry.percentCompleteLabel) {
+                    } else if (!projectProgressSpan(entry)) {
+                        if (id === "projects_in_progress" && entry.percentCompleteLabel) {
                             metaBits.push(entry.percentCompleteLabel);
                         } else if (entry.erpStatus) {
                             metaBits.push(entry.erpStatus);
                         }
-                    } else if (entry.erpStatus) {
-                        metaBits.push(entry.erpStatus);
                     }
                 }
                 if (entry.cameraLabel && (entry.cameraGroupMembers || [entry]).length === 1) {
@@ -16620,6 +16675,13 @@
                     meta.className = entry.undiagnosed ? "undiagnosed-badge" : "meta";
                     meta.textContent = "(" + metaBits.join(" · ") + ")";
                     label.appendChild(meta);
+                }
+                if (isProjectsList(id) && !isPrepProjectsList(id)) {
+                    const progressEl = projectProgressSpan(entry);
+                    if (progressEl) {
+                        label.appendChild(document.createTextNode(" "));
+                        label.appendChild(progressEl);
+                    }
                 }
 
                 rowBody.appendChild(label);

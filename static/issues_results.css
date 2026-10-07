@@ -2510,6 +2510,19 @@
         .unit-email-glyph:hover {
             filter: brightness(1.2);
         }
+        /* Project Progress check (projectProgressSpan): green ✓ when NOC's
+           tasks are done, orange with words when stalled / not started. */
+        .project-progress {
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .project-progress.is-ok {
+            color: var(--ok-text);
+        }
+        .project-progress.is-attention {
+            color: var(--caution-text);
+        }
         .command-menu.is-caret summary {
             padding: 4px 6px;
             border-radius: 0 var(--radius-sm) var(--radius-sm) 0;

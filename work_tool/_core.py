@@ -6953,6 +6953,11 @@ def validate_project_records(project_records):
             has_scrypted, scrypted_url, scrypted_nvr_url,
         ) = _unit_device_info(unit)
         vrm_mu, vrm_url = _vrm_info_from_subject(subject, unit)
+        modified = str((project or {}).get("modified") or "").strip()
+        # Deferred like main()'s security_update import: project_progress is
+        # a sibling submodule, kept out of _core's import-time graph.
+        from .project_progress import project_progress_status
+        progress = project_progress_status(percent_complete, modified)
         entries.append({
             "unit": unit,
             "project_id": project_id,
@@ -6962,7 +6967,9 @@ def validate_project_records(project_records):
             "erp_status": status,
             "percent_complete": percent_complete,
             "percent_complete_label": _format_project_percent_complete(percent_complete),
-            "modified": str((project or {}).get("modified") or "").strip(),
+            "modified": modified,
+            "progress_status": progress["status"],
+            "progress_idle_days": progress["idle_days"],
             "connectivity_kind": category or "",
             "led_status": led_status,
             "switch_url": switch_url,
