@@ -3508,10 +3508,40 @@ def _camera_host_port(value, target):
     if not host:
         return host, None
     return host, _resolve_camera_port(host, parsed_port or default_port)
+def _fd_router_camera_entries(unit):
+    """
+    An FD unit's router cameras in list_unit_cameras's shape, or None
+    (not FD, or the router couldn't be read). Port 80: these are the
+    cameras' own LAN addresses, not forwarded ports, and probing 27
+    cameras' ports up front would make every list call slow.
+    """
+    if not is_fd_unit(unit):
+        return None
+    from .fd_cameras import fd_camera_label, fd_camera_target, fd_router_cameras
+    cameras, error = fd_router_cameras(unit)
+    if error or not cameras:
+        return None
+    return [
+        {
+            "target": fd_camera_target(camera),
+            "label": fd_camera_label(camera, cameras),
+            "host": camera["ip"],
+            "port": 80,
+        }
+        for camera in cameras
+    ]
 def list_unit_cameras(unit):
     """Return configured cameras for a unit (target, label, host, port — no credentials)."""
     load_dotenv(env_path)
     ensure_net_array()
+    # FD units: the cameras the unit's own router knows (Andrew's request,
+    # 2026-10-08) — the net sheet has no camera IPs for most FD units and
+    # only five slots. Falls through to the net sheet when the router can't
+    # be read. Every camera feature that lists a unit's cameras (Open
+    # Cameras, snapshots, 360, proxy, reachability) goes through here.
+    fd_cameras_list = _fd_router_camera_entries(unit)
+    if fd_cameras_list:
+        return fd_cameras_list, None
     row = ensure_unit_net_info(
         unit,
         needed_indexes=tuple(column for column, _ in CAMERA_ENDPOINTS.values()),
@@ -9016,10 +9046,16 @@ def _validate_unit_full_impl(unit):
         _record("Speaker", speaker_up, speaker_output)
         speaker_down = not speaker_up
 
-    for target, (column, label) in CAMERA_ENDPOINTS.items():
-        camera_ip = ""
-        if row and len(row) > column:
-            camera_ip = str(row[column] or "").strip()
+    # FD units: every camera on the router, not the net sheet's five slots.
+    fd_entries = _fd_router_camera_entries(unit)
+    if fd_entries:
+        camera_checks = [(item["target"], item["host"], item["label"]) for item in fd_entries]
+    else:
+        camera_checks = [
+            (target, str(row[column] or "").strip() if row and len(row) > column else "", label)
+            for target, (column, label) in CAMERA_ENDPOINTS.items()
+        ]
+    for target, camera_ip, label in camera_checks:
         if not camera_ip:
             continue
         lines.append(f"Checking {label}...")

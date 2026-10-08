@@ -121,7 +121,7 @@ class FdCamerasForTicket(unittest.TestCase):
             )
         self.assertEqual([c["ip"] for c in cams], ["10.20.61.156"])
         self.assertEqual(fdc.fd_camera_label(cams[0]), "MzdUsedBldg-C02")
-        self.assertEqual(fdc.fd_camera_target(cams[0]), "fd:CoastDlrshp-FL-MzdUsedBldg-C02-Rear-W")
+        self.assertEqual(fdc.fd_camera_target(cams[0]), "fd:coastdlrshp-fl-mzdusedbldg-c02-rear-w")
 
     def test_generic_outage_pings_every_router_camera(self):
         with self._router(FD1040_CAMERAS):

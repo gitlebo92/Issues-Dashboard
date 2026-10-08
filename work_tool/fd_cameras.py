@@ -210,7 +210,9 @@ def is_fd_camera_target(target):
 
 
 def fd_camera_target(camera):
-    return FD_TARGET_PREFIX + camera["name"]
+    # Lowercase: camera_login_info and the long-ping lowercase every target
+    # they are given (net sheet slots already are).
+    return FD_TARGET_PREFIX + camera["name"].lower()
 
 
 def fd_camera_label(camera, site_cameras=None):
@@ -239,8 +241,8 @@ def fd_camera_for_target(unit, target):
     if not is_fd_camera_target(target):
         return None
     cameras, _error = fd_router_cameras(unit)
-    name = target[len(FD_TARGET_PREFIX):]
-    return next((c for c in cameras or [] if c["name"] == name), None)
+    name = target[len(FD_TARGET_PREFIX):].lower()
+    return next((c for c in cameras or [] if c["name"].lower() == name), None)
 
 
 def fd_cameras_for_ticket(unit, subject, slot_targets=(), generic=False):
