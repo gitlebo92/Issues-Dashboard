@@ -3790,6 +3790,39 @@
             let dragStartViewMin = viewMin;
             let dragStartViewMax = viewMax;
 
+            // Narrow (factor < 1) or widen the view around centerT, clamped
+            // to the data. Shared by the wheel and the −/+ buttons.
+            function zoomAround(centerT, factor) {
+                if (dataXMax === dataXMin) {
+                    return;
+                }
+                const currentSpan = viewMax - viewMin;
+                const span = Math.max(MIN_SPAN_MS, Math.min(dataXMax - dataXMin, currentSpan * factor));
+                const ratio = span / currentSpan;
+                let newMin = centerT - (centerT - viewMin) * ratio;
+                let newMax = newMin + span;
+                if (newMin < dataXMin) {
+                    newMin = dataXMin;
+                    newMax = newMin + span;
+                }
+                if (newMax > dataXMax) {
+                    newMax = dataXMax;
+                    newMin = newMax - span;
+                }
+                viewMin = Math.max(dataXMin, newMin);
+                viewMax = Math.min(dataXMax, newMax);
+                draw();
+            }
+
+            function resetZoom() {
+                if (viewMin === dataXMin && viewMax === dataXMax) {
+                    return;
+                }
+                viewMin = dataXMin;
+                viewMax = dataXMax;
+                draw();
+            }
+
             container.style.position = "relative";
             const svg = document.createElementNS(svgNS, "svg");
             svg.setAttribute("viewBox", "0 0 " + width + " " + height);
@@ -3804,10 +3837,51 @@
 
             const zoomHint = document.createElement("div");
             zoomHint.className = "battery-chart-zoom-hint";
-            zoomHint.textContent = "scroll to zoom · dbl-click to reset";
+            zoomHint.textContent = "scroll or −/+ to zoom · dbl-click to reset";
             container.appendChild(zoomHint);
 
+            // −/+ step 10% around the middle of the view — finer than the
+            // wheel's 20% notch, for mice/trackpads whose scroll is coarse
+            // (Andrew's request, 2026-10-08). Outside the SVG, so draw()
+            // rebuilding the chart leaves them alone.
+            const ZOOM_BUTTON_STEP = 0.9;
+            const zoomControls = document.createElement("div");
+            zoomControls.className = "battery-chart-zoom-controls";
+            function zoomButton(text, title, onClick) {
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "battery-chart-zoom-btn";
+                btn.textContent = text;
+                btn.title = title;
+                btn.setAttribute("aria-label", title + " — " + options.label);
+                btn.addEventListener("click", function (event) {
+                    event.stopPropagation();
+                    onClick();
+                });
+                zoomControls.appendChild(btn);
+                return btn;
+            }
+            const viewCenter = function () { return (viewMin + viewMax) / 2; };
+            const zoomOutBtn = zoomButton("−", "Zoom out", function () {
+                zoomAround(viewCenter(), 1 / ZOOM_BUTTON_STEP);
+            });
+            const zoomInBtn = zoomButton("+", "Zoom in", function () {
+                zoomAround(viewCenter(), ZOOM_BUTTON_STEP);
+            });
+            const zoomResetBtn = zoomButton("⟲", "Reset zoom", resetZoom);
+            container.appendChild(zoomControls);
+
+            function syncZoomControls() {
+                const zoomed = viewMin > dataXMin || viewMax < dataXMax;
+                const flat = dataXMax === dataXMin;
+                zoomHint.classList.toggle("is-zoomed", zoomed);
+                zoomOutBtn.disabled = !zoomed;
+                zoomResetBtn.disabled = !zoomed;
+                zoomInBtn.disabled = flat || viewMax - viewMin <= MIN_SPAN_MS;
+            }
+
             function draw() {
+                syncZoomControls();
                 svg.innerHTML = "";
                 svg.setAttribute(
                     "aria-label",
@@ -4046,39 +4120,10 @@
                 // a chart.
                 overlay.addEventListener("wheel", function (event) {
                     event.preventDefault();
-                    if (dataXMax === dataXMin) {
-                        return;
-                    }
-                    const cursorT = timeAtClientX(event.clientX);
-                    const zoomFactor = event.deltaY < 0 ? 0.8 : 1.25;
-                    const currentSpan = viewMax - viewMin;
-                    const span = Math.max(MIN_SPAN_MS, Math.min(dataXMax - dataXMin, currentSpan * zoomFactor));
-                    const ratio = span / currentSpan;
-                    let newMin = cursorT - (cursorT - viewMin) * ratio;
-                    let newMax = newMin + span;
-                    if (newMin < dataXMin) {
-                        newMin = dataXMin;
-                        newMax = newMin + span;
-                    }
-                    if (newMax > dataXMax) {
-                        newMax = dataXMax;
-                        newMin = newMax - span;
-                    }
-                    viewMin = Math.max(dataXMin, newMin);
-                    viewMax = Math.min(dataXMax, newMax);
-                    zoomHint.classList.toggle("is-zoomed", viewMin > dataXMin || viewMax < dataXMax);
-                    draw();
+                    zoomAround(timeAtClientX(event.clientX), event.deltaY < 0 ? 0.8 : 1.25);
                 }, { passive: false });
 
-                overlay.addEventListener("dblclick", function () {
-                    if (viewMin === dataXMin && viewMax === dataXMax) {
-                        return;
-                    }
-                    viewMin = dataXMin;
-                    viewMax = dataXMax;
-                    zoomHint.classList.remove("is-zoomed");
-                    draw();
-                });
+                overlay.addEventListener("dblclick", resetZoom);
 
                 // Click-and-drag to pan once zoomed in — content follows
                 // the cursor (drag right reveals what was off-screen to

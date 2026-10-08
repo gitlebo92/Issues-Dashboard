@@ -2243,10 +2243,42 @@
            miss is better than one that shouts), brightens once actually
            zoomed so it's obvious there's more of the series off-screen
            and that double-click gets it back. */
+        /* −/+/⟲ zoom buttons (Graphs modal charts), top-right; the hint
+           text sits just left of them. */
+        .battery-chart-zoom-controls {
+            position: absolute;
+            top: 2px;
+            right: 6px;
+            display: inline-flex;
+            gap: 2px;
+            z-index: 1;
+        }
+        .battery-chart-zoom-btn {
+            font: inherit;
+            font-size: 12px;
+            line-height: 1;
+            min-width: 20px;
+            padding: 2px 5px;
+            color: var(--text-secondary);
+            background: var(--bg-panel);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .battery-chart-zoom-btn:hover:not(:disabled),
+        .battery-chart-zoom-btn:focus-visible {
+            color: var(--accent);
+            border-color: var(--accent);
+            outline: none;
+        }
+        .battery-chart-zoom-btn:disabled {
+            opacity: 0.35;
+            cursor: default;
+        }
         .battery-chart-zoom-hint {
             position: absolute;
             top: 4px;
-            right: 8px;
+            right: 84px;
             font-size: 9px;
             color: var(--text-muted);
             opacity: 0.55;
