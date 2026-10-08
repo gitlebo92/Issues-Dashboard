@@ -11413,6 +11413,70 @@
             appendValidateButton("Validate (Full)", "/issues/validate-unit-full/", true);
         }
 
+        // Validate (Full) for ticket rows on lists that are about the kind
+        // of work rather than the unit's state (Camera View, speaker,
+        // camera, panel, misc...): runs the same full check, updates the
+        // LED and logs the result, but never moves the ticket — the server
+        // is told stay_in_list so the shared view doesn't move it either.
+        function appendInPlaceFullValidateButton(cliMenu, entry, listId) {
+            const label = "Validate (Full)";
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "action-btn";
+            btn.textContent = label;
+            btn.title = "Full check of router, compute, speaker and cameras. The ticket stays in this list.";
+            btn.addEventListener("click", function () {
+                btn.disabled = true;
+                btn.textContent = "Validating...";
+                fetch("/issues/validate-unit-full/" + encodeURIComponent(entry.unit), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        issue_id: entry.issueId || "",
+                        source_list_id: listId,
+                        stay_in_list: true,
+                    }),
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            if (!response.ok || !data.ok) {
+                                throw new Error(data.error || ("HTTP " + response.status));
+                            }
+                            return data;
+                        });
+                    })
+                    .then(function (data) {
+                        (data.output || "").split(/\r?\n/).forEach(function (line) {
+                            if (line) {
+                                consoleLines.push(line);
+                            }
+                        });
+                        entry.ledStatus = data.led_status || entry.ledStatus;
+                        entry.computeLabel = data.compute_label || entry.computeLabel;
+                        if (data.speaker_up === true || data.speaker_up === false) {
+                            entry.speakerUp = data.speaker_up;
+                        }
+                        consoleLines.push(
+                            "Full validate " + entry.unit + " — "
+                                + (data.led_status || "unknown")
+                                + (data.multi_down ? " (multi-down)" : "")
+                                + " (staying in " + (listHeadingLabels[listId] || listId) + ")"
+                        );
+                        renderConsole(true);
+                        statusEl.textContent = label + " complete for " + entry.unit;
+                        propagateLedFromEntry(entry);
+                    })
+                    .catch(function (error) {
+                        notifyError(label + " failed: " + (error.message || error));
+                    })
+                    .finally(function () {
+                        btn.disabled = false;
+                        btn.textContent = label;
+                    });
+            });
+            cliMenu.appendChild(btn);
+        }
+
         function renderUnitToolsRow(entry, openMenu) {
             const section = document.getElementById("unit_tools_section");
             const el = document.getElementById("unit_tools");
@@ -16766,6 +16830,11 @@
                     }
                     disableErpWriteControl(createBtn);
                     commandItems.appendChild(createBtn);
+                    if (entry.unit) {
+                        appendInPlaceFullValidateButton(
+                            appendCommandSubmenu(commandItems, "Validate"), entry, id
+                        );
+                    }
                     appendCamerasCommandMenu(commandItems, entry);
                     appendDiagnosticsCommandMenu(commandItems, entry);
                     const openMenu = appendCommandSubmenu(commandItems, "Open");
@@ -17111,6 +17180,8 @@
                         "/issues/validate-unit-full/",
                         true
                     );
+                } else if (entry.unit) {
+                    appendInPlaceFullValidateButton(cliMenu, entry, id);
                 }
 
                 appendWeatherCommandMenu(commandItems, entry);

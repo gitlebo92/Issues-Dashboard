@@ -3676,6 +3676,12 @@ def issues_validate_unit_full(unit):
     to_list_id = result.get("move_to") or (
         "false_positives" if result.get("category") == "false_positives" else ""
     )
+    if payload.get("stay_in_list"):
+        # Camera View / speaker / camera / panel / etc. rows: the ticket's
+        # list is about what kind of work it is, not the unit's state, so
+        # Full validate only patches the LED in place (Andrew's request,
+        # 2026-10-07 — a Camera View ticket stays put even with its NUC down).
+        to_list_id = ""
     _sync_shared_validate_result(
         unit, payload.get("issue_id"), payload.get("source_list_id"),
         to_list_id, extra_fields,
