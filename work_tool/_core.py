@@ -704,6 +704,14 @@ def router_ip_for_unit(unit):
     if not row or len(row) <= 1:
         return ""
     return _host_only(row[1]) or str(row[1]).strip()
+def get_router_ip(unit):
+    """
+    The unit's router IP (net sheet column 1, backfilled from v19/ERP when
+    blank), without any :port. Empty string if there is none.
+
+        router_ip = work_tool.get_router_ip("RD3371")
+    """
+    return router_ip_for_unit(unit)
 def ping_router_status(unit, mode="quick"):
     """
     Ping the unit router.
