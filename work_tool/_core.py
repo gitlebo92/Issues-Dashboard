@@ -712,6 +712,15 @@ def get_router_ip(unit):
         router_ip = work_tool.get_router_ip("RD3371")
     """
     return router_ip_for_unit(unit)
+def get_nuc_ip(unit):
+    """
+    The unit's NUC IP (net sheet column 3, backfilled from v19/ERP when
+    blank), without any :port. Empty string if there is none. On a PVE
+    unit (>= 3300) this column is the compute host the net sheet lists.
+
+        nuc_ip = work_tool.get_nuc_ip("RD3371")
+    """
+    return _nuc_ip(unit)
 def ping_router_status(unit, mode="quick"):
     """
     Ping the unit router.
