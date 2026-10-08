@@ -3527,9 +3527,25 @@ def _fd_router_camera_entries(unit):
             "label": fd_camera_label(camera, cameras),
             "host": camera["ip"],
             "port": 80,
+            "vendor": camera.get("vendor") or "",
         }
         for camera in cameras
     ]
+def _camera_vendor(unit_key, camera, cameras=None):
+    """
+    A camera's vendor: its own (FD router cameras carry one from their MAC,
+    see fd_cameras.CAMERA_VENDOR_OUIS), else the unit-level rule (MU sites
+    with no fisheye are Hikvision, everything else Dahua).
+    """
+    vendor = str((camera or {}).get("vendor") or "").strip().lower()
+    if vendor:
+        return vendor
+    return "hikvision" if is_hikvision_unit(unit_key, cameras) else "dahua"
+def _unsupported_camera_vendor_message(vendor, what):
+    return (
+        f"{what} isn't supported for {vendor.title()} cameras yet — "
+        "use Open to reach the camera's own page."
+    )
 def list_unit_cameras(unit):
     """Return configured cameras for a unit (target, label, host, port — no credentials)."""
     load_dotenv(env_path)
@@ -3649,7 +3665,7 @@ def camera_login_info(unit, target):
         "username": fishuser,
         "auth": "digest-or-basic",
         # Reuse the cameras list so proxy hot paths don't list twice.
-        "vendor": "hikvision" if is_hikvision_unit(unit_key, cameras) else "dahua",
+        "vendor": _camera_vendor(unit_key, camera, cameras),
         "camera_url": f"http://{camera['host']}:{camera['port']}/",
         "url": proxy_path,
     }
@@ -3839,6 +3855,8 @@ def camera_snapshot(unit, target, channel=1, timeout=20):
     info, error = camera_login_info(unit, target)
     if error:
         return None, error
+    if info.get("vendor") not in ("hikvision", "dahua"):
+        return None, _unsupported_camera_vendor_message(info.get("vendor") or "unknown", "Snapshot")
     if info.get("vendor") == "hikvision":
         subpath = f"ISAPI/Streaming/channels/{int(channel)}01/picture"
         query_string = b""
@@ -4420,7 +4438,10 @@ def camera_send_test_email(unit, target):
     if not username or not password:
         return None, "fishuser/fishpass not set in .env"
 
-    if is_hikvision_unit(unit_key, cameras):
+    vendor = _camera_vendor(unit_key, camera, cameras)
+    if vendor not in ("hikvision", "dahua"):
+        return None, _unsupported_camera_vendor_message(vendor, "Test email")
+    if vendor == "hikvision":
         _detail, error = _hikvision_send_test_email(
             camera["host"], camera["port"], username, password,
         )

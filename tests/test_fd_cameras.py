@@ -99,6 +99,48 @@ class FdRouterCameras(unittest.TestCase):
         self.assertIn("no camera leases", error)
 
 
+class CameraVendorFromMac(unittest.TestCase):
+    def test_known_prefixes_in_any_format(self):
+        self.assertEqual(fdc.camera_vendor_from_mac("FC:5F:49:00:00:01"), "dahua")
+        self.assertEqual(fdc.camera_vendor_from_mac("3c-e3-6b-43-a5-c8"), "dahua")
+        self.assertEqual(fdc.camera_vendor_from_mac("00:18:85:12:34:56"), "avigilon")
+        self.assertEqual(fdc.camera_vendor_from_mac("701AD5123456"), "avigilon")
+        self.assertEqual(fdc.camera_vendor_from_mac("40:AC:BF:00:00:01"), "hikvision")
+        self.assertEqual(fdc.camera_vendor_from_mac("00:66:6A:00:0B:E2"), "")  # speaker
+        self.assertEqual(fdc.camera_vendor_from_mac(""), "")
+
+    def test_unlabelled_camera_vendor_lease_counts_but_labelled_non_camera_does_not(self):
+        leases = fdc.parse_dhcp_leases("""
+ 0 address=10.9.0.21 mac-address=00:18:85:AA:BB:01
+ 1 comment=SC-FD9999-NVR address=10.9.0.30 mac-address=FC:5F:49:AA:BB:02
+ 2 comment=SC-FD9999-C01-Lot address=10.9.0.22 mac-address=FC:5F:49:AA:BB:03
+ 3 address=10.9.0.40 mac-address=00:66:6A:AA:BB:04
+""")
+        cams = fdc.cameras_from_leases(leases, "FD9999")
+        self.assertEqual(
+            [(c["ip"], c["vendor"], c["name"]) for c in cams],
+            [("10.9.0.21", "avigilon", "10.9.0.21"), ("10.9.0.22", "dahua", "C01-Lot")],
+        )
+
+
+class CameraVendorInCore(unittest.TestCase):
+    def test_avigilon_snapshot_says_unsupported_instead_of_trying_dahua(self):
+        import work_tool._core as core
+        info = {"vendor": "avigilon"}
+        with mock.patch.object(core, "camera_login_info", return_value=(info, None)), \
+                mock.patch.object(core, "proxy_camera_http") as proxy:
+            image, error = core.camera_snapshot("FD9999", "fd:avigilon-cam")
+        self.assertIsNone(image)
+        self.assertIn("Avigilon", error)
+        proxy.assert_not_called()
+
+    def test_camera_vendor_prefers_the_cameras_own(self):
+        import work_tool._core as core
+        self.assertEqual(core._camera_vendor("FD1038", {"vendor": "hikvision"}), "hikvision")
+        with mock.patch.object(core, "is_hikvision_unit", return_value=False):
+            self.assertEqual(core._camera_vendor("RD3073", {}), "dahua")
+
+
 FD1040_CAMERAS = [
     {"name": "CoastDlrshp-FL-MzdBldg-C01-RearLot-NW", "number": 1, "ip": "10.20.61.146", "mac": "", "status": "bound"},
     {"name": "CoastDlrshp-FL-MzdUsedBldg-C01-Front-E", "number": 1, "ip": "10.20.61.155", "mac": "", "status": "bound"},

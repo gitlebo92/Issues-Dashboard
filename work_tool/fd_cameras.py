@@ -61,6 +61,30 @@ def parse_dhcp_leases(text):
     return leases
 
 
+# Camera vendor by MAC prefix (OUI), checked against the IEEE registry
+# (standards-oui.ieee.org) on 2026-10-08 for every camera MAC on the FD
+# routers. Dahua: 123 of 140 FD cameras; Hikvision: 16 (FD1017, FD1038);
+# Uniview: 1 (FD2002). Avigilon (Andrew's request): 00:18:85 is Avigilon's
+# original block, now registered to its parent Motorola Solutions, and
+# 70:1A:D5 is "Avigilon Alta" — no FD camera uses either yet. Motorola's
+# other blocks are radios, not cameras, so they are deliberately absent.
+CAMERA_VENDOR_OUIS = {
+    "dahua": ("FC:5F:49", "3C:E3:6B", "FC:B6:9D", "08:ED:ED", "C0:39:5A"),
+    "hikvision": ("40:AC:BF", "4C:BD:8F", "B4:A3:82", "18:68:CB"),
+    "avigilon": ("00:18:85", "70:1A:D5"),
+    "uniview": ("C4:79:05",),
+}
+_OUI_TO_VENDOR = {oui: vendor for vendor, ouis in CAMERA_VENDOR_OUIS.items() for oui in ouis}
+
+
+def camera_vendor_from_mac(mac):
+    """'dahua' / 'hikvision' / 'avigilon' / 'uniview' from a MAC address, or ''."""
+    text = re.sub(r"[^0-9A-Fa-f]", "", str(mac or "")).upper()
+    if len(text) < 6:
+        return ""
+    return _OUI_TO_VENDOR.get(":".join(text[i:i + 2] for i in (0, 2, 4)), "")
+
+
 def _camera_number(text):
     text = str(text or "")
     match = _CAMERA_C_NUMBER.search(text) or _CAMERA_WORD_NUMBER.search(text)
@@ -83,25 +107,31 @@ def cameras_from_leases(leases, unit):
     Pick the camera leases out of a router's lease list. A lease is a camera
     when its comment (or, failing that, its host name) carries a camera
     number: "-C01-", "-C3", or "Camera1". Speakers, switches, the iLO and
-    the MicroServer don't, so they drop out. Sorted by IP.
+    the MicroServer don't, so they drop out. A lease with no comment at all
+    also counts when its MAC belongs to a camera vendor (CAMERA_VENDOR_OUIS),
+    so sites that never labelled their leases still show their cameras.
+    Each camera carries its vendor from the MAC. Sorted by IP.
     """
     cameras = []
     for lease in leases or []:
         comment = lease.get("comment", "")
         host_name = lease.get("host-name", "")
+        mac = lease.get("active-mac-address") or lease.get("mac-address") or ""
+        vendor = camera_vendor_from_mac(mac)
         number = _camera_number(comment)
         if number is None and not comment:
             number = _camera_number(host_name)
-        if number is None:
+        if number is None and (comment or not vendor):
             continue
         ip = _host_only(lease.get("active-address") or lease.get("address") or "")
         if not ip:
             continue
         cameras.append({
-            "name": _camera_name(comment, host_name, unit),
+            "name": _camera_name(comment, host_name, unit) or ip,
             "number": number,
             "ip": ip,
-            "mac": lease.get("active-mac-address") or lease.get("mac-address") or "",
+            "mac": mac,
+            "vendor": vendor,
             "status": lease.get("status", ""),
         })
 
