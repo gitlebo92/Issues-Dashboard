@@ -4640,7 +4640,13 @@
             // Everything the row's quick menu has, so the modal is a
             // superset of it (Andrew's request, 2026-10-03: the unit button
             // opens this modal; the row's ▾ is just a shortcut).
-            appendValidateCommandMenu(graphsDeviceMenuEl, entry);
+            // Opened from a ticket row for this same unit? Then Validate acts
+            // on that ticket (moves it), like the row's own ▾ menu.
+            const sourceTicket = graphsSourceEntry && graphsSourceListId
+                && String(graphsSourceEntry.unit || "").toUpperCase() === String(entry.unit || "").toUpperCase()
+                ? { entry: graphsSourceEntry, listId: graphsSourceListId }
+                : null;
+            appendValidateCommandMenu(graphsDeviceMenuEl, entry, sourceTicket);
             appendWeatherCommandMenu(graphsDeviceMenuEl, entry);
             appendCamerasCommandMenu(graphsDeviceMenuEl, entry);
             appendOpenCommandMenu(graphsDeviceMenuEl, entry);
@@ -11376,10 +11382,46 @@
             appendLinuxCommandMenus(commandItems, entry);
         }
 
+        // Lists where a Validate result decides which list the ticket
+        // belongs in (same set the row's ▾ menu offers Quick/Full on), and
+        // lists whose own server-side check already handles placement.
+        const VALIDATE_MOVES_TICKET_LISTS = ["false_positives", "truly_down", "nuc_down"];
+        const VALIDATE_LIST_AWARE_LISTS = ["speaker_outage", "camera_outage", "panel_issues", "camera_view"];
+
         // Validate (Quick / Full) — its own builder so the Power vs Cell
         // Graphs modal's rail can show it too (renderGraphsDeviceMenu).
-        function appendValidateCommandMenu(commandItems, entry) {
+        // `ticket` ({entry, listId}) is the row the modal was opened from:
+        // with it, the server moves the ticket the same way the row's ▾
+        // menu does (caught live, 2026-10-08: MU1034 validated "truly
+        // down" from the modal but stayed green in Up Steady, because the
+        // modal never said which ticket it was). Without it (Unit Tools,
+        // fleet reports) results only go to the console, as before.
+        function appendValidateCommandMenu(commandItems, entry, ticket) {
             const cliMenu = appendCommandSubmenu(commandItems, "Validate");
+            const listId = ticket && ticket.listId;
+            const movesTicket = VALIDATE_MOVES_TICKET_LISTS.indexOf(listId) !== -1;
+            const listAware = VALIDATE_LIST_AWARE_LISTS.indexOf(listId) !== -1;
+
+            function requestBody(isFull) {
+                if (!ticket || !ticket.entry) {
+                    return null;
+                }
+                if (isFull) {
+                    return {
+                        issue_id: ticket.entry.issueId || "",
+                        source_list_id: listId,
+                        stay_in_list: !movesTicket,
+                    };
+                }
+                if (!movesTicket && !listAware) {
+                    return null; // Quick on e.g. Termination must not move the ticket
+                }
+                return {
+                    issue_id: ticket.entry.issueId || "",
+                    source_list_id: listId,
+                    camera_target: ticket.entry.cameraTarget || "",
+                };
+            }
 
             function appendValidateButton(label, endpoint, isFull) {
                 const validateBtn = document.createElement("button");
@@ -11389,7 +11431,12 @@
                 validateBtn.addEventListener("click", function () {
                     validateBtn.disabled = true;
                     validateBtn.textContent = "Validating...";
-                    fetch(endpoint + encodeURIComponent(entry.unit), { method: "POST" })
+                    const body = requestBody(isFull);
+                    fetch(endpoint + encodeURIComponent(entry.unit), body ? {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                    } : { method: "POST" })
                         .then(function (response) {
                             return response.json().then(function (data) {
                                 if (!response.ok || !data.ok) {
@@ -11438,6 +11485,29 @@
                                         + " — "
                                         + (data.category || "unknown").replace(/_/g, " ")
                                 );
+                            }
+                            if (body) {
+                                // The server already moved its copy; the
+                                // next shared-state poll re-renders the lists.
+                                // Say where it went, and update the row's LED
+                                // now rather than a second later.
+                                let destination = listId;
+                                if (!isFull) {
+                                    destination = data.category === "stale_vpn"
+                                        ? "truly_down" : (data.category || listId);
+                                } else if (movesTicket) {
+                                    destination = data.move_to
+                                        || (data.category === "false_positives" ? "false_positives" : listId);
+                                }
+                                consoleLines.push(
+                                    destination !== listId && listState[destination]
+                                        ? entry.unit + " ticket moved from "
+                                            + (listHeadingLabels[listId] || listId) + " to "
+                                            + (listHeadingLabels[destination] || destination)
+                                        : entry.unit + " ticket stays in " + (listHeadingLabels[listId] || listId)
+                                );
+                                ticket.entry.ledStatus = entry.ledStatus || ticket.entry.ledStatus;
+                                propagateLedFromEntry(ticket.entry);
                             }
                             renderConsole(true);
                             statusEl.textContent = label + " complete for " + entry.unit;
