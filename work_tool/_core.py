@@ -1471,6 +1471,12 @@ FUZED_OPEN_CAMERA_TARGETS = frozenset({"camera1", "camera2", "camera3", "camera4
 _RD_MU_PARENT_CACHE = {}
 _RD_MU_PARENT_CACHE_TTL_SEC = 300
 def ping_camera(unit, target):
+    if str(target or "").startswith("fd:"):
+        # An FD camera read from the unit's router (work_tool/fd_cameras.py),
+        # not a net sheet slot. Deferred import: fd_cameras imports _core.
+        from .fd_cameras import fd_camera_for_target
+        camera = fd_camera_for_target(unit, target)
+        return _ping_host(camera["ip"]) if camera else None
     endpoint = CAMERA_ENDPOINTS.get(target)
     if not endpoint:
         return None
@@ -8641,6 +8647,24 @@ def validate_issues_report(issue_path=None, errors=None):
             # never gets a synthetic Camera 4 row it can't possibly have.
             allowed = open_camera_targets_for_unit(unit)
             camera_targets = [t for t in camera_targets if t in allowed]
+        # FD sites: use the cameras the router actually has, by name, when
+        # the ticket is about one (Andrew's request, 2026-10-08). None keeps
+        # the net-sheet targets above — not FD, router unreachable, or no match.
+        camera_labels = {}
+        if is_fd_unit(unit):
+            from .fd_cameras import fd_cameras_for_ticket, fd_camera_label, fd_camera_target
+            meta = unit_meta_map.get(result_key, {})
+            fd_cams = fd_cameras_for_ticket(
+                unit, meta.get("subject") or "", camera_targets,
+                generic=bool(meta.get("camera_targets_generic")),
+            )
+            if fd_cams:
+                from .fd_cameras import fd_router_cameras
+                site_cameras, _site_error = fd_router_cameras(unit)
+                camera_targets = [fd_camera_target(c) for c in fd_cams]
+                camera_labels = {
+                    fd_camera_target(c): fd_camera_label(c, site_cameras) for c in fd_cams
+                }
         if camera_targets:
             for target in camera_targets:
                 camera_key = f"{result_key}::{target}"
@@ -8648,7 +8672,7 @@ def validate_issues_report(issue_path=None, errors=None):
                 camera_meta.update({
                     "is_camera": True,
                     "camera_target": target,
-                    "camera_label": CAMERA_ENDPOINTS[target][1],
+                    "camera_label": camera_labels.get(target) or CAMERA_ENDPOINTS[target][1],
                     "camera_up": None,
                 })
                 unit_meta_map[camera_key] = camera_meta
@@ -8826,6 +8850,14 @@ def bounce_speaker(unit):
 def ping_camera_status(unit, target):
     """Ping one camera endpoint and return its current status plus raw output."""
     ensure_net_array()
+    if str(target or "").startswith("fd:"):
+        code, output = _safe_ping_result(ping_camera(unit, target))
+        if code is None and not output:
+            return None, "", (
+                f"{target[3:]} is no longer in {unit}'s router camera list "
+                "(router unreachable, or the camera was renamed)."
+            )
+        return _ping_reachable(output), output, None
     endpoint = CAMERA_ENDPOINTS.get(target)
     if not endpoint:
         return None, "", f"Unknown camera target: {target}"

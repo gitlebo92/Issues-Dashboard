@@ -17,6 +17,7 @@ work on the code without breaking a live NOC tool.
 | `work_tool/security_update.py` | The guided Scrypted GPU-passthrough fix and platform service restarts. |
 | `work_tool/recovery_email.py` | Turns the Recovery Email Check's five lists into one email status per unit, for the Graphs modal's email pill. |
 | `work_tool/project_progress.py` | The Project Progress check: classifies each NOC project as NOC done (>= 83.3%, green), stalled (>10% and <82%, unchanged in ERP for over 2 days) or not started (<= 10%, same), and converts ERP's America/Boise timestamps by hand (no tzdata on the service). |
+| `work_tool/fd_cameras.py` | FD camera discovery from the unit's MikroTik router (SSH port 10000, read-only DHCP lease listing; cameras found by lease comment, cached 1 h / failures 5 min). Router cameras are `fd:<name>` camera targets that `ping_camera` resolves; FD camera-outage tickets use them when the subject names a site camera, is generic, or names a number unique on the site. |
 | `flask_endpoints.py` | Every HTTP route. There is no `app.py`. Routes stay thin and delegate into `work_tool`. |
 | `templates/issues_results.html` | The dashboard's markup, plus a small inline `<script>` that injects Jinja values (`jobId`, `erpWritesDisabled`, ...). |
 | `static/issues_results.js` | All dashboard JavaScript (~17k lines). This is where buttons and command menus live. |

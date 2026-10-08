@@ -9717,6 +9717,23 @@
             fishBtn.type = "button";
             fishBtn.className = "action-btn";
             fishBtn.textContent = "Fisheye Snapshot";
+            // FD sites: every camera the router's DHCP leases know about,
+            // by name and IP, each pinged (work_tool/fd_cameras.py). The net
+            // sheet has no camera IPs for most FD units and only five slots.
+            if (/^FD/i.test(entry.unit)) {
+                appendDiagnosticButton(camerasMenu, entry, {
+                    label: "Router Camera List",
+                    title: "Read every camera's name and IP from this FD unit's router, and ping each (read-only; cached 1 hour)",
+                    endpoint: "/issues/fd-cameras/",
+                    busyLabel: "Reading router...",
+                    detailLines: function (data) {
+                        return (data.cameras || []).map(function (camera) {
+                            return (camera.up ? "✓ up    " : "× down  ")
+                                + camera.ip.padEnd(15) + camera.name;
+                        });
+                    },
+                });
+            }
             if (!entry.fisheyeIp) {
                 fishBtn.disabled = true;
                 fishBtn.title = "No fisheye IP in net sheet";

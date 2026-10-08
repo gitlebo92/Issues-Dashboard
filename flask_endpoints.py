@@ -1580,6 +1580,24 @@ def issues_open_camera_urls():
         return _error(error)
     return jsonify(result)
 
+@app.route("/issues/fd-cameras/<unit>", methods=["POST"])
+def issues_fd_cameras(unit):
+    # Read-only: the FD router's DHCP leases plus a ping of each camera
+    # (see work_tool/fd_cameras.py). Cached an hour; {"refresh": true} rereads.
+    payload = request.get_json(silent=True) or {}
+    cameras, error = work_tool.fd_router_cameras_with_ping(unit, refresh=bool(payload.get("refresh")))
+    if error:
+        return _error(error)
+    down = [c for c in cameras if not c["up"]]
+    return jsonify({
+        "ok": True,
+        "unit": unit,
+        "cameras": cameras,
+        "status": "warn" if down else "ok",
+        "summary": f"{unit}: {len(cameras)} camera(s) on the router, "
+                   + (f"{len(down)} not answering" if down else "all answering"),
+    })
+
 @app.route("/issues/camera-snapshot/<unit>/<target>", methods=["GET"])
 def issues_camera_snapshot(unit, target):
     image, error = work_tool.camera_snapshot(unit, target)
