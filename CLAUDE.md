@@ -49,6 +49,14 @@ work on the code without breaking a live NOC tool.
   download, only pings units and reads the spreadsheet (it never sends an
   email), and feeds the Graphs modal's email pill and the row's ✉ glyph — see
   `_run_recovery_email_status_check` and `work_tool/recovery_email.py`.
+  The Up Steady re-check is another (Andrew's request, 2026-10-08):
+  nothing else re-pings a ticket already on the board, so a unit that
+  dropped after startup sat green in Up Steady. Every 30 minutes
+  (`UP_STEADY_REVALIDATE_SECONDS`) `_revalidate_up_steady_loop` runs the
+  same logic as the list's Revalidate button, and after each email check
+  `_revalidate_up_steady_from_email_check` re-checks right away any Up
+  Steady unit that check found down. Both go through
+  `_revalidate_shared_list`, so list placement has one rule.
   None of them start in sandbox at all though — their
   whole scheduler is skipped there (`WORK_TOOL_ENV != "sandbox"` at the
   `_start_arizona_validation_scheduler()` call sites), so this doesn't add

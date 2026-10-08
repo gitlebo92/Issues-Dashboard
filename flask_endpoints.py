@@ -3690,19 +3690,50 @@ def issues_validate_unit_full(unit):
 
 @app.route("/issues/revalidate-list/<list_id>", methods=["POST"])
 def issues_revalidate_list(list_id):
-    if list_id not in ISSUE_RESULT_KEYS or list_id in (
-        "discarded_tickets",
-        "monitoring_hours",
-        "termination",
-        "relocation",
-        "footage_request",
-    ):
+    if list_id not in ISSUE_RESULT_KEYS or list_id in NON_REVALIDATABLE_LISTS:
         return _error("This list cannot be revalidated")
+    result, status = _revalidate_shared_list(list_id)
+    if status == 409:
+        return _error(result["error"], 409)
+    if not result.get("ok"):
+        return jsonify(result), status or 500
+    return jsonify(result)
+
+# Lists whose tickets aren't about a unit's connectivity — never re-pinged.
+NON_REVALIDATABLE_LISTS = (
+    "discarded_tickets",
+    "monitoring_hours",
+    "termination",
+    "relocation",
+    "footage_request",
+)
+UP_STEADY_REVALIDATE_SECONDS = _env_int("UP_STEADY_REVALIDATE_SECONDS", 30 * 60)
+
+def _revalidate_shared_list(list_id, only_units=None, scheduled=False, reason=""):
+    """
+    Re-run each ticket's list-specific check (revalidate_list_entry) and
+    move it to wherever that check says it now belongs. Shared by the
+    "Revalidate" list button, the 30-minute Up Steady re-check and the
+    recovery-email trigger (see _revalidate_up_steady_from_email_check).
+
+    only_units limits it to tickets for those units. scheduled=True is for
+    background callers: it skips (rather than queues) when another refresh
+    holds the lock, leaves the net sheet as loaded (generate_net_array
+    empties net_array while other threads may be reading it), and writes a
+    short summary to the shared console instead of every ping.
+
+    Returns (result_dict, http_status): status None on success, 409 when
+    the report isn't ready or another refresh is running.
+    """
     job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
     if job is None or not job.get("done") or job.get("results") is None:
-        return _error("Shared report is not ready", 409)
+        return {"ok": False, "error": "Shared report is not ready"}, 409
     if not job["poll_lock"].acquire(blocking=False):
-        return _error("Another refresh is already running", 409)
+        return {"ok": False, "error": "Another refresh is already running"}, 409
+    wanted = (
+        {str(u or "").strip().upper() for u in only_units}
+        if only_units is not None else None
+    )
 
     captured_stdout = io.StringIO()
     moves = []
@@ -3712,7 +3743,10 @@ def issues_revalidate_list(list_id):
         with issues_validation_lock:
             _push_stdout_capture(captured_stdout)
             try:
-                work_tool.generate_net_array()
+                if scheduled:
+                    work_tool.ensure_net_array()
+                else:
+                    work_tool.generate_net_array()
                 with job["state_lock"]:
                     snapshot = [
                         {
@@ -3721,6 +3755,8 @@ def issues_revalidate_list(list_id):
                             "camera_target": item.get("camera_target") or "",
                         }
                         for item in (job["results"].get(list_id) or [])
+                        if wanted is None
+                        or str(item.get("unit") or "").strip().upper() in wanted
                     ]
                 print(
                     f"Revalidating {len(snapshot)} ticket"
@@ -3750,13 +3786,7 @@ def issues_revalidate_list(list_id):
                         print(f"{item_copy.get('unit')}: {error}")
                         continue
                     destination = category or list_id
-                    if destination not in ISSUE_RESULT_KEYS or destination in (
-                        "discarded_tickets",
-                        "monitoring_hours",
-                        "termination",
-                        "relocation",
-                        "footage_request",
-                    ):
+                    if destination not in ISSUE_RESULT_KEYS or destination in NON_REVALIDATABLE_LISTS:
                         destination = list_id
                     with job["state_lock"]:
                         live = _find_result_item(
@@ -3798,31 +3828,104 @@ def issues_revalidate_list(list_id):
             finally:
                 _pop_stdout_capture()
         captured_output = captured_stdout.getvalue()
-        if captured_output:
+        if scheduled:
+            when = _arizona_now().strftime("%H:%M")
+            summary = [
+                f"[{when}] {reason or 'Scheduled re-check'}: {checked} "
+                f"{list_id.replace('_', ' ')} ticket(s) checked, {moved} moved"
+            ]
+            summary += [
+                f"  {m['unit']} moved to {m['to'].replace('_', ' ')}"
+                for m in moves if m["to"] != list_id
+            ]
+            JobStdout(SHARED_ISSUES_JOB_ID, None).write("\n".join(summary) + "\n")
+        elif captured_output:
             JobStdout(SHARED_ISSUES_JOB_ID, None).write(
                 captured_output + ("" if captured_output.endswith("\n") else "\n")
             )
-        return jsonify({
+        return {
             "ok": True,
             "list_id": list_id,
             "checked": checked,
             "moved": moved,
             "moves": moves,
             "logs": captured_output.splitlines(),
-        })
+        }, None
     except Exception as exc:
         captured_output = captured_stdout.getvalue()
-        if captured_output:
+        if captured_output and not scheduled:
             JobStdout(SHARED_ISSUES_JOB_ID, None).write(
                 captured_output + ("" if captured_output.endswith("\n") else "\n")
             )
-        return jsonify({
+        return {
             "ok": False,
             "error": str(exc),
             "logs": captured_output.splitlines(),
-        }), 500
+        }, 500
     finally:
         job["poll_lock"].release()
+
+
+def _revalidate_up_steady_loop():
+    """
+    Re-check every Up Steady ticket every UP_STEADY_REVALIDATE_SECONDS so a
+    unit that drops after startup leaves Up Steady (and its green LED) on
+    its own — caught live 2026-10-08: RD3073 sat green in Up Steady while
+    the hourly recovery-email check already knew it was down. Read-only
+    pings, same as the fleet polls, so deliberately NOT gated on
+    automated_tasks_paused(). The first pass waits one full interval: the
+    startup validation has only just checked these tickets.
+    """
+    _shared_console_print(
+        f"Up Steady re-check: every {UP_STEADY_REVALIDATE_SECONDS // 60} minutes"
+    )
+    while True:
+        time.sleep(UP_STEADY_REVALIDATE_SECONDS)
+        try:
+            result, status = _revalidate_shared_list(
+                "false_positives", scheduled=True, reason="Up Steady re-check"
+            )
+            if status == 409:
+                _shared_console_print(f"Up Steady re-check skipped — {result['error']}")
+        except Exception as exc:
+            _shared_console_print(f"Up Steady re-check failed: {exc}")
+
+
+# Recovery-email statuses that mean the check found the unit NOT back up.
+RECOVERY_EMAIL_DOWN_STATUSES = ("needs_initial_email", "pending_recovery")
+
+def _revalidate_up_steady_from_email_check(by_unit):
+    """
+    The hourly recovery-email check pings every unit on the ART report. When
+    it finds one down that is sitting in Up Steady, re-check just those
+    tickets right away instead of waiting for the next 30-minute pass. The
+    email check is only the trigger: revalidate_list_entry still decides
+    where each ticket goes, so there is one rule for list placement.
+    """
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if not by_unit or job is None or job.get("results") is None:
+        return
+    down = {
+        unit for unit, info in by_unit.items()
+        if info.get("status") in RECOVERY_EMAIL_DOWN_STATUSES
+    }
+    with job["state_lock"]:
+        in_up_steady = {
+            str(item.get("unit") or "").strip().upper()
+            for item in (job["results"].get("false_positives") or [])
+        }
+    targets = sorted(down & in_up_steady)
+    if not targets:
+        return
+    result, status = _revalidate_shared_list(
+        "false_positives", only_units=targets, scheduled=True,
+        reason="Recovery email check found " + ", ".join(targets) + " down — re-checking",
+    )
+    if status == 409:
+        _shared_console_print(
+            f"Up Steady re-check for {', '.join(targets)} skipped — {result['error']} "
+            "(the 30-minute re-check will catch them)"
+        )
 
 @app.route("/issues/validate-stale-vpn/<unit>", methods=["POST"])
 def issues_validate_stale_vpn(unit):
@@ -4292,6 +4395,13 @@ def _start_arizona_validation_scheduler():
             name="erp-ticket-project-poll",
         )
         erp_poll_thread.start()
+        # Read-only pings, so always on like the fleet polls — see
+        # _revalidate_up_steady_loop.
+        threading.Thread(
+            target=_revalidate_up_steady_loop,
+            daemon=True,
+            name="up-steady-revalidate",
+        ).start()
         # Also always-on regardless of PAUSE_AUTOMATED_TASKS — see
         # _run_scheduled_erp_ticket_project_pull's own comment.
         print(
@@ -4415,6 +4525,10 @@ def _run_recovery_email_status_check(download_if_missing=True):
             f"{counts.get('needs_recovery_email', 0)} need a recovery email "
             f"({len(by_unit)} unit(s) on the report)"
         )
+        try:
+            _revalidate_up_steady_from_email_check(by_unit)
+        except Exception as exc:
+            print(f"[{when}] Up Steady re-check after the email check failed: {exc}")
     return True
 
 
