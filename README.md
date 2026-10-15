@@ -64,10 +64,12 @@ Open **http://127.0.0.1:5000/** — the Issues Dashboard is the home page (navba
 - **Right — Lists:** Tickets grouped by category. Filter search, **All lists / One list**, **Pull Issues**, **Clear checkboxes**.
 - **Header counters:** Resolved today / Worked / Skipped (local workflow tracking).
 - **Per-row LEDs:** Green / yellow / orange / red compute (and speaker/camera LEDs where relevant).
-- **Weather icons:** Between the LED and the ticket link. Metro weather from the subject region code (`LAX` / `OAK` / `HOU` / `PHX` / `SLC` / `DEN`) via Open-Meteo — **no ERP**. Fresh fetch on page load; auto-refresh every **30 minutes**. Distinct icons for clear / partly cloudy / mostly cloudy / rain / thunder / etc. **Click an icon** (or **Weather → Weather (Current)**) for precise site/trailer weather → stdout + icon update. Toolbar **Update Weather** force-refreshes all region icons.
+- **Email glyph (✉):** On the unit button, only when an email is actionable — red **✉!** outage email needed, yellow **✉** recovery email needed, orange **✉?** no emails and the unit is back up (possible false positive) — from the hourly Recovery Email Check. **Click** it to open the ERP ticket. The full status is the email pill in the Power vs Cell modal.
+- **Weather:** No longer on the rows. The Power vs Cell modal's verdict line shows the unit's current weather (Open-Meteo at the site's or trailer's GPS — **no ERP**); **Weather → Weather (Current)** in any command menu prints the same to stdout.
+- **Project progress (Projects panel):** Each project naming a unit shows its ERP % — green **✓** when NOC's part is done (≥ 83.3%); orange when it needs attention after more than 2 days unchanged in ERP — **⏳ stalled** (> 10% and < 82%) or **○ not started** (≤ 10%). The stats strip counts the projects that need attention.
 - **R / W / S:** Resolved / Worked / Skipped checkboxes (local UI state only; Resolve does not post to ERP).
 - **All lists / One list:** **All lists** shows everything. **One list** reveals the category dropdown, which now takes **several lists at once** — tick Offline compute and Down Full and see both — with each list's ticket count beside it. The button reads the list name when one is ticked, "3 lists selected" for several. **Select all** / **Clear** sit at the bottom of the menu, empty lists are dimmed, and completed lists show their count in green. Switching to **Projects** swaps the menu for the project lists, and each panel keeps its own selection.
-- **Quick actions:** A short row of buttons on every ticket — **Validate**, **Uptime** (switch/Robofiber), **VRM**, **Mesh**, **Snap** — promoted out of the nested command menus. Edit the `QUICK_ACTIONS` array in `static/issues_results.js` to change which appear, reorder them, or set it to `[]` to remove the row.
+- **Quick actions:** A short row of buttons on every ticket — **Validate**, **Switch Uptime** (switch/Robofiber), **VRM**, **Mesh**, **Snap** — promoted out of the nested command menus. Edit the `QUICK_ACTIONS` array in `static/issues_results.js` to change which appear, reorder them, or set it to `[]` to remove the row.
 - **Busy flag:** An amber pill appears on a ticket when that unit is locked by another action (Security Update Fix, a reboot, Restart All Services), refreshed every 20 seconds from `/issues/busy-units`. Shows the action and its phase so two people don't collide on one unit.
 - **Toasts:** Failures appear as non-blocking toasts in the bottom-right instead of `alert()` dialogs. Every toast fades on its own (errors a little later than the rest, and not while your mouse is over one) unless the code asks for it to stay. Every message is still written to stdout and the status line.
 
@@ -139,10 +141,10 @@ LED colors (compute). Each light also carries a glyph — ✓ up, ! warning, × 
 
 Top-level **Weather** submenu on the unit command menu:
 
-- **Weather (Current)** — site address GPS (ERP Site), else trailer (MU) coordinates → Open-Meteo → stdout + icon update. Same as clicking the weather icon.
+- **Weather (Current)** — site address GPS (ERP Site), else trailer (MU) coordinates → Open-Meteo → stdout.
 - **Weather (History)** — opens timeanddate historic weather for the subject region city (`PHX`→phoenix, `DEN`→denver, `LAX`→los-angeles, `OAK`→oakland, `HOU`→houston, `SLC`→salt-lake-city).
 
-Region list icons stay metro-level and ERP-free; **Weather (Current)** / icon click is the precise site/trailer path.
+The Power vs Cell modal's verdict line shows the same site/trailer weather when it opens.
 
 ### Router
 
@@ -228,7 +230,7 @@ Under 900px wide the rail moves above the graphs.
 
 The pill is hidden when the unit isn't on the ART report. If the check hasn't run yet, or failed with no earlier result, the pill says so. Hover for the ticket, the check time and any error. **Click** to re-run the check now; it pings every unit on the report, so it takes a few minutes, and the pill updates when it finishes. When a unit is on more than one ticket, the most urgent status is shown.
 
-![Battery Graphs](docs/screenshots/18-battery-graphs.png)
+![Power vs Cell graphs modal](docs/screenshots/18-battery-graphs.png)
 
 ### Reports menu
 

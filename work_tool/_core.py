@@ -389,6 +389,12 @@ def _site_id_fallback_for_ticket(unit, subject_text, first_error):
          ticket was written.
       2. A Site-name search on the ticket title, the same cascade projects
          use (find_erp_site_by_project_subject).
+      3. The same search on the title of any open NOC/Prep project naming
+         this unit (Andrew's request, 2026-10-14): RD3557's
+         "SC-RD3557-RainDance-..." ticket has no Site anywhere and nothing
+         searchable in its title, but Open Site already worked from the
+         unit's project row. Uses the titles from the dashboard's last
+         project pull, so it costs no extra ERP project query.
 
     Read-only. A hit is cached under the ticket's own key, so the next open
     is instant. If both miss, the original error comes back with what else
@@ -406,6 +412,16 @@ def _site_id_fallback_for_ticket(unit, subject_text, first_error):
         _store_site_id_cache(unit, subject_text, site_id)
         return site_id, None
     tried.append(f"Site name search on the ticket title: {error or 'no Site id'}")
+    project_subjects = _recent_project_subjects_for_unit(unit)
+    for project_subject in project_subjects:
+        site, error = find_erp_site_by_project_subject(project_subject)
+        site_id = str((site or {}).get("site_id") or "").strip() if not error else ""
+        if site_id:
+            _store_site_id_cache(unit, subject_text, site_id)
+            return site_id, None
+        tried.append(f'Site name search on project "{project_subject}": {error or "no Site id"}')
+    if not project_subjects:
+        tried.append(f"no open NOC/Prep project names {unit}")
     return "", f"{first_error}. Also tried — " + "; ".join(tried)
 toolkit = zabbix_tool.Zabbix_Tool_Kit()
 username = os.getenv("username")
@@ -721,6 +737,80 @@ def get_nuc_ip(unit):
         nuc_ip = work_tool.get_nuc_ip("RD3371")
     """
     return _nuc_ip(unit)
+def get_scrypted_ip(unit):
+    """
+    The unit's Scrypted IP (net sheet column 12, backfilled from v19/ERP
+    when blank), without any :port. Empty string if there is none. On a
+    Windows NUC unit this is often the same host as the NUC.
+
+        scrypted_ip = work_tool.get_scrypted_ip("RD3371")
+    """
+    return _scrypted_ip(unit)
+def get_fisheye_ip(unit):
+    """
+    The unit's fisheye camera IP (net sheet column 5, backfilled from
+    v19/ERP when blank), without any :port. Empty string if there is none
+    (e.g. a Fuzed MU with no RD/FD head).
+
+        fisheye_ip = work_tool.get_fisheye_ip("RD3371")
+    """
+    return _net_column_ip(unit, 5)
+def _net_column_ip(unit, index):
+    """Net sheet column `index` for a unit (backfilled first), host only, or ""."""
+    row = ensure_unit_net_info(unit, needed_indexes=(index,))
+    if not row or len(row) <= index:
+        return ""
+    return _host_only(row[index])
+def get_switch_ip(unit):
+    """
+    The unit's switch IP (net sheet column 2, backfilled from v19/ERP when
+    blank), without any :port. Empty string if there is none.
+
+        switch_ip = work_tool.get_switch_ip("RD3371")
+    """
+    return _net_column_ip(unit, 2)
+def get_speaker_ip(unit):
+    """
+    The unit's speaker IP (net sheet column 4, backfilled from v19/ERP when
+    blank), without any :port. Empty string if there is none.
+
+        speaker_ip = work_tool.get_speaker_ip("RD3371")
+    """
+    return _net_column_ip(unit, 4)
+def get_camera_ip(unit, number):
+    """
+    The unit's Camera 1-4 IP (net sheet columns 6-9, backfilled from v19/ERP
+    when blank), without any :port. Empty string if there is none — ACRD
+    units never have a Camera 4. Raises ValueError for a number outside 1-4.
+    FD units' real camera list comes from their router (fd_cameras), so on
+    an FD unit this is only what the net sheet says.
+
+        camera2_ip = work_tool.get_camera_ip("RD3371", 2)
+    """
+    try:
+        index = int(number)
+    except (TypeError, ValueError):
+        index = 0
+    if index not in (1, 2, 3, 4):
+        raise ValueError(f"Camera number must be 1-4, got {number!r}")
+    return _net_column_ip(unit, 5 + index)
+def get_relay_ip(unit):
+    """
+    The unit's relay IP (net sheet column 10, backfilled from v19/ERP when
+    blank), without any :port. Empty string if there is none.
+
+        relay_ip = work_tool.get_relay_ip("RD3371")
+    """
+    return _net_column_ip(unit, 10)
+def get_pve_ip(unit):
+    """
+    The unit's PVE host IP (net sheet column 11, backfilled from v19/ERP
+    when blank), without any :port. Empty string if there is none — only
+    units >= 3300 run PVE (uses_pve); a Windows NUC unit leaves it blank.
+
+        pve_ip = work_tool.get_pve_ip("RD3371")
+    """
+    return _net_column_ip(unit, 11)
 def ping_router_status(unit, mode="quick"):
     """
     Ping the unit router.
@@ -1510,10 +1600,16 @@ def uses_pve(unit):
         return False
 def is_fd_unit(unit):
     return str(unit or "").strip().upper().startswith("FD")
-def is_hikvision_unit(unit, cameras=None):
+def is_hikvision_unit(unit, cameras=None, probe=True):
     """
     MU sites (no RD prefix) with C1–C4 and no fisheye are Hikvision in the netsheet.
     Example: MU1001.
+
+    That rule is only a guess, though: MU1041 is Fuzed but its cameras are
+    Dahua (caught live, 2026-10-14 — the 360 Snapshot 404'd asking them for
+    Hikvision's ISAPI picture). So when the rule says Hikvision, the first
+    camera's login page settles it (_probe_camera_vendor, no credentials
+    sent). probe=False returns the bare rule.
 
     Optional cameras list avoids a second list_unit_cameras() on the proxy hot path.
     """
@@ -1529,6 +1625,12 @@ def is_hikvision_unit(unit, cameras=None):
         return True
     if any(item.get("target") == "fisheye" for item in cameras):
         return False
+    if probe:
+        first = next((item for item in cameras if item.get("host")), None)
+        if first:
+            vendor = _probe_camera_vendor(first["host"], first.get("port"))
+            if vendor:
+                return vendor == "hikvision"
     return True
 def unit_number(unit):
     try:
@@ -3540,7 +3642,56 @@ def _camera_vendor(unit_key, camera, cameras=None):
     vendor = str((camera or {}).get("vendor") or "").strip().lower()
     if vendor:
         return vendor
-    return "hikvision" if is_hikvision_unit(unit_key, cameras) else "dahua"
+    if not is_hikvision_unit(unit_key, cameras, probe=False):
+        return "dahua"
+    # The unit rule says Hikvision; ask this camera, since the rule is
+    # sometimes wrong (see is_hikvision_unit).
+    probed = _probe_camera_vendor((camera or {}).get("host"), (camera or {}).get("port"))
+    return probed or "hikvision"
+def camera_vendor_from_login_page(text, location=""):
+    """
+    "hikvision", "dahua" or None from a camera's unauthenticated root page.
+    Hikvision redirects to doc/page/login.asp (MU1034); Dahua serves its web
+    app from jsBase/ and jsCore/ (MU1041). Both verified live, 2026-10-14.
+    """
+    page = f"{location or ''}\n{text or ''}"
+    if "doc/page/login.asp" in page:
+        return "hikvision"
+    if "jsBase/" in page or "jsCore/" in page:
+        return "dahua"
+    return None
+_camera_vendor_probe_cache = {}
+_camera_vendor_probe_lock = threading.Lock()
+_CAMERA_VENDOR_PROBE_TTL_SEC = 6 * 3600
+_CAMERA_VENDOR_PROBE_MISS_TTL_SEC = 300
+def _probe_camera_vendor(host, port, timeout=4):
+    """
+    Read a camera's root page with NO credentials and name its vendor, or
+    None if it didn't answer or the page wasn't recognised. Never a login,
+    so it can't count toward a lockout. Cached per host:port (misses only
+    briefly, so a camera that was down gets asked again soon).
+    """
+    if not host:
+        return None
+    key = f"{host}:{port or 80}"
+    now = time.time()
+    with _camera_vendor_probe_lock:
+        cached = _camera_vendor_probe_cache.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+    vendor = None
+    try:
+        response = requests.get(f"http://{key}/", timeout=timeout, allow_redirects=False)
+        vendor = camera_vendor_from_login_page(
+            response.content[:65536].decode("utf-8", errors="replace"),
+            response.headers.get("Location") or "",
+        )
+    except requests.RequestException:
+        vendor = None
+    ttl = _CAMERA_VENDOR_PROBE_TTL_SEC if vendor else _CAMERA_VENDOR_PROBE_MISS_TTL_SEC
+    with _camera_vendor_probe_lock:
+        _camera_vendor_probe_cache[key] = (vendor, now + ttl)
+    return vendor
 def _unsupported_camera_vendor_message(vendor, what):
     return (
         f"{what} isn't supported for {vendor.title()} cameras yet — "
@@ -5598,6 +5749,32 @@ def _fetch_erp_project_pages(statuses=None, page_size=200, order_by="creation as
             break
         start += page_size
     return raw_projects, requested_statuses
+# Unit -> project titles from the last NOC/Prep project pulls, per source,
+# so a ticket's Site lookup can fall back on the title of a project that
+# names the same unit (_site_id_fallback_for_ticket). Each source's dict is
+# replaced in place on every pull, so closed projects drop out.
+_RECENT_PROJECT_SUBJECTS = {"noc": {}, "prep": {}}
+_RECENT_PROJECT_SUBJECTS_LOCK = threading.Lock()
+def _remember_project_subjects(source, projects):
+    by_unit = {}
+    for project in projects or []:
+        subject = str((project or {}).get("subject") or "").strip()
+        unit = _normalize_netsheet_unit(_match_unit_from_subject(subject) or "")
+        if unit and subject:
+            by_unit.setdefault(unit, []).append(subject)
+    with _RECENT_PROJECT_SUBJECTS_LOCK:
+        _RECENT_PROJECT_SUBJECTS[source].clear()
+        _RECENT_PROJECT_SUBJECTS[source].update(by_unit)
+def _recent_project_subjects_for_unit(unit):
+    """Titles of the last-pulled NOC/Prep projects naming this unit, newest first."""
+    key = _normalize_netsheet_unit(unit) or str(unit or "").strip().upper()
+    if not key:
+        return []
+    with _RECENT_PROJECT_SUBJECTS_LOCK:
+        subjects = []
+        for source in ("noc", "prep"):
+            subjects.extend(_RECENT_PROJECT_SUBJECTS[source].get(key) or [])
+    return list(dict.fromkeys(subjects))
 def fetch_erp_projects(statuses=None, page_size=200):
     """Fetch Open/In Progress ERP Projects whose subject contains NOC."""
     raw_projects, requested_statuses = _fetch_erp_project_pages(
@@ -5619,6 +5796,7 @@ def fetch_erp_projects(statuses=None, page_size=200):
         ):
             normalized.append(project)
             seen_ids.add(project["project_id"])
+    _remember_project_subjects("noc", normalized)
     return normalized
 def fetch_erp_prep_projects(statuses=None, page_size=200):
     """Fetch Open/In Progress ERP Projects whose name/subject contains Prep."""
@@ -5641,6 +5819,7 @@ def fetch_erp_prep_projects(statuses=None, page_size=200):
         ):
             normalized.append(project)
             seen_ids.add(project["project_id"])
+    _remember_project_subjects("prep", normalized)
     return normalized
 def build_prep_project_entries(project_records):
     """Build Prep list rows without connectivity validation."""
@@ -9663,6 +9842,32 @@ def _art_report_rows(session, report_id):
     if not rows:
         return None, "ART htmlDataTable returned no table rows"
     return rows, None
+# Substrings that mark an ART contact address as a dummy, not a real inbox.
+PLACEHOLDER_EMAIL_MARKERS = ("placeholder", "fakeemail")
+
+def _is_placeholder_email(email):
+    """
+    ART fills contacts it has no real address for with dummy ones like
+    "jdoe@placeholderemail.com" or "x@fakeemail.com"; pasting those into an
+    outage email just bounces. True for any address containing a
+    PLACEHOLDER_EMAIL_MARKERS substring (case-insensitive).
+    """
+    text = str(email or "").strip().lower()
+    return "@" in text and any(marker in text for marker in PLACEHOLDER_EMAIL_MARKERS)
+def _strip_placeholder_emails(cell):
+    """
+    Drop dummy addresses from one ART cell, which may hold a comma-separated
+    list ("a@real.com, b@placeholderemail.com" -> "a@real.com"). Cells with
+    no "@" (names, phones, site ids) come back untouched.
+    """
+    text = str(cell or "")
+    if "@" not in text:
+        return cell
+    kept = [
+        piece.strip() for piece in text.split(",")
+        if piece.strip() and not _is_placeholder_email(piece)
+    ]
+    return ", ".join(kept)
 def get_art_site_contacts(unit, subject=""):
     """
     ART report 152 (NOC Outage Site Contacts) is every contact in the
@@ -9759,7 +9964,10 @@ def get_art_site_contacts(unit, subject=""):
             continue
         if not row_matches(str(row[match_col] or "")):
             continue
-        contacts.append({header[i]: (row[i] if i < len(row) else "") for i in range(len(header))})
+        contacts.append({
+            header[i]: _strip_placeholder_emails(row[i] if i < len(row) else "")
+            for i in range(len(header))
+        })
 
     # Split into To/CC email lists so the UI can offer one copy button per
     # role instead of one combined blob — verified live, 2026-09-24
@@ -9781,6 +9989,8 @@ def get_art_site_contacts(unit, subject=""):
         for contact in contacts:
             for piece in str(contact.get(column) or "").split(","):
                 email = piece.strip()
+                if _is_placeholder_email(email):
+                    continue
                 if email and email.lower() not in seen:
                     seen.add(email.lower())
                     emails.append(email)
@@ -9795,6 +10005,26 @@ def get_art_site_contacts(unit, subject=""):
         "to_emails": _email_list(to_col),
         "cc_emails": _email_list(cc_col),
     }, None
+def get_art_contacts(unit, subject=""):
+    """
+    (to_emails, cc_emails) for a unit's site, from ART report 152 — the
+    same lookup as "Get site contacts" (get_art_site_contacts), reduced to
+    the two address lists an outage/recovery email needs. Both are deduped
+    lists of strings with placeholder/fakeemail addresses already removed;
+    either can be empty when ART has nobody in that role.
+
+    subject is optional: pass the ticket subject when you have it, so a
+    unit whose trailer has no Site in ERP still resolves (same fallback
+    "Open Site" uses).
+
+    Raises RuntimeError with a readable message when the site can't be
+    resolved or ART can't be read — an email sender should stop there
+    rather than mistake "lookup failed" for "no contacts".
+    """
+    info, error = get_art_site_contacts(unit, subject)
+    if error:
+        raise RuntimeError(f"Couldn't get ART contacts for {unit}: {error}")
+    return list(info.get("to_emails") or []), list(info.get("cc_emails") or [])
 def download_art_noc_outage_report(dest_path=None):
     """
     Login to ART and download report 153 (NOC outage / recovery email sheet).
@@ -10042,6 +10272,16 @@ def check_missing_recovery_emails(report_path=None, errors=None):
     potential_false_positive = _with_ticket_links(potential_false_positive, unit_issue_map, unit_meta_map)
     pending_recovery = _with_ticket_links(pending_recovery, unit_issue_map, unit_meta_map)
     email_status_up_to_date = _with_ticket_links(email_status_up_to_date, unit_issue_map, unit_meta_map)
+    # Which emails the report says went out, so a later validation can
+    # re-sort a unit without re-reading the report (see
+    # recovery_email.recovery_email_status_after_validation).
+    for linked in (
+        needs_recovery_email, needs_initial_email, potential_false_positive,
+        pending_recovery,
+    ):
+        for item in linked:
+            state = unit_email_state.get(item.get("unit"), {})
+            item["has_outage_email"] = bool(state.get("has_outage_email"))
 
     _print_linked_units(
         "Needs recovery email (outage email sent, unit back up):",

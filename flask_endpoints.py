@@ -1179,6 +1179,8 @@ def issues_state(job_id):
             else None
         )
     resolved = _resolved_stats()
+    with _recovery_email_status_lock:
+        email_status_rev = _recovery_email_status_cache["rev"]
     return jsonify({
         "ok": True,
         "events": events,
@@ -1188,6 +1190,7 @@ def issues_state(job_id):
         "validation_run_id": validation_run_id,
         "results": results,
         "resolved_today": resolved,
+        "email_status_rev": email_status_rev,
     })
 
 def _poll_shared_issue_queue(job_id, scope="issues", force=False, manual=False):
@@ -2550,7 +2553,7 @@ def _fleet_cached_route(cache, cache_lock, augment_fn=None):
 def _power_vs_cell_sweep_units():
     """
     Current Up Steady (false_positives) + Offline compute (nuc_down) +
-    Scrypted outage (scrypted_outage) + Down Full (truly_down) units from
+    Scrypted outage (scrypted_outage) units from
     the shared ERP-pull job, plus a {unit: issue_id} map — real ERP
     tickets too, so their issue_id rides along for
     fleet_power_vs_cell_outage_status to pass into
@@ -2565,8 +2568,12 @@ def _power_vs_cell_sweep_units():
     switch is a separate device from the router/compute, so whether IT
     also rebooted is exactly what tells a real power event apart from a
     router/compute-specific failure with the switch (and power) still up.
+    Down Full was dropped again on 2026-10-13 (Andrew's request): the
+    check needs the switch reachable, which it never is while the unit
+    is down. A Down Full ticket that revalidates into Up Steady gets the
+    check then instead (_recheck_power_vs_cell_for_units).
     Unlike the VRM fleet checks above, this diagnostic has no
-    VRM-installation-wide "everything" source of its own — these four
+    VRM-installation-wide "everything" source of its own — these three
     only exist as categories inside the live dashboard's own shared
     ticket-queue pull (see ISSUE_RESULT_KEYS) — so it rides on whatever
     that job's results currently hold.
@@ -2574,7 +2581,7 @@ def _power_vs_cell_sweep_units():
     Returns (None, None) when the job doesn't exist yet or is mid-run, so
     the caller can tell "genuinely zero qualifying tickets right now"
     apart from "nothing to check yet." Where more than one ticket names
-    the same unit (including across these four lists), whichever is seen
+    the same unit (including across these three lists), whichever is seen
     first wins the mapping — one is enough to give the window-matching
     something to work with.
     """
@@ -2583,7 +2590,7 @@ def _power_vs_cell_sweep_units():
         return None, None
     results = job.get("results") or {}
     unit_issue_ids = {}
-    for list_id in ("false_positives", "nuc_down", "scrypted_outage", "truly_down"):
+    for list_id in ("false_positives", "nuc_down", "scrypted_outage"):
         for entry in results.get(list_id) or []:
             unit = str((entry or {}).get("unit") or "").strip().upper()
             issue_id = str((entry or {}).get("issue_id") or "").strip()
@@ -2604,6 +2611,47 @@ def _power_vs_cell_check_fn():
     if not units:
         return [], None
     return work_tool.fleet_power_vs_cell_outage_status(units, unit_issue_ids=unit_issue_ids)
+
+
+def _recheck_power_vs_cell_for_units(units):
+    """
+    Run the cell/power check for just these units, in the background, and
+    merge the rows into the fleet power-vs-cell cache the row badges read.
+    Called when a revalidate moves a Down Full ticket to Up Steady (Andrew's
+    request, 2026-10-13): the check needs the switch reachable, so it's
+    useless while the unit is down and only worth running once it's back.
+    """
+    unit_keys = sorted({str(u or "").strip().upper() for u in units or [] if str(u or "").strip()})
+    if not unit_keys:
+        return
+    _units, unit_issue_ids = _power_vs_cell_sweep_units()
+    issue_ids = {u: (unit_issue_ids or {}).get(u) for u in unit_keys}
+
+    def run():
+        names = ", ".join(unit_keys)
+        try:
+            rows, error = work_tool.fleet_power_vs_cell_outage_status(
+                unit_keys, unit_issue_ids=issue_ids
+            )
+        except Exception as exc:
+            rows, error = None, str(exc)
+        if error:
+            _shared_console_print(f"Cell/power check for {names} failed: {error}")
+            return
+        fresh = {str(row.get("unit") or "").strip().upper(): row for row in rows or []}
+        with _power_vs_cell_cache_lock:
+            kept = [
+                row for row in (_power_vs_cell_cache.get("rows") or [])
+                if str(row.get("unit") or "").strip().upper() not in fresh
+            ]
+            _power_vs_cell_cache["rows"] = kept + list(fresh.values())
+        lines = [f"Cell/power check after moving to Up Steady ({names}):"]
+        for unit, row in sorted(fresh.items()):
+            result = row.get("error") or row.get("summary") or row.get("verdict") or "no verdict"
+            lines.append(f"  {unit}: {result}")
+        _shared_console_print("\n".join(lines))
+
+    threading.Thread(target=run, name="power-vs-cell-recheck", daemon=True).start()
 
 
 def _snapshot_task_public(task):
@@ -3266,6 +3314,23 @@ def issues_reboot_scrypted(unit):
 def issues_reboot_pve(unit):
     return _run_locked_quick_action(unit, "Reboot PVE", lambda: work_tool.reboot_pve(unit))
 
+def _plain_stream(lines):
+    return Response(
+        lines,
+        content_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+@app.route("/issues/camera-dst-fix-stream/<unit>", methods=["POST"])
+def issues_camera_dst_fix_stream(unit):
+    """Live output from the Camera DST Fix — see work_tool.stream_camera_dst_fix. Takes the unit lock itself."""
+    return _plain_stream(work_tool.stream_camera_dst_fix(unit))
+
+@app.route("/issues/camera-dst-fix-all-stream", methods=["POST"])
+def issues_camera_dst_fix_all_stream():
+    """Camera DST Fix on every Camera Outage Report unit, one at a time — see work_tool.stream_camera_dst_fix_all."""
+    return _plain_stream(work_tool.stream_camera_dst_fix_all())
+
 @app.route("/issues/security-update-fix/step1/<unit>", methods=["POST"])
 def issues_security_fix_step1(unit):
     started, token, existing = work_tool.unit_busy_start(unit, "Security Update Fix")
@@ -3670,6 +3735,7 @@ def issues_validate_unit(unit):
         unit, issue_id, source_list_id,
         to_list_id, {"led_status": led_status} if led_status else None,
     )
+    _apply_validation_to_recovery_email_status(unit, category)
     return jsonify({
         "ok": True,
         "unit": unit,
@@ -3704,6 +3770,7 @@ def issues_validate_unit_full(unit):
         unit, payload.get("issue_id"), payload.get("source_list_id"),
         to_list_id, extra_fields,
     )
+    _apply_validation_to_recovery_email_status(unit, result.get("category"))
     return jsonify({"ok": True, **result})
 
 @app.route("/issues/revalidate-list/<list_id>", methods=["POST"])
@@ -3726,6 +3793,11 @@ NON_REVALIDATABLE_LISTS = (
     "footage_request",
 )
 UP_STEADY_REVALIDATE_SECONDS = _env_int("UP_STEADY_REVALIDATE_SECONDS", 30 * 60)
+DOWN_FULL_REVALIDATE_SECONDS = _env_int("DOWN_FULL_REVALIDATE_SECONDS", 30 * 60)
+
+# Lists whose Revalidate is a router/compute ping, so the result can also
+# correct a unit's recovery email status.
+EMAIL_STATUS_REVALIDATE_LISTS = ("false_positives", "truly_down", "nuc_down", "scrypted_outage")
 
 def _revalidate_shared_list(list_id, only_units=None, scheduled=False, reason=""):
     """
@@ -3831,6 +3903,13 @@ def _revalidate_shared_list(list_id, only_units=None, scheduled=False, reason=""
                             )
                         else:
                             print(f"{live.get('unit')} unchanged")
+                    # Only the connectivity lists' re-checks are pings the
+                    # email status can trust; a camera/speaker list's
+                    # category is about that device, not the unit.
+                    if list_id in EMAIL_STATUS_REVALIDATE_LISTS:
+                        _apply_validation_to_recovery_email_status(
+                            key["unit"], destination
+                        )
                     moves.append({
                         "issue_id": key["issue_id"],
                         "unit": key["unit"],
@@ -3845,6 +3924,12 @@ def _revalidate_shared_list(list_id, only_units=None, scheduled=False, reason=""
                         job["version"] += 1
             finally:
                 _pop_stdout_capture()
+        # Back up from Down Full: now the switch answers, so the cell/power
+        # check can actually tell which kind of outage it was.
+        if list_id == "truly_down":
+            _recheck_power_vs_cell_for_units(
+                m["unit"] for m in moves if m["to"] == "false_positives"
+            )
         captured_output = captured_stdout.getvalue()
         if scheduled:
             when = _arizona_now().strftime("%H:%M")
@@ -3884,29 +3969,32 @@ def _revalidate_shared_list(list_id, only_units=None, scheduled=False, reason=""
         job["poll_lock"].release()
 
 
-def _revalidate_up_steady_loop():
+def _revalidate_list_loop(list_id, label, interval_seconds, first_delay_seconds=None):
     """
-    Re-check every Up Steady ticket every UP_STEADY_REVALIDATE_SECONDS so a
-    unit that drops after startup leaves Up Steady (and its green LED) on
-    its own — caught live 2026-10-08: RD3073 sat green in Up Steady while
-    the hourly recovery-email check already knew it was down. Read-only
-    pings, same as the fleet polls, so deliberately NOT gated on
-    automated_tasks_paused(). The first pass waits one full interval: the
-    startup validation has only just checked these tickets.
+    Re-check every ticket in one list every interval_seconds, moving each
+    to wherever its check now says it belongs (_revalidate_shared_list).
+    Read-only pings, same as the fleet polls, so deliberately NOT gated on
+    automated_tasks_paused(). The first pass waits (by default one full
+    interval): the startup validation has only just checked these tickets.
+
+    Up Steady: so a unit that drops after startup leaves Up Steady (and its
+    green LED) on its own — caught live 2026-10-08: RD3073 sat green while
+    the hourly recovery-email check already knew it was down.
+    Down Full (Andrew's request, 2026-10-13): the mirror — units that came
+    back sat red in Down Full until someone hit Revalidate. One that moves
+    to Up Steady also gets its cell/power check (see
+    _recheck_power_vs_cell_for_units).
     """
-    _shared_console_print(
-        f"Up Steady re-check: every {UP_STEADY_REVALIDATE_SECONDS // 60} minutes"
-    )
+    _shared_console_print(f"{label}: every {interval_seconds // 60} minutes")
+    time.sleep(interval_seconds if first_delay_seconds is None else first_delay_seconds)
     while True:
-        time.sleep(UP_STEADY_REVALIDATE_SECONDS)
         try:
-            result, status = _revalidate_shared_list(
-                "false_positives", scheduled=True, reason="Up Steady re-check"
-            )
+            result, status = _revalidate_shared_list(list_id, scheduled=True, reason=label)
             if status == 409:
-                _shared_console_print(f"Up Steady re-check skipped — {result['error']}")
+                _shared_console_print(f"{label} skipped — {result['error']}")
         except Exception as exc:
-            _shared_console_print(f"Up Steady re-check failed: {exc}")
+            _shared_console_print(f"{label} failed: {exc}")
+        time.sleep(interval_seconds)
 
 
 # Recovery-email statuses that mean the check found the unit NOT back up.
@@ -3943,6 +4031,43 @@ def _revalidate_up_steady_from_email_check(by_unit):
         _shared_console_print(
             f"Up Steady re-check for {', '.join(targets)} skipped — {result['error']} "
             "(the 30-minute re-check will catch them)"
+        )
+
+
+# Recovery-email statuses that mean the check found the unit back up.
+RECOVERY_EMAIL_UP_STATUSES = ("needs_recovery_email", "potential_false_positive")
+
+def _revalidate_down_full_from_email_check(by_unit):
+    """
+    The mirror of _revalidate_up_steady_from_email_check. Nothing re-pings
+    Down Full after startup, so a unit that came back sat red there while
+    the hourly email check already had it as "Recovery email needed"
+    (RD3064/RD3184/RD3518, 2026-10-13). Re-check just those tickets; the
+    email check is only the trigger, revalidate_list_entry decides placement.
+    """
+    job = stream_jobs.get(SHARED_ISSUES_JOB_ID)
+    if not by_unit or job is None or job.get("results") is None:
+        return
+    up = {
+        unit for unit, info in by_unit.items()
+        if info.get("status") in RECOVERY_EMAIL_UP_STATUSES
+    }
+    with job["state_lock"]:
+        in_down_full = {
+            str(item.get("unit") or "").strip().upper()
+            for item in (job["results"].get("truly_down") or [])
+        }
+    targets = sorted(up & in_down_full)
+    if not targets:
+        return
+    result, status = _revalidate_shared_list(
+        "truly_down", only_units=targets, scheduled=True,
+        reason="Recovery email check found " + ", ".join(targets) + " up — re-checking",
+    )
+    if status == 409:
+        _shared_console_print(
+            f"Down Full re-check for {', '.join(targets)} skipped — {result['error']} "
+            "(the next hourly email check will retry)"
         )
 
 @app.route("/issues/validate-stale-vpn/<unit>", methods=["POST"])
@@ -4414,11 +4539,23 @@ def _start_arizona_validation_scheduler():
         )
         erp_poll_thread.start()
         # Read-only pings, so always on like the fleet polls — see
-        # _revalidate_up_steady_loop.
+        # _revalidate_list_loop. Down Full starts half an interval later so
+        # the two passes don't collide on the shared poll lock (a collision
+        # just skips that pass).
         threading.Thread(
-            target=_revalidate_up_steady_loop,
+            target=_revalidate_list_loop,
+            args=("false_positives", "Up Steady re-check", UP_STEADY_REVALIDATE_SECONDS),
             daemon=True,
             name="up-steady-revalidate",
+        ).start()
+        threading.Thread(
+            target=_revalidate_list_loop,
+            args=(
+                "truly_down", "Down Full re-check", DOWN_FULL_REVALIDATE_SECONDS,
+                DOWN_FULL_REVALIDATE_SECONDS + UP_STEADY_REVALIDATE_SECONDS // 2,
+            ),
+            daemon=True,
+            name="down-full-revalidate",
         ).start()
         # Also always-on regardless of PAUSE_AUTOMATED_TASKS — see
         # _run_scheduled_erp_ticket_project_pull's own comment.
@@ -4504,6 +4641,9 @@ _recovery_email_status_cache = {
     "checked_at": None,
     "error": None,
     "running": False,
+    # Bumped on every change (each check, each validation correction);
+    # /issues/state carries it so open pages re-read the cache when it moves.
+    "rev": 0,
 }
 _recovery_email_status_lock = threading.Lock()
 
@@ -4531,6 +4671,7 @@ def _run_recovery_email_status_check(download_if_missing=True):
             _recovery_email_status_cache["by_unit"] = by_unit
             _recovery_email_status_cache["checked_at"] = time.time()
             _recovery_email_status_cache["error"] = None
+            _recovery_email_status_cache["rev"] += 1
     if error:
         print(f"[{when}] Recovery email status check failed: {error}")
     else:
@@ -4547,7 +4688,40 @@ def _run_recovery_email_status_check(download_if_missing=True):
             _revalidate_up_steady_from_email_check(by_unit)
         except Exception as exc:
             print(f"[{when}] Up Steady re-check after the email check failed: {exc}")
+        try:
+            _revalidate_down_full_from_email_check(by_unit)
+        except Exception as exc:
+            print(f"[{when}] Down Full re-check after the email check failed: {exc}")
     return True
+
+
+def _apply_validation_to_recovery_email_status(unit, category):
+    """
+    Re-sort one unit's cached email status from a validation that just
+    pinged it, so a unit the hourly check caught mid-blip doesn't say
+    "Outage email needed" for the rest of the hour (RD1020, 2026-10-09).
+    The next hourly check replaces this with its own fresh answer.
+    """
+    unit_key = str(unit or "").strip().upper()
+    if not unit_key or not category:
+        return
+    with _recovery_email_status_lock:
+        info = (_recovery_email_status_cache.get("by_unit") or {}).get(unit_key)
+        new_status = work_tool.recovery_email_status_after_validation(info, category)
+        if not new_status or new_status == info.get("status"):
+            return
+        updated = dict(info)
+        updated["status"] = new_status
+        updated["previous_status"] = info.get("status")
+        updated["revalidated_at"] = time.time()
+        by_unit = dict(_recovery_email_status_cache["by_unit"])
+        by_unit[unit_key] = updated
+        _recovery_email_status_cache["by_unit"] = by_unit
+        _recovery_email_status_cache["rev"] += 1
+    _shared_console_print(
+        f"Recovery email status for {unit_key}: {info.get('status')} -> {new_status} "
+        f"(validation found {category.replace('_', ' ')})"
+    )
 
 
 @app.route("/issues/recovery-email-status", methods=["GET"])
@@ -4815,7 +4989,9 @@ def _run_due_shading_snapshot_tasks():
         verify_mode = task.get("verify_mode") or "dip"
         retarget_hour = None
         try:
-            if verify_mode == "compressed_window":
+            # A "cutoff" (recurring daily cliff) is verified the same way:
+            # near its edge, is output still down vs the last few hours' peak?
+            if verify_mode in ("compressed_window", "cutoff"):
                 is_dip, detail, _current_watts, _reference_watts = work_tool.verify_compressed_window_dip_now(
                     unit, subject,
                     task.get("window_start_minutes_utc"), task.get("window_end_minutes_utc"),

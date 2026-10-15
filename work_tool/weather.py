@@ -1429,6 +1429,199 @@ def detect_compressed_daylight_window(site_id, victron_token, days=21):
     return True, detail, confidence, window
 
 
+# RECURRING_CUTOFF_V1 (2026-10-13, RD3401/MU8083): an obstruction that cuts
+# off one side of the day — sun normal all morning, then a building or tree
+# takes the panels at ~2:10pm local every afternoon. All three checks above
+# miss it: it's in detect_solar_shading's baseline, the productive window is
+# 5h45m (too wide for COMPRESSED_WINDOW_V1), and no productive hour follows
+# the cliff for detect_persistent_obstruction to compare against.
+#
+# The catch is that a full battery makes the same shape: the charger backs
+# off and PV drops ~85% in one step, at about the same time each day. Of 32
+# trailers sampled live that day, 11 had a 30-minute fall of 80%+ of peak;
+# MU9007's sat at 21:24 UTC daily with SOC 98-100% (charger in float, not
+# shade). RD3401's sat at 21:09 UTC daily while SOC drained 91% -> 19% —
+# the charger had every reason to keep taking power, the sun just wasn't
+# there. So only days where the battery was clearly NOT full at the cliff
+# count, and a trailer with no SOC series is never flagged by this.
+_CUTOFF_DROP_RATIO = 0.70          # fall across 30 min, as a fraction of the day's peak
+_CUTOFF_STAYS_DOWN_RATIO = 0.35    # the next 2h never recover past this fraction
+_CUTOFF_MAX_SOC = 90               # SOC (%) at the cliff must be under this
+_CUTOFF_CLUSTER_MINUTES = 30       # a day's cliff within this of the median counts as "same time"
+_CUTOFF_MIN_DAYS = 4
+_CUTOFF_MIN_DAY_FRACTION = 0.60    # of days the battery was under _CUTOFF_MAX_SOC at that time
+
+
+def _vrm_pv_and_soc_points(site_id, victron_token, days=21):
+    """
+    15-minute PVP plus battery SOC ("bs") in one /stats call, for
+    detect_recurring_cutoff. Returns (pv_points, soc_by_ts) where pv_points
+    is a list of (timestamp_ms, watts) and soc_by_ts maps timestamp_ms to
+    percent, or (None, None) on any failure.
+    """
+    end = int(time.time())
+    try:
+        response = requests.get(
+            f"https://vrmapi.victronenergy.com/v2/installations/{site_id}/stats",
+            headers={"idSite": str(site_id), "X-Authorization": f"Token {victron_token}"},
+            params=[
+                ("type", "custom"), ("start", end - days * 24 * 3600), ("end", end),
+                ("interval", "15mins"), ("attributeCodes[]", "PVP"), ("attributeCodes[]", "bs"),
+            ],
+            timeout=60,
+        )
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return None, None
+    if not payload.get("success"):
+        return None, None
+    records = payload.get("records") or {}
+    pv_points = [
+        (p[0], p[1]) for p in (records.get("PVP") or [])
+        if isinstance(p, list) and len(p) > 1 and p[1] is not None
+    ]
+    soc_by_ts = {
+        p[0]: p[1] for p in (records.get("bs") or [])
+        if isinstance(p, list) and len(p) > 1 and p[1] is not None
+    }
+    return (pv_points or None), soc_by_ts
+
+
+def _find_recurring_cutoff(pv_points, soc_by_ts):
+    """
+    Pure logic half of detect_recurring_cutoff. pv_points are chronological
+    15-minute (timestamp_ms, watts); soc_by_ts maps the same timestamps to
+    battery SOC %. Returns None when nothing qualifies, else a dict with
+    the cluster's median cliff minute-of-day (UTC), the qualifying days,
+    how many days were eligible (battery under _CUTOFF_MAX_SOC at that
+    time), and the latest cliff's own timestamps.
+    """
+    by_day = {}
+    for t, v in sorted(pv_points or []):
+        by_day.setdefault(datetime.utcfromtimestamp(t / 1000).date(), []).append((t, v))
+
+    def minute_of_day(t):
+        dt = datetime.utcfromtimestamp(t / 1000)
+        return dt.hour * 60 + dt.minute
+
+    def soc_near(points, k):
+        for index in (k, k + 1, k - 1):
+            if 0 <= index < len(points) and points[index][0] in soc_by_ts:
+                return soc_by_ts[points[index][0]]
+        return None
+
+    usable = {}   # day -> (points, peak)
+    cliffs = []   # (day, minute_of_day, drop, soc, cliff_ts, after_ts)
+    for day, points in by_day.items():
+        peak = max(v for _, v in points)
+        if peak < _SHADE_MIN_PRODUCTIVE_TYPICAL_WATTS:
+            continue
+        usable[day] = (points, peak)
+        best = None
+        for k in range(len(points) - 2):
+            drop = (points[k][1] - points[k + 2][1]) / peak
+            if drop < _CUTOFF_DROP_RATIO:
+                continue
+            after = max(v for _, v in points[k + 2:k + 10]) / peak
+            if after > _CUTOFF_STAYS_DOWN_RATIO:
+                continue
+            if best is None or drop > best[0]:
+                best = (drop, k)
+        if best is None:
+            continue
+        drop, k = best
+        soc = soc_near(points, k)
+        if soc is None or soc >= _CUTOFF_MAX_SOC:
+            continue
+        cliffs.append((day, minute_of_day(points[k][0]), drop, soc, points[k][0], points[k + 2][0]))
+    if len(cliffs) < _CUTOFF_MIN_DAYS:
+        return None
+
+    from statistics import median
+    center = median(c[1] for c in cliffs)
+    cluster = [c for c in cliffs if abs(c[1] - center) <= _CUTOFF_CLUSTER_MINUTES]
+    if len(cluster) < _CUTOFF_MIN_DAYS:
+        return None
+
+    # Eligible: a usable day whose battery was under the SOC bar at the
+    # cluster's time — i.e. a day the cliff SHOULD have shown up if it's a
+    # real obstruction. Full-battery days say nothing either way.
+    eligible = 0
+    for points, _peak in usable.values():
+        nearest = min(range(len(points)), key=lambda i: abs(minute_of_day(points[i][0]) - center))
+        soc = soc_near(points, nearest)
+        if soc is not None and soc < _CUTOFF_MAX_SOC:
+            eligible += 1
+    eligible = max(eligible, len(cluster))
+    if len(cluster) / eligible < _CUTOFF_MIN_DAY_FRACTION:
+        return None
+
+    latest = max(cluster, key=lambda c: c[0])
+    return {
+        "edge_minutes_utc": int(center),
+        "days": len(cluster),
+        "eligible_days": eligible,
+        "avg_drop": sum(c[2] for c in cluster) / len(cluster),
+        "soc_range": (min(c[3] for c in cluster), max(c[3] for c in cluster)),
+        "latest_cliff_ts_ms": latest[4],
+        "latest_after_ts_ms": latest[5],
+    }
+
+
+def detect_recurring_cutoff(site_id, victron_token, days=21):
+    """
+    Looks for a sharp drop in solar output at the same time of day, day
+    after day, on days the battery was not full — a fixed obstruction that
+    takes the panels for the rest of the morning or afternoon. See
+    RECURRING_CUTOFF_V1 above for why the battery check is what separates
+    this from a charger going into float.
+
+    Validated against one real case so far (RD3401/MU8083) and one
+    full-battery counter-example (MU9007); treat the thresholds as
+    provisional. Only looks at falls, not a sharp morning rise.
+
+    Returns (found, detail, confidence, window) shaped like
+    detect_compressed_daylight_window's; window also carries
+    edge_minutes_utc (the cliff), which a snapshot task verifies against.
+    """
+    pv_points, soc_by_ts = _vrm_pv_and_soc_points(site_id, victron_token, days)
+    if not pv_points:
+        return None, "No solar-power history available", None, None
+    if not soc_by_ts:
+        return False, (
+            "No battery SOC history, so a daily solar cliff can't be told apart from the charger "
+            "backing off a full battery"
+        ), None, None
+    found = _find_recurring_cutoff(pv_points, soc_by_ts)
+    if not found:
+        return False, (
+            f"No same-time daily solar cliff on non-full-battery days in the last {days}d"
+        ), None, None
+
+    edge = found["edge_minutes_utc"]
+    edge_label = f"{edge // 60:02d}:{edge % 60:02d}"
+    after_dt = datetime.utcfromtimestamp(found["latest_after_ts_ms"] / 1000)
+    window = {
+        "start_ts_ms": found["latest_cliff_ts_ms"],
+        "end_ts_ms": found["latest_after_ts_ms"],
+        "hours_utc": [after_dt.hour],
+        # The first fully-shaded slot's hour: what a snapshot should aim at.
+        "worst_hour_utc": after_dt.hour,
+        "edge_minutes_utc": edge,
+    }
+    fraction = found["days"] / found["eligible_days"]
+    confidence = max(40, min(85, round(40 + fraction * 30 + min(1.0, found["days"] / 10) * 15)))
+    soc_low, soc_high = found["soc_range"]
+    detail = (
+        f"Solar output falls about {round(found['avg_drop'] * 100)}% of the day's peak within 30 minutes "
+        f"at about {edge_label} UTC and stays down, on {found['days']} of {found['eligible_days']} day(s) "
+        f"in the last {days}d when the battery wasn't full (SOC {round(soc_low)}-{round(soc_high)}% at "
+        f"the cliff), so it isn't the charger backing off. Consistent with a fixed obstruction "
+        f"blocking the sun from that time on."
+    )
+    return True, detail, confidence, window
+
+
 def verify_shading_dip_now(unit_key, subject_text, ceiling_days=21):
     """
     Pre-capture re-check for the shading-snapshot scheduler
@@ -2566,6 +2759,17 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
                 compressed_found, compressed_detail, compressed_confidence, compressed_window
             )
             source = "compressed_window"
+    # Neither sees a one-sided daily cliff (RECURRING_CUTOFF_V1) — one more
+    # VRM call, again only for units still reading clear.
+    if found is False:
+        cutoff_found, cutoff_detail, cutoff_confidence, cutoff_window = (
+            detect_recurring_cutoff(site_id, victron_token)
+        )
+        if cutoff_found:
+            found, detail, confidence, window = (
+                cutoff_found, cutoff_detail, cutoff_confidence, cutoff_window
+            )
+            source = "cutoff"
     window_label = None
     if window:
         # Arizona (MST), not each installation's own local time or plain
@@ -2619,6 +2823,10 @@ def _shading_status_for_site(unit_key, site_id, installation_name, vrm_last_seen
         end_dt = datetime.utcfromtimestamp(window["end_ts_ms"] / 1000)
         window_start_minutes_utc = start_dt.hour * 60 + start_dt.minute
         window_end_minutes_utc = end_dt.hour * 60 + end_dt.minute
+    elif window and source == "cutoff":
+        # verify_compressed_window_dip_now checks around window_end, so the
+        # cliff itself goes there: "still down vs the last few hours' peak".
+        window_start_minutes_utc = window_end_minutes_utc = window["edge_minutes_utc"]
 
     return {
         "unit": unit_key,

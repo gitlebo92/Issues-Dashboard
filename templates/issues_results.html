@@ -142,6 +142,10 @@
                     title="Run Find Camera for every unit in this report, one at a time">
                     Find All Cameras
                 </button>
+                <button type="button" id="camera_outage_report_dst_fix_all" class="toolbar-btn"
+                    title="Camera DST Fix on every PVE unit in this report, one at a time: DST off on each not-populating camera, reboot Scrypted, DST back how it was">
+                    DST Fix All
+                </button>
                 <span class="flap-report-db-stats" id="camera_outage_report_status"></span>
             </div>
             <ul id="camera_outage_report_list"><li class="empty">Click Refresh to load the camera outage report...</li></ul>
@@ -268,7 +272,7 @@
                 <span class="count" id="false_positives_count"></span>
                 <span class="complete-badge">Complete</span>
                 <button type="button" id="power_vs_cell_sweep_btn" class="list-revalidate-btn"
-                    title="SSH every Up Steady/Offline compute/Scrypted outage/Down Full unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Up Steady (Cell/Power)</button>
+                    title="SSH every Up Steady/Offline compute/Scrypted outage unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Up Steady (Cell/Power)</button>
             </h2>
             <ul id="false_positives"><li class="empty">Waiting...</li></ul>
             </div>
@@ -279,7 +283,7 @@
                 <span class="count" id="nuc_down_count"></span>
                 <span class="complete-badge">Complete</span>
                 <button type="button" id="power_vs_cell_sweep_btn_nuc" class="list-revalidate-btn"
-                    title="SSH every Up Steady/Offline compute/Scrypted outage/Down Full unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Offline Compute (Cell/Power)</button>
+                    title="SSH every Up Steady/Offline compute/Scrypted outage unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Offline Compute (Cell/Power)</button>
             </h2>
             <ul id="nuc_down"><li class="empty">Waiting...</li></ul>
             </div>
@@ -290,7 +294,7 @@
                 <span class="count" id="scrypted_outage_count"></span>
                 <span class="complete-badge">Complete</span>
                 <button type="button" id="power_vs_cell_sweep_btn_scrypted" class="list-revalidate-btn"
-                    title="SSH every Up Steady/Offline compute/Scrypted outage/Down Full unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Scrypted Outage (Cell/Power)</button>
+                    title="SSH every Up Steady/Offline compute/Scrypted outage unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Scrypted Outage (Cell/Power)</button>
             </h2>
             <ul id="scrypted_outage"><li class="empty">Waiting...</li></ul>
             </div>
@@ -318,8 +322,11 @@
                 Down Full
                 <span class="count" id="truly_down_count"></span>
                 <span class="complete-badge">Complete</span>
-                <button type="button" id="power_vs_cell_sweep_btn_truly_down" class="list-revalidate-btn"
-                    title="SSH every Up Steady/Offline compute/Scrypted outage/Down Full unit's switch to tell power outage from cell outage (see the Diagnostics submenu's own Power vs Cell Outage check)">Diagnose Down Full (Cell/Power)</button>
+                <!-- No cell/power button here: that check needs the switch
+                     reachable, so it can't work on a down unit. The list gets
+                     the normal Revalidate button instead (added in JS), and a
+                     ticket it moves to Up Steady gets the cell/power check
+                     run for it server-side. -->
             </h2>
             <ul id="truly_down"><li class="empty">Waiting...</li></ul>
             </div>

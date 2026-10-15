@@ -223,7 +223,7 @@ def _camera_target_for_ram_camera_name(name):
     text = str(name or "").strip().upper()
     if text == "FISHEYE":
         return "fisheye"
-    match = re.match(r"^C(\d)-", text)
+    match = re.match(r"^C(\d)-", text) or re.match(r"^CAMERA (\d)$", text)
     if match:
         return "camera" + match.group(1)
     return None
@@ -2200,6 +2200,46 @@ def fleet_camera_outage_report():
         })
     rows.sort(key=lambda r: r.get("clock") or 0)
     return rows, None
+def get_all_empty_folder_units():
+    """
+    Units on the Camera Outage Report whose Fisheye RAM folder is not
+    populating — just the unit codes, oldest alert first. Other cameras'
+    folders are ignored.
+
+        units = work_tool.get_all_empty_folder_units()
+
+    Runs the same per-unit Scrypted RAM-folder check as the report's Find
+    Camera button, one unit at a time, so it takes a while on a long list.
+    Only PVE units (>= 3300) are checked: a NUC unit has no RAM folders to
+    read. A unit whose check fails, or whose folders can't be matched to
+    camera names (Scrypted login failed), is skipped with a printed reason
+    rather than guessed at. Read-only. Raises RuntimeError if the Zabbix
+    report itself can't be fetched, so a failed fetch never looks like an
+    empty list.
+    """
+    rows, error = fleet_camera_outage_report()
+    if error:
+        raise RuntimeError(f"Camera Outage Report failed: {error}")
+    units = []
+    for row in rows or []:
+        unit = row.get("unit")
+        if not row.get("has_scrypted"):
+            print(f"{unit}: skipped - no Scrypted RAM folders on a NUC unit")
+            continue
+        info, error = scrypted_ram_folder_status(unit)
+        if error:
+            print(f"{unit}: skipped - {error}")
+            continue
+        fisheye = next(
+            (c for c in (info or {}).get("cameras") or [] if c.get("name") == "Fisheye"),
+            None,
+        )
+        if fisheye is None:
+            print(f"{unit}: skipped - no folder labelled Fisheye")
+            continue
+        if not fisheye.get("ok"):
+            units.append(unit)
+    return units
 def combined_power_infra_alerts():
     """
     Zabbix's active problems and VRM's active battery alarms, merged by

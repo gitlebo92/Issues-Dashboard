@@ -58,5 +58,49 @@ class SummarizeRecoveryEmailStatusTests(unittest.TestCase):
         self.assertEqual(work_tool.summarize_recovery_email_status([], [], [], [], []), {})
 
 
+class RecoveryEmailStatusAfterValidationTests(unittest.TestCase):
+    """A validation that re-pinged the unit re-sorts its email status (RD1020, 2026-10-09)."""
+
+    def after(self, status, category, has_outage=None):
+        info = {"status": status}
+        if has_outage is not None:
+            info["has_outage_email"] = has_outage
+        return work_tool.recovery_email_status_after_validation(info, category)
+
+    def test_no_emails_down_then_found_up_is_possible_false_positive(self):
+        self.assertEqual(self.after("needs_initial_email", "false_positives", False), "potential_false_positive")
+
+    def test_outage_sent_still_down_then_found_up_needs_recovery_email(self):
+        self.assertEqual(self.after("pending_recovery", "false_positives", True), "needs_recovery_email")
+
+    def test_found_down_after_looking_up(self):
+        self.assertEqual(self.after("potential_false_positive", "truly_down", False), "needs_initial_email")
+        self.assertEqual(self.after("needs_recovery_email", "truly_down", True), "pending_recovery")
+
+    def test_camera_or_speaker_outage_counts_as_up(self):
+        self.assertEqual(self.after("needs_initial_email", "camera_outage", False), "potential_false_positive")
+        self.assertEqual(self.after("needs_initial_email", "speaker_outage", False), "potential_false_positive")
+
+    def test_compute_down_is_pending_recovery(self):
+        self.assertEqual(self.after("needs_initial_email", "nuc_down", False), "pending_recovery")
+        self.assertEqual(self.after("needs_recovery_email", "scrypted_outage", True), "pending_recovery")
+
+    def test_up_to_date_and_unknown_units_are_left_alone(self):
+        self.assertIsNone(self.after("email_status_up_to_date", "truly_down", True))
+        self.assertIsNone(work_tool.recovery_email_status_after_validation(None, "false_positives"))
+        self.assertIsNone(self.after("needs_initial_email", "panel_issues", False))
+
+    def test_infers_outage_email_for_results_cached_before_the_flag(self):
+        self.assertEqual(self.after("needs_initial_email", "false_positives"), "potential_false_positive")
+        self.assertEqual(self.after("needs_recovery_email", "truly_down"), "pending_recovery")
+        # pending_recovery could be either, so without the flag it is left alone.
+        self.assertIsNone(self.after("pending_recovery", "false_positives"))
+
+    def test_summary_keeps_has_outage_email(self):
+        item = {"unit": "RD1020", "issue_id": "ISS-1", "url": "", "subject": "s", "has_outage_email": False}
+        by_unit = work_tool.summarize_recovery_email_status([], [item], [], [], [])
+        self.assertIs(by_unit["RD1020"]["has_outage_email"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

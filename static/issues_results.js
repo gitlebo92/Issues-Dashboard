@@ -2810,6 +2810,108 @@
                 });
         }
 
+        // Camera DST Fix (work_tool/camera_dst.py): DST off on every
+        // not-populating camera, qm reboot 101, wait for Scrypted, DST back
+        // to what it was. Streams into the console; the server finishes the
+        // fix even if this tab goes away, so nothing here can leave DST off.
+        // Shared by the per-unit menu item and the Camera Outage Report's
+        // DST Fix All.
+        const DST_FIX_RESULT_PREFIX = "__DST_FIX_RESULT__ ";
+        function runCameraDstFix(url, label, btn, idleLabel) {
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = "Fixing...";
+            }
+            statusEl.textContent = label + " running — see console...";
+            consoleLines.push(label + " starting...");
+            renderConsole(true);
+            let result = null;
+            function handleLine(line) {
+                if (line.indexOf(DST_FIX_RESULT_PREFIX) === 0) {
+                    try {
+                        result = JSON.parse(line.slice(DST_FIX_RESULT_PREFIX.length));
+                    } catch (ignore) {
+                        // Malformed sentinel — reported as unknown below.
+                    }
+                    return;
+                }
+                consoleLines.push(line);
+            }
+            return fetch(url, { method: "POST" })
+                .then(function (response) {
+                    if (!response.ok) {
+                        throw new Error("HTTP " + response.status);
+                    }
+                    if (!response.body || !response.body.getReader) {
+                        return response.text().then(function (text) {
+                            String(text || "").split(/\r?\n/).forEach(function (line) {
+                                if (line) {
+                                    handleLine(line);
+                                }
+                            });
+                            renderConsole(true);
+                        });
+                    }
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+                    function readChunk() {
+                        return reader.read().then(function (chunk) {
+                            if (chunk.done) {
+                                if (buffer) {
+                                    handleLine(buffer);
+                                }
+                                renderConsole(true);
+                                return;
+                            }
+                            buffer += decoder.decode(chunk.value, { stream: true });
+                            const parts = buffer.split(/\r?\n/);
+                            buffer = parts.pop() || "";
+                            parts.forEach(function (line) {
+                                if (line) {
+                                    handleLine(line);
+                                }
+                            });
+                            renderConsole(true);
+                            return readChunk();
+                        });
+                    }
+                    return readChunk();
+                })
+                .then(function () {
+                    let message;
+                    let kind;
+                    if (!result) {
+                        message = label + " ended without a result — check the console and the unit's camera DST settings";
+                        kind = "error";
+                    } else if (result.counts) {
+                        const c = result.counts;
+                        message = label + ": " + c.fixed + " fixed, " + c.nothing + " already populating, "
+                            + c.skipped + " skipped, " + c.failed + " failed";
+                        kind = c.failed ? "error" : "success";
+                    } else {
+                        message = result.message || (label + " finished");
+                        kind = result.status === "failed" ? "error" : (result.status === "fixed" ? "success" : "info");
+                    }
+                    statusEl.textContent = message;
+                    notify(message, kind);
+                })
+                .catch(function (error) {
+                    const message = label + " lost its connection: " + (error.message || error)
+                        + " — the server still finishes the fix; watch the console or check the unit";
+                    consoleLines.push(message);
+                    renderConsole(true);
+                    statusEl.textContent = message;
+                    notifyError(message);
+                })
+                .finally(function () {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = idleLabel;
+                    }
+                });
+        }
+
         function appendScryptedLinuxMenuItems(scryptedLinuxMenu, entry) {
             const checkPatchBtn = document.createElement("button");
             checkPatchBtn.type = "button";
@@ -3208,6 +3310,31 @@
                     entry,
                     { confirmMessage: "This will reboot the entire PVE host on " + entry.unit + ", taking every VM on it down briefly." }
                 );
+
+                const dstFixBtn = document.createElement("button");
+                dstFixBtn.type = "button";
+                dstFixBtn.className = "action-btn";
+                dstFixBtn.textContent = "Camera DST Fix";
+                dstFixBtn.title = "For each camera whose RAM folder isn't populating: turn DST off, reboot Scrypted, "
+                    + "then put DST back how it was (Dahua cameras only)";
+                dstFixBtn.addEventListener("click", function () {
+                    openGenericConfirmModal(
+                        "Camera DST Fix?",
+                        "This checks " + entry.unit + "'s camera RAM folders. If any aren't populating, it turns DST off "
+                            + "on those cameras, reboots the Scrypted VM (recording/streaming stop for a few minutes), "
+                            + "then sets DST back to what it was. Nothing changes if every folder is populating.",
+                        "Run DST Fix",
+                        function () {
+                            runCameraDstFix(
+                                "/issues/camera-dst-fix-stream/" + encodeURIComponent(entry.unit),
+                                "Camera DST Fix " + entry.unit,
+                                dstFixBtn,
+                                "Camera DST Fix"
+                            );
+                        }
+                    );
+                });
+                powerActionsMenu.appendChild(dstFixBtn);
             }
 
             const securityFixBtn = document.createElement("button");
@@ -5158,6 +5285,9 @@
             if (checkedText) {
                 lines.push(checkedText);
             }
+            if (info.revalidated_at) {
+                lines.push(recoveryEmailRevalidatedText(info));
+            }
             if (errorText) {
                 lines.push(errorText + " — showing the last good result.");
             }
@@ -5186,6 +5316,17 @@
         // suffix (! / ?) says which state it is, so it never rests on colour.
         // Click opens the ERP ticket the email belongs on, which is the ART
         // report's ticket and not always the row's own (RD3083, 2026-10-06).
+        // "Updated by Validate at <time>" when a validation re-sorted this
+        // unit after the hourly check (see noteRecoveryEmailStatusRev).
+        function recoveryEmailRevalidatedText(info) {
+            if (!info || !info.revalidated_at) {
+                return "";
+            }
+            return "Updated by a validation at "
+                + new Date(info.revalidated_at * 1000).toLocaleTimeString()
+                + " (the hourly check had it as " + String(info.previous_status || "").replace(/_/g, " ") + ")";
+        }
+
         const RECOVERY_EMAIL_ROW_GLYPH = {
             needs_initial_email: { text: "✉!", tier: "danger" },
             needs_recovery_email: { text: "✉", tier: "warn" },
@@ -5225,6 +5366,9 @@
             if (recoveryEmailRowStatus.checked_at) {
                 lines.push("Checked " + new Date(recoveryEmailRowStatus.checked_at * 1000).toLocaleString() + " (runs hourly)");
             }
+            if (info.revalidated_at) {
+                lines.push(recoveryEmailRevalidatedText(info));
+            }
             lines.push(info.url ? "(click to open that ticket in ERP)" : "(click to open the unit)");
             el.title = lines.join("\n");
         }
@@ -5237,6 +5381,33 @@
                 });
         }
         pollRecoveryEmailStatusForRows();
+
+        // The shared-state poll carries the cache's revision, which moves on
+        // each hourly check and whenever a validation corrects a unit (RD1020,
+        // 2026-10-09: Validate found it up, the report still said "Outage
+        // email needed"). Re-read then, so rows, the report and the modal
+        // follow within a poll instead of the 5-minute row poll.
+        let recoveryEmailStatusRev = null;
+        function noteRecoveryEmailStatusRev(rev) {
+            if (typeof rev !== "number") {
+                return;
+            }
+            const changed = recoveryEmailStatusRev !== null && rev !== recoveryEmailStatusRev;
+            recoveryEmailStatusRev = rev;
+            if (!changed) {
+                return;
+            }
+            fetchRecoveryEmailStatus()
+                .then(function (data) {
+                    if (recoveryEmailReportLoaded) {
+                        renderRecoveryEmailReport(data);
+                    }
+                    if (graphsModal.classList.contains("is-open") && graphsUnit) {
+                        renderGraphsEmailStatus(graphsUnit, data);
+                    }
+                })
+                .catch(function () {});
+        }
 
         function stopGraphsEmailPoll() {
             if (graphsEmailPollTimer) {
@@ -8973,8 +9144,10 @@
         // in-flight sweep rather than three independent ones.
         (function wirePowerVsCellSweepButtons() {
             const btns = [
+                // Down Full has none: the check needs the switch reachable,
+                // so its list gets Revalidate instead (2026-10-13).
                 "power_vs_cell_sweep_btn", "power_vs_cell_sweep_btn_nuc",
-                "power_vs_cell_sweep_btn_scrypted", "power_vs_cell_sweep_btn_truly_down",
+                "power_vs_cell_sweep_btn_scrypted",
             ]
                 .map(function (id) { return document.getElementById(id); })
                 .filter(Boolean);
@@ -8998,7 +9171,7 @@
                     }
                     inFlight = true;
                     setBusy(true);
-                    statusEl.textContent = "Diagnosing Up Steady / Offline compute / Scrypted outage / Down Full units (cell/power)...";
+                    statusEl.textContent = "Diagnosing Up Steady / Offline compute / Scrypted outage units (cell/power)...";
                     fetch("/issues/fleet-power-vs-cell-outage")
                         .then(function (response) {
                             return response.json().then(function (data) {
@@ -9857,9 +10030,6 @@
                             individualWrap.appendChild(cameraBtn);
                             appendLongPingCameraButton(individualWrap, entry, camera);
 
-                            if (camera.target === "fisheye") {
-                                return;
-                            }
                             // Fires the camera's OWN test-email action
                             // against whatever SMTP settings are already
                             // configured on it (Settings > Network >
@@ -9869,10 +10039,9 @@
                             // sendTestMail, verified live 2026-09-17);
                             // Hikvision isn't wired up yet and the server
                             // says so plainly rather than silently
-                            // failing. Fisheye excluded (see
-                            // start_camera_test_email_loop) — its RPC
-                            // port refused the connection live, unlike
-                            // Camera 1-4 on the same unit/run.
+                            // failing. Fisheye included: its refused RPC
+                            // calls were a stale port cache, not the
+                            // fisheye (see start_camera_test_email_loop).
                             const testEmailBtn = document.createElement("button");
                             testEmailBtn.type = "button";
                             testEmailBtn.className = "action-btn";
@@ -12303,6 +12472,27 @@
             cameraOutageReportFindAllBtn.addEventListener("click", runCameraOutageFindAll);
         }
 
+        const cameraOutageReportDstFixAllBtn = document.getElementById("camera_outage_report_dst_fix_all");
+        if (cameraOutageReportDstFixAllBtn) {
+            cameraOutageReportDstFixAllBtn.addEventListener("click", function () {
+                openGenericConfirmModal(
+                    "DST Fix All?",
+                    "This runs Camera DST Fix on every PVE unit with the camera outage alert open, one unit at a time. "
+                        + "Each unit with a not-populating camera gets its Scrypted VM rebooted (a few minutes without "
+                        + "recording/streaming). Units another tech has busy are skipped. A long list can take an hour.",
+                    "Run DST Fix All",
+                    function () {
+                        runCameraDstFix(
+                            "/issues/camera-dst-fix-all-stream",
+                            "DST Fix All",
+                            cameraOutageReportDstFixAllBtn,
+                            "DST Fix All"
+                        );
+                    }
+                );
+            });
+        }
+
         if (flapReportRefreshBtn) {
             flapReportRefreshBtn.addEventListener("click", loadFlapReport);
         }
@@ -13343,7 +13533,7 @@
                 const pill = document.createElement("span");
                 pill.className = "graphs-chip is-" + display.tier;
                 pill.textContent = display.text;
-                pill.title = display.detail;
+                pill.title = [display.detail, recoveryEmailRevalidatedText(info)].filter(Boolean).join("\n");
                 body.appendChild(pill);
             }
             if (info.url) {
@@ -18520,6 +18710,7 @@
                     handleSharedEvents(data.events);
                     serverEventCursor = data.cursor || serverEventCursor;
                     applyResolvedStats(data.resolved_today);
+                    noteRecoveryEmailStatusRev(data.email_status_rev);
                     if (data.results) {
                         const nextRunId = data.validation_run_id || "";
                         const runChanged = !!(

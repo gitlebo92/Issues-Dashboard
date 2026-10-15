@@ -1451,6 +1451,67 @@ class FleetVrmFreshnessInactiveFilter(unittest.TestCase):
         self.assertEqual(units, ["MU1001", "MU1003"])
 
 
+def _cutoff_day(day_index, peak=410, cliff_slot=84, soc=50):
+    """
+    One synthetic 15-minute day shaped like RD3401/MU8083 (2026-10): a
+    gradual morning ramp from 14:00 UTC, then a hard cliff starting the
+    slot before cliff_slot (84 -> falls from 20:45 UTC) that stays down. Returns (pv_points, soc_by_ts).
+    """
+    base = 1790000000000 - (1790000000000 % 86400000) + day_index * 86400000
+    pv, soc_map = [], {}
+    for slot in range(56, 96):  # 14:00-23:45 UTC
+        t = base + slot * 15 * 60 * 1000
+        if slot < cliff_slot:
+            value = peak * min(1.0, (slot - 55) / 20)
+        elif slot == cliff_slot:
+            value = peak * 0.5  # mid-fall reading
+        else:
+            value = peak * 0.08
+        pv.append((t, value))
+        soc_map[t] = soc
+    return pv, soc_map
+
+
+def _cutoff_days(socs, cliff_slot=84):
+    pv, soc_map = [], {}
+    for i, soc in enumerate(socs):
+        day_pv, day_soc = _cutoff_day(i, cliff_slot=cliff_slot, soc=soc)
+        pv += day_pv
+        soc_map.update(day_soc)
+    return pv, soc_map
+
+
+class RecurringCutoff(unittest.TestCase):
+    def test_daily_cliff_while_battery_drains_is_found(self):
+        # RD3401: same afternoon cliff every day while SOC drains.
+        pv, soc = _cutoff_days([88, 80, 70, 60, 50, 40, 30, 20])
+        found = work_tool._find_recurring_cutoff(pv, soc)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["edge_minutes_utc"], 20 * 60 + 45)
+        self.assertEqual(found["days"], 8)
+
+    def test_same_cliff_with_full_battery_is_charger_float_not_shade(self):
+        # MU9007: identical shape, SOC 98-100% — the charger backing off.
+        pv, soc = _cutoff_days([98, 99, 100, 98, 99, 100, 98, 99])
+        self.assertIsNone(work_tool._find_recurring_cutoff(pv, soc))
+
+    def test_no_soc_history_is_never_flagged(self):
+        pv, _soc = _cutoff_days([50] * 8)
+        self.assertIsNone(work_tool._find_recurring_cutoff(pv, {}))
+
+    def test_cliff_at_a_different_time_each_day_is_not_recurring(self):
+        pv, soc = [], {}
+        for i, slot in enumerate((72, 76, 80, 84, 88, 92)):
+            day_pv, day_soc = _cutoff_day(i, cliff_slot=slot, soc=50)
+            pv += day_pv
+            soc.update(day_soc)
+        self.assertIsNone(work_tool._find_recurring_cutoff(pv, soc))
+
+    def test_too_few_days_is_not_enough(self):
+        pv, soc = _cutoff_days([50, 50, 50])
+        self.assertIsNone(work_tool._find_recurring_cutoff(pv, soc))
+
+
 class ResolveUnitWeatherCoords(unittest.TestCase):
     # get_unit_weather (live weather icons), unit_battery_weather_outlook
     # (single-unit Battery Outlook), and fleet_battery_outlook_status

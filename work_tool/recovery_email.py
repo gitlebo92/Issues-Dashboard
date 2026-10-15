@@ -63,6 +63,8 @@ def summarize_recovery_email_status(
                     "url": item.get("url") or "",
                     "subject": item.get("subject") or "",
                 }
+                if "has_outage_email" in item:
+                    info["has_outage_email"] = bool(item["has_outage_email"])
             else:
                 unit = str(item or "").strip().upper()
                 info = {"status": status, "issue_id": "", "url": "", "subject": ""}
@@ -98,3 +100,53 @@ def recovery_email_status_check(download_if_missing=True):
     if errors:
         return None, errors[0]
     return summarize_recovery_email_status(*results), None
+
+
+# What a validation found, in the email check's own terms. The check only
+# pings router -> compute -> Scrypted (_validate_unit_connectivity), so a
+# camera or speaker outage still counts as "back up" there.
+_VALIDATION_UP = ("false_positives", "camera_outage", "speaker_outage")
+_VALIDATION_DOWN = ("truly_down", "stale_vpn")
+_VALIDATION_PARTIAL = ("nuc_down", "scrypted_outage")
+
+# Statuses that rest on the ping; email_status_up_to_date doesn't.
+_PING_DEPENDENT_STATUSES = (
+    "needs_initial_email", "needs_recovery_email",
+    "potential_false_positive", "pending_recovery",
+)
+
+
+def recovery_email_status_after_validation(info, category):
+    """
+    The email status a unit should show once a validation has re-pinged it,
+    or None to leave it alone.
+
+    The hourly check pings each unit once; a slow cell link that misses that
+    one ping showed "Outage email needed" for an hour even after Validate
+    found the unit up (RD1020, 2026-10-09). This re-sorts the unit with the
+    check's own rules, using the emails the report says went out:
+
+        up:      outage email sent -> needs_recovery_email, else potential_false_positive
+        down:    outage email sent -> pending_recovery,     else needs_initial_email
+        partial (compute/Scrypted down, router up): pending_recovery
+    """
+    if not info or info.get("status") not in _PING_DEPENDENT_STATUSES:
+        return None
+    has_outage = info.get("has_outage_email")
+    if has_outage is None:
+        # Results cached before has_outage_email existed: infer it where the
+        # status says, give up where it doesn't (pending_recovery is either).
+        has_outage = {
+            "needs_recovery_email": True,
+            "needs_initial_email": False,
+            "potential_false_positive": False,
+        }.get(info.get("status"))
+    if category in _VALIDATION_PARTIAL:
+        return "pending_recovery"
+    if has_outage is None:
+        return None
+    if category in _VALIDATION_UP:
+        return "needs_recovery_email" if has_outage else "potential_false_positive"
+    if category in _VALIDATION_DOWN:
+        return "pending_recovery" if has_outage else "needs_initial_email"
+    return None

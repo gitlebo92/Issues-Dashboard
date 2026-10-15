@@ -18,6 +18,7 @@ work on the code without breaking a live NOC tool.
 | `work_tool/recovery_email.py` | Turns the Recovery Email Check's five lists into one email status per unit, for the Graphs modal's email pill. |
 | `work_tool/project_progress.py` | The Project Progress check: classifies each NOC project as NOC done (>= 83.3%, green), stalled (>10% and <82%, unchanged in ERP for over 2 days) or not started (<= 10%, same), and converts ERP's America/Boise timestamps by hand (no tzdata on the service). |
 | `work_tool/fd_cameras.py` | FD camera discovery from the unit's MikroTik router (SSH port 10000, read-only DHCP lease listing; cameras found by lease comment, cached 1 h / failures 5 min). This is the camera source for FD units everywhere: `list_unit_cameras` (Open Cameras, snapshots, grid, proxy, test emails) and Validate (Full) use it, falling back to the net sheet when the router can't be read. Router cameras are lowercase `fd:<name>` targets that `ping_camera` resolves; FD camera-outage tickets use them when the subject names a site camera, is generic, or names a number unique on the site. |
+| `work_tool/camera_dst.py` | The Camera DST Fix (Andrew's procedure, 2026-10-14): for every camera whose Scrypted RAM folder isn't populating (any camera, not just the fisheye), DST off -> `qm reboot 101` -> wait for Scrypted -> DST back to its **original** value, restored in a `finally`. Dahua + PVE units only; takes the per-unit lock itself and runs on a background thread so a closed tab can't leave DST off. Per-unit button under Power / Disruptive Actions; DST Fix All on the Camera Outage Report. |
 | `flask_endpoints.py` | Every HTTP route. There is no `app.py`. Routes stay thin and delegate into `work_tool`. |
 | `templates/issues_results.html` | The dashboard's markup, plus a small inline `<script>` that injects Jinja values (`jobId`, `erpWritesDisabled`, ...). |
 | `static/issues_results.js` | All dashboard JavaScript (~17k lines). This is where buttons and command menus live. |
@@ -53,11 +54,18 @@ work on the code without breaking a live NOC tool.
   The Up Steady re-check is another (Andrew's request, 2026-10-08):
   nothing else re-pings a ticket already on the board, so a unit that
   dropped after startup sat green in Up Steady. Every 30 minutes
-  (`UP_STEADY_REVALIDATE_SECONDS`) `_revalidate_up_steady_loop` runs the
-  same logic as the list's Revalidate button, and after each email check
-  `_revalidate_up_steady_from_email_check` re-checks right away any Up
-  Steady unit that check found down. Both go through
-  `_revalidate_shared_list`, so list placement has one rule.
+  (`UP_STEADY_REVALIDATE_SECONDS`) `_revalidate_list_loop` runs the
+  same logic as the list's Revalidate button; a second copy does the
+  same for Down Full (`DOWN_FULL_REVALIDATE_SECONDS`, 2026-10-13, offset
+  half an interval so the two don't collide on the poll lock). After each
+  email check `_revalidate_up_steady_from_email_check` re-checks right
+  away any Up Steady unit that check found down, and
+  `_revalidate_down_full_from_email_check` does the mirror for any Down
+  Full unit it found back up. All of them go through
+  `_revalidate_shared_list`, so list placement has one rule. A Down Full
+  ticket it moves to Up Steady also gets its cell/power check
+  (`_recheck_power_vs_cell_for_units`) — the scheduled cell/power sweep
+  skips Down Full, since the switch can't be reached while it's down.
   None of them start in sandbox at all though — their
   whole scheduler is skipped there (`WORK_TOOL_ENV != "sandbox"` at the
   `_start_arizona_validation_scheduler()` call sites), so this doesn't add

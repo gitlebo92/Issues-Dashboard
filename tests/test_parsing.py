@@ -501,6 +501,56 @@ class NoSiteMessage(unittest.TestCase):
         )
 
 
+class TicketSiteFallsBackToProject(unittest.TestCase):
+    """RD3557's RainDance ticket: no Site anywhere but its project's title."""
+
+    TICKET = "SC-RD3557-RainDance-20261014-17"
+    PROJECT = "PHX: NOC Deployment - RD3557 - RainDance Farms"
+
+    def setUp(self):
+        import work_tool._core as core
+        self.core = core
+        self._saved = {k: dict(v) for k, v in core._RECENT_PROJECT_SUBJECTS.items()}
+        for source in ("noc", "prep"):
+            core._remember_project_subjects(source, [])
+        core._SITE_ID_CACHE.clear()
+
+    def tearDown(self):
+        for source, saved in self._saved.items():
+            self.core._RECENT_PROJECT_SUBJECTS[source].clear()
+            self.core._RECENT_PROJECT_SUBJECTS[source].update(saved)
+        self.core._SITE_ID_CACHE.clear()
+
+    def _resolve(self, by_title):
+        def search(subject, prefer_status=None):
+            site_id = by_title.get(subject)
+            return ({"site_id": site_id}, None) if site_id else (None, "No Site found")
+        with mock.patch.object(self.core, "resolve_shield_site_id",
+                               return_value=("", "Component SC-RD3557 has no Site")), \
+             mock.patch.object(self.core, "find_erp_site_by_project_subject", side_effect=search):
+            return self.core.resolve_dashboard_site_id("RD3557", self.TICKET)
+
+    def test_project_title_names_the_site(self):
+        self.core._remember_project_subjects("noc", [{"subject": self.PROJECT}])
+        self.assertEqual(self._resolve({self.PROJECT: "70001"}), ("70001", None))
+
+    def test_prep_project_counts_too(self):
+        self.core._remember_project_subjects("prep", [{"subject": self.PROJECT}])
+        self.assertEqual(self._resolve({self.PROJECT: "70001"}), ("70001", None))
+
+    def test_other_units_projects_are_ignored(self):
+        other = "PHX: NOC Deployment - RD3558 - Elsewhere"
+        self.core._remember_project_subjects("noc", [{"subject": other}])
+        site_id, error = self._resolve({other: "70002"})
+        self.assertEqual(site_id, "")
+        self.assertIn("no open NOC/Prep project names RD3557", error)
+
+    def test_a_new_pull_replaces_the_old_one(self):
+        self.core._remember_project_subjects("noc", [{"subject": self.PROJECT}])
+        self.core._remember_project_subjects("noc", [])
+        self.assertEqual(self.core._recent_project_subjects_for_unit("rd3557"), [])
+
+
 class FuzedUnit(unittest.TestCase):
     """Fuzed = MU with no RD/FD head paired to it (e.g. MU1034): no fisheye."""
 
@@ -541,6 +591,72 @@ class FuzedUnit(unittest.TestCase):
         fisheye[5] = "10.0.0.5"
         with self._heads({}, error="ERP down"),                 mock.patch.object(self.core, "_net_row_for_unit", return_value=fisheye):
             self.assertFalse(work_tool.is_fuzed_unit("MU1035"))
+
+
+class CameraVendorProbe(unittest.TestCase):
+    """A Fuzed MU is only probably Hikvision — MU1041's cameras are Dahua."""
+
+    def setUp(self):
+        import work_tool._core as core
+        self.core = core
+
+    def test_login_pages(self):
+        hik = '<script>window.location.href = "./doc/page/login.asp?_" + 1;</script>'
+        dahua = '<script src="jsBase/lib/jquery.js?version=@WebVersion@"></script>'
+        self.assertEqual(work_tool.camera_vendor_from_login_page(hik), "hikvision")
+        self.assertEqual(work_tool.camera_vendor_from_login_page("", "/doc/page/login.asp"), "hikvision")
+        self.assertEqual(work_tool.camera_vendor_from_login_page(dahua), "dahua")
+        self.assertIsNone(work_tool.camera_vendor_from_login_page("<html>404</html>"))
+
+    def test_probe_overrides_mu_rule(self):
+        cameras = [{"target": "camera1", "host": "10.0.0.2", "port": 80}]
+        with mock.patch.object(self.core, "_probe_camera_vendor", return_value="dahua"):
+            self.assertFalse(work_tool.is_hikvision_unit("MU1041", cameras))
+            self.assertEqual(work_tool._camera_vendor("MU1041", cameras[0], cameras), "dahua")
+        with mock.patch.object(self.core, "_probe_camera_vendor", return_value=None):
+            self.assertTrue(work_tool.is_hikvision_unit("MU1034", cameras))
+            self.assertEqual(work_tool._camera_vendor("MU1034", cameras[0], cameras), "hikvision")
+
+    def test_heads_never_probe(self):
+        with mock.patch.object(self.core, "_probe_camera_vendor") as probe:
+            self.assertEqual(work_tool._camera_vendor("RD3076", {"host": "10.0.0.2"}, []), "dahua")
+            probe.assert_not_called()
+
+
+class PlaceholderEmails(unittest.TestCase):
+    def test_flags_dummy_addresses(self):
+        for email in ("jdoe@placeholderemail.com", "X@PlaceholderEmail.com",
+                      "a@fakeemail.com", "fakeemail123@gmail.com"):
+            self.assertTrue(work_tool._is_placeholder_email(email), email)
+
+    def test_keeps_real_addresses_and_non_emails(self):
+        for value in ("ops@customer.com", "", "Fakeemail Jones"):
+            self.assertFalse(work_tool._is_placeholder_email(value), value)
+
+    def test_strips_from_comma_list_cell(self):
+        self.assertEqual(
+            work_tool._strip_placeholder_emails(
+                "a@real.com, b@placeholderemail.com,c@fakeemail.com , d@real.org"
+            ),
+            "a@real.com, d@real.org",
+        )
+        self.assertEqual(work_tool._strip_placeholder_emails("x@fakeemail.com"), "")
+        self.assertEqual(work_tool._strip_placeholder_emails("602-555-0100"), "602-555-0100")
+
+
+class GetArtContacts(unittest.TestCase):
+    def test_returns_to_and_cc_lists(self):
+        info = {"to_emails": ["a@real.com"], "cc_emails": ["b@real.com", "c@real.org"]}
+        with mock.patch.object(work_tool._core, "get_art_site_contacts", return_value=(info, None)):
+            to, cc = work_tool.get_art_contacts("RD3401")
+        self.assertEqual(to, ["a@real.com"])
+        self.assertEqual(cc, ["b@real.com", "c@real.org"])
+
+    def test_lookup_failure_raises_instead_of_returning_empty(self):
+        with mock.patch.object(work_tool._core, "get_art_site_contacts",
+                               return_value=(None, "ART login failed — check myemail/mypass")):
+            with self.assertRaisesRegex(RuntimeError, "ART login failed"):
+                work_tool.get_art_contacts("RD3401")
 
 
 if __name__ == "__main__":

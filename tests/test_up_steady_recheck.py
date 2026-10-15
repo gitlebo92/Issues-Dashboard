@@ -95,5 +95,47 @@ class UpSteadyRecheck(unittest.TestCase):
         self.assertEqual(self.units("truly_down"), [])
 
 
+class DownFullRecheck(unittest.TestCase):
+    """Down Full re-check: a unit that's back moves to Up Steady and gets its cell/power check."""
+
+    # Same job fixture and helpers as UpSteadyRecheck, without re-running its tests.
+    setUp = UpSteadyRecheck.setUp
+    _check = UpSteadyRecheck._check
+    units = UpSteadyRecheck.units
+
+    def _down_full(self, *units):
+        self.job["results"]["false_positives"] = []
+        self.job["results"]["truly_down"] = [_ticket(u, f"ISS-{u}") for u in units]
+
+    def test_unit_back_up_moves_to_up_steady_and_gets_cell_power_check(self):
+        self._down_full("RD3064", "RD3330")
+        with self._check({"RD3330"}), \
+                mock.patch.object(fe, "_recheck_power_vs_cell_for_units") as recheck:
+            result, status = fe._revalidate_shared_list("truly_down", scheduled=True)
+        self.assertIsNone(status)
+        self.assertEqual(self.units("false_positives"), ["RD3064"])
+        self.assertEqual(self.units("truly_down"), ["RD3330"])
+        recheck.assert_called_once()
+        self.assertEqual(list(recheck.call_args.args[0]), ["RD3064"])
+
+    def test_up_steady_recheck_never_runs_cell_power_check(self):
+        with self._check(set()), \
+                mock.patch.object(fe, "_recheck_power_vs_cell_for_units") as recheck:
+            fe._revalidate_shared_list("false_positives", scheduled=True)
+        recheck.assert_not_called()
+
+    def test_email_check_rechecks_only_up_units_in_down_full(self):
+        self._down_full("RD3064", "RD3330")
+        by_unit = {
+            "RD3064": {"status": "needs_recovery_email"},  # up, in Down Full -> re-checked
+            "RD3330": {"status": "pending_recovery"},      # still down -> left alone
+        }
+        with self._check(set()) as check, \
+                mock.patch.object(fe, "_recheck_power_vs_cell_for_units"):
+            fe._revalidate_down_full_from_email_check(by_unit)
+        self.assertEqual([c.args[1]["unit"] for c in check.call_args_list], ["RD3064"])
+        self.assertEqual(self.units("false_positives"), ["RD3064"])
+
+
 if __name__ == "__main__":
     unittest.main()
